@@ -13,4 +13,5 @@ piet = { git = "https://github.com/linebender/piet", rev = "22210f03b8a2b203e2ad
 
 [profile.dev]
 opt-level = 2
+debug-assertions = false
 

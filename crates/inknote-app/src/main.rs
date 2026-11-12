@@ -307,7 +307,21 @@ impl InkNoteApp {
     fn build_static_mesh(&self, paper: egui::Rect) -> egui::epaint::Mesh {
         let view = self.view;
         let origin = view.origin(paper);
+        let mut n_verts = 0;
+        let mut n_indices = 0;
+        for s in self.doc.strokes() {
+            if let Some(c) = self.batch_cache.get(&s.id) {
+                if view.rect_to_screen(paper, c.bbox).intersects(paper) {
+                    for b in &c.batches {
+                        n_verts += b.vertices.len();
+                        n_indices += b.indices.len();
+                    }
+                }
+            }
+        }
         let mut mesh = egui::epaint::Mesh::default();
+        mesh.vertices.reserve(n_verts);
+        mesh.indices.reserve(n_indices);
         for s in self.doc.strokes() {
             let Some(c) = self.batch_cache.get(&s.id) else {
                 continue;
@@ -708,10 +722,14 @@ impl eframe::App for InkNoteApp {
 }
 
 fn main() -> eframe::Result {
+    let mut wgpu_options = eframe::egui_wgpu::WgpuConfiguration::default();
+    wgpu_options.surface.present_mode = eframe::egui_wgpu::wgpu::PresentMode::AutoNoVsync;
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("InkNote")
             .with_inner_size([1200.0, 800.0]),
+        wgpu_options,
         ..Default::default()
     };
     eframe::run_native(
