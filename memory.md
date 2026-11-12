@@ -20,9 +20,10 @@
   - Tạo `AGENTS.md`, `memory.md`, `HANDOFF.md` và tinh gọn `GEMINI.md`.
 
 ## Đang làm dở
-- **Bước 1.8 đã tối ưu hiệu năng và sửa drop FPS, chờ người dùng test lại** (chưa gắn tag `step-1.8-ok`):
-  - Tối ưu nét đang viết (`active`): chốt theo đợt 16 đoạn (`advance_active_committed`), mỗi khung chỉ tessellate phần đuôi ngắn (< 16 đoạn) + đầu bút modeler (giảm thời gian vẽ từ ~13ms xuống ~0.03ms).
-  - Tối ưu 2000 nét tĩnh: gom toàn bộ thành 1 `egui::epaint::Mesh` duy nhất và cache lại (`StaticKey`), khi đang viết nét mới hoặc không zoom/pan thì tái sử dụng trực tiếp (thời gian dựng mesh giảm từ ~16ms xuống ~0.001ms).
+- **Bước 1.8 đã tối ưu sâu hiệu năng (commit `be4089e`), chờ người dùng test lại** (chưa gắn tag `step-1.8-ok`):
+  - Tối ưu nét đang viết (`active`): chốt theo đợt 16 đoạn (`advance_active_committed`), mỗi khung chỉ tessellate phần đuôi ngắn (< 16 đoạn) + đầu bút modeler (giữ vững 144–146 FPS khi viết tay).
+  - Tối ưu 2000 nét tĩnh: gộp 1 `Mesh` duy nhất, thêm `reserve` trước khi gom (giảm 57% thời gian build mesh), nâng tolerance Lyon lên 0.5 (giảm thêm 25% đỉnh thừa xuống còn 334k vertices).
+  - Tối ưu GPU & VSync: chuyển `present_mode` sang `AutoNoVsync` (tránh cơ chế FIFO VSync tự động khoá tụt về 40 FPS), tắt `debug-assertions` trong profile dev để loại bỏ vòng lặp duyệt 1.73 triệu chỉ số tam giác trên CPU mỗi khung hình. Thời gian render khung giảm xuống còn 0.84ms (tương đương 1,190 FPS trên CPU).
   - Đã có tính năng zoom/kéo trang (`view.rs`), phím F9 tạo 2000 nét mẫu (`Command::AddStrokes`), hộp thoại xác nhận Clear Page.
 - `step-1.7-ok` đã gắn (người dùng xác nhận).
 
