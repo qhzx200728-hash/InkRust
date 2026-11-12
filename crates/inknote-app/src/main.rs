@@ -1,5 +1,11 @@
-// Ứng dụng InkNote (Bước 1.1 - 1.4): sử dụng trực tiếp code vẽ nét của Rnote từ `inknote-pen`
-// và bộ chia tam giác `lyon` từ `inknote-render`.
+// Ứng dụng InkNote (Bước 1.6 – Khung giao diện P0 theo docs/04-ui-spec.md):
+// - Khu vực 1: Thanh công cụ chính (Navigation Toolbar, nền xanh dương, nút đang chọn có ô nền sáng bo góc)
+// - Khu vực 2: Thanh tuỳ chọn công cụ (Contextual Tool Options Bar, nền tối bo tròn + Pop-up tối bo góc)
+// - Khu vực 3: Canvas chính với nền giấy chấm (Dotted Paper) và nét bút Rnote (`inknote-pen` + `inknote-render`)
+
+mod icons;
+mod theme;
+mod toolbar;
 
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
@@ -7,16 +13,22 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use inknote_pen::{
     Constraints, PenEvent, PenPath, Style,
-    brushconfig::{BrushConfig, BrushStyle},
+    brushconfig::BrushConfig,
     builders::{
         PenPathBuilderType, PenPathCurvedBuilder, PenPathModeledBuilder, PenPathSimpleBuilder,
         buildable::{Buildable, BuilderCreator, BuilderProgress},
     },
     penpath::{Element, Segment},
-    style::{Composer, PressureCurve},
+    style::Composer,
 };
 use inknote_render::{CairoRenderContext, DrawBatch};
 use parry2d_f64::math::Vector2;
+
+use crate::{
+    icons::draw_dotted_paper,
+    theme::Theme,
+    toolbar::{ActiveTool, ToolbarState, show_toolbars},
+};
 
 struct FinishedStroke {
     #[allow(dead_code)]
@@ -33,6 +45,8 @@ struct ActiveStroke {
 }
 
 struct InkNoteApp {
+    theme: Theme,
+    toolbar_state: ToolbarState,
     brush_config: BrushConfig,
     strokes: Vec<FinishedStroke>,
     active: Option<ActiveStroke>,
@@ -47,15 +61,18 @@ struct InkNoteApp {
     touch_active: bool,
     stylus_has_force: bool,
     stylus_mode: bool,
-    canvas_rect: Option<egui::Rect>,
+    paper_rect: Option<egui::Rect>,
     cur_pressure: f64,
     last_up_pressure: f64,
     last_source: &'static str,
 }
 
-impl Default for InkNoteApp {
-    fn default() -> Self {
+impl InkNoteApp {
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        theme::setup_fonts(&cc.egui_ctx);
         Self {
+            theme: Theme::default(),
+            toolbar_state: ToolbarState::default(),
             brush_config: BrushConfig::default(),
             strokes: Vec::new(),
             active: None,
@@ -66,10 +83,10 @@ impl Default for InkNoteApp {
             touch_active: false,
             stylus_has_force: false,
             stylus_mode: false,
-            canvas_rect: None,
+            paper_rect: None,
             cur_pressure: 0.0,
             last_up_pressure: 0.0,
-            last_source: "(chưa có)",
+            last_source: "Ready",
         }
     }
 }
@@ -93,13 +110,21 @@ impl InkNoteApp {
         self.base_instant + Duration::from_secs_f64(s)
     }
 
+    fn can_draw_at(&self, ctx: &egui::Context, pos: egui::Pos2) -> bool {
+        if self.toolbar_state.read_only || self.toolbar_state.active_tool != ActiveTool::Pen {
+            return false;
+        }
+        if egui::Popup::is_any_open(ctx) {
+            return false;
+        }
+        self.paper_rect.is_some_and(|r| r.contains(pos))
+    }
+
     fn pen_down(&mut self, pos: egui::Pos2, pressure: f64, now: Instant) {
         self.cur_pressure = pressure;
         let element = Element::new(Vector2::new(pos.x as f64, pos.y as f64), pressure);
 
         if let Some(active) = &mut self.active {
-            // Đang trong nét vẽ: giống hệt Rnote (rnote-engine/src/pens/brush.rs),
-            // sự kiện di chuyển khi đang nhấn bút vẫn là PenEvent::Down!
             let res = active.builder.handle_event(
                 PenEvent::Down {
                     element,
@@ -119,7 +144,6 @@ impl InkNoteApp {
                 }
             }
         } else {
-            // Bắt đầu nét mới
             self.brush_config.new_style_seeds();
             let style = self.brush_config.style_for_current_options();
             let path = PenPath::new(element);
@@ -204,32 +228,26 @@ impl eframe::App for InkNoteApp {
                     phase, pos, force, ..
                 } => {
                     self.stylus_mode = true;
-                    let in_canvas = self.canvas_rect.is_none_or(|r| r.contains(pos));
                     match phase {
                         egui::TouchPhase::Start => {
-                            if !in_canvas {
+                            if !self.can_draw_at(&ctx, pos) {
                                 continue;
                             }
                             self.touch_active = true;
                             self.stylus_has_force = force.is_some();
-                            // Trong winit trên Windows (normalize_pointer_pressure):
-                            // pressure 1..=1024 -> Some(p), còn pressure == 0 -> None.
                             let p = match force {
                                 Some(f) => (f as f64).clamp(0.0, 1.0),
                                 None => 0.0,
                             };
                             self.last_source = if force.is_some() {
-                                "BÚT WACOM (chạm)"
+                                "Wacom Stylus (Down)"
                             } else {
-                                "BÚT WACOM (chạm nhẹ p=0)"
+                                "Wacom Stylus (Touch p=0)"
                             };
                             let now = self.monotonic_instant(ev_secs);
                             self.pen_down(pos, p, now);
                         }
                         egui::TouchPhase::Move => {
-                            // QUAN TRỌNG: Khi bút Wacom lơ lửng (hover) trên không, Windows vẫn gửi
-                            // WM_POINTERUPDATE -> winit phát TouchPhase::Move.
-                            // Chỉ vẽ khi đầu bút ĐÃ chạm xuống mặt bảng (self.touch_active && self.active.is_some())!
                             if self.touch_active && self.active.is_some() {
                                 if force.is_some() {
                                     self.stylus_has_force = true;
@@ -238,16 +256,15 @@ impl eframe::App for InkNoteApp {
                                     Some(f) => (f as f64).clamp(0.0, 1.0),
                                     None => 0.0,
                                 };
-                                self.last_source = "BÚT WACOM (đang vẽ)";
+                                self.last_source = "Wacom Stylus (Drawing)";
                                 let now = self.monotonic_instant(ev_secs);
                                 self.pen_down(pos, p, now);
                             } else {
-                                self.last_source = "BÚT WACOM (lơ lửng / hover - không vẽ)";
+                                self.last_source = "Wacom Stylus (Hover)";
                             }
                         }
                         egui::TouchPhase::End | egui::TouchPhase::Cancel => {
                             if self.active.is_some() {
-                                // Trong winit, khi nhấc bút (pressure == 0), normalize_pointer_pressure trả về None.
                                 let p = match force {
                                     Some(f) => (f as f64).clamp(0.0, 1.0),
                                     None => 0.0,
@@ -266,10 +283,9 @@ impl eframe::App for InkNoteApp {
                     pressed,
                     ..
                 } if !self.touch_active && !self.stylus_mode => {
-                    let in_canvas = self.canvas_rect.is_none_or(|r| r.contains(pos));
-                    self.last_source = "CHUỘT (PRESSURE_DEFAULT = 0.5)";
+                    self.last_source = "Mouse (p=0.5)";
                     let now = self.monotonic_instant(ev_secs);
-                    if pressed && in_canvas {
+                    if pressed && self.can_draw_at(&ctx, pos) {
                         self.pen_down(pos, Element::PRESSURE_DEFAULT, now);
                     } else if !pressed && self.active.is_some() {
                         self.pen_up(pos, Element::PRESSURE_DEFAULT, now);
@@ -286,131 +302,71 @@ impl eframe::App for InkNoteApp {
         }
         self.prev_frame_t = frame_t;
 
-        egui::Panel::top("toolbar").show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Kiểu bút (BrushStyle):");
-                ui.selectable_value(&mut self.brush_config.style, BrushStyle::Solid, "Solid");
-                ui.selectable_value(&mut self.brush_config.style, BrushStyle::Marker, "Marker");
-                ui.selectable_value(
-                    &mut self.brush_config.style,
-                    BrushStyle::Textured,
-                    "Textured",
-                );
+        // Khu vực 1 & 2: Navigation Toolbar + Contextual Tool Options Bar
+        let wacom_status = format!(
+            "{} | p={:.3} | up_p={:.3} | strokes={}",
+            self.last_source,
+            self.cur_pressure,
+            self.last_up_pressure,
+            self.strokes.len()
+        );
+        let actions = show_toolbars(
+            ui,
+            &self.theme,
+            &mut self.toolbar_state,
+            &mut self.brush_config,
+            &wacom_status,
+        );
+        if actions.undo_clicked {
+            self.strokes.pop();
+        }
+        if actions.clear_clicked {
+            self.strokes.clear();
+        }
 
-                ui.separator();
-                ui.label("Bộ dựng nét (Builder):");
-                for (b, label) in [
-                    (PenPathBuilderType::Modeled, "Modeled (mặc định Rnote)"),
-                    (PenPathBuilderType::Curved, "Curved"),
-                    (PenPathBuilderType::Simple, "Simple"),
-                ] {
-                    if ui
-                        .selectable_label(
-                            std::mem::discriminant(&self.brush_config.builder_type)
-                                == std::mem::discriminant(&b),
-                            label,
-                        )
-                        .clicked()
-                    {
-                        self.brush_config.builder_type = b;
-                    }
-                }
-
-                ui.separator();
-                match self.brush_config.style {
-                    BrushStyle::Solid => {
-                        ui.label("Cỡ bút Solid:");
-                        ui.add(
-                            egui::Slider::new(&mut self.brush_config.solid_options.stroke_width, 0.5..=20.0)
-                                .text("px"),
-                        );
-                        ui.label("Đường cong lực (PressureCurve):");
-                        egui::ComboBox::from_id_salt("pcurve")
-                            .selected_text(format!("{:?}", self.brush_config.solid_options.pressure_curve))
-                            .show_ui(ui, |ui| {
-                                for c in [
-                                    PressureCurve::Const,
-                                    PressureCurve::Linear,
-                                    PressureCurve::Sqrt,
-                                    PressureCurve::Cbrt,
-                                    PressureCurve::Pow2,
-                                    PressureCurve::Pow3,
-                                ] {
-                                    if ui
-                                        .selectable_label(
-                                            std::mem::discriminant(
-                                                &self.brush_config.solid_options.pressure_curve,
-                                            ) == std::mem::discriminant(&c),
-                                            format!("{c:?}"),
-                                        )
-                                        .clicked()
-                                    {
-                                        self.brush_config.solid_options.pressure_curve = c;
-                                    }
-                                }
-                            });
-                    }
-                    BrushStyle::Marker => {
-                        ui.label("Cỡ bút Marker:");
-                        ui.add(
-                            egui::Slider::new(&mut self.brush_config.marker_options.stroke_width, 2.0..=40.0)
-                                .text("px"),
-                        );
-                    }
-                    BrushStyle::Textured => {
-                        ui.label("Cỡ bút Textured:");
-                        ui.add(
-                            egui::Slider::new(&mut self.brush_config.textured_options.stroke_width, 1.0..=30.0)
-                                .text("px"),
-                        );
-                    }
-                }
-
-                ui.separator();
-                if ui.button("Undo (Ctrl+Z)").clicked() {
-                    self.strokes.pop();
-                }
-                if ui.button("Xoá hết").clicked() {
-                    self.strokes.clear();
-                }
-            });
-
-            ui.horizontal(|ui| {
-                ui.label(format!(
-                    "Nguồn: {} | pressure hiện tại: {:.3} | pressure lúc nhấc bút cuối: {:.3} | số nét: {}",
-                    self.last_source,
-                    self.cur_pressure,
-                    self.last_up_pressure,
-                    self.strokes.len()
-                ));
-            });
-        });
-
-        // Phím tắt Ctrl+Z để Undo
+        // Phím tắt Ctrl+Z
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Z)) {
             self.strokes.pop();
         }
 
-        let central_frame = egui::Frame::central_panel(ui.style()).fill(egui::Color32::WHITE);
-        egui::CentralPanel::default().frame(central_frame).show(ui, |ui| {
-            self.canvas_rect = Some(ui.max_rect());
-            let painter = ui.painter();
+        // Khu vực 3: Main Canvas (trang giấy chấm Dotted Paper)
+        let workspace_frame =
+            egui::Frame::central_panel(ui.style()).fill(self.theme.workspace_bg);
+        egui::CentralPanel::default()
+            .frame(workspace_frame)
+            .show(ui, |ui| {
+                let avail = ui.max_rect();
+                let paper_rect = avail.shrink(self.theme.paper_margin);
+                self.paper_rect = Some(paper_rect);
 
-            // 1. Vẽ các nét đã hoàn thành
-            for s in &self.strokes {
-                Self::paint_batches(painter, &s.batches);
-            }
+                let painter = ui.painter().with_clip_rect(paper_rect);
 
-            // 2. Vẽ nét đang kéo (active): phần đã emit + phần dự đoán trong builder (giống Rnote)
-            if let Some(active) = &self.active {
-                self.render_cx.clear_batches();
-                active.path.draw_composed(&mut self.render_cx, &active.style);
-                active
-                    .builder
-                    .draw_styled(&mut self.render_cx, &active.style, 1.0);
-                Self::paint_batches(painter, &self.render_cx.batches);
-            }
-        });
+                // 1. Vẽ nền giấy trắng có chấm nhỏ đều nhau (Dotted Paper)
+                draw_dotted_paper(
+                    &painter,
+                    paper_rect,
+                    self.theme.paper_bg,
+                    self.theme.paper_border,
+                    self.theme.paper_dot_color,
+                    self.theme.paper_dot_spacing,
+                    self.theme.paper_dot_radius,
+                );
+
+                // 2. Vẽ các nét bút đã hoàn thành
+                for s in &self.strokes {
+                    Self::paint_batches(&painter, &s.batches);
+                }
+
+                // 3. Vẽ nét bút đang kéo (active)
+                if let Some(active) = &self.active {
+                    self.render_cx.clear_batches();
+                    active.path.draw_composed(&mut self.render_cx, &active.style);
+                    active
+                        .builder
+                        .draw_styled(&mut self.render_cx, &active.style, 1.0);
+                    Self::paint_batches(&painter, &self.render_cx.batches);
+                }
+            });
 
         ctx.request_repaint();
     }
@@ -419,13 +375,13 @@ impl eframe::App for InkNoteApp {
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("InkNote - Nét bút Rnote (GPLv3)")
-            .with_inner_size([1100.0, 750.0]),
+            .with_title("InkNote")
+            .with_inner_size([1200.0, 800.0]),
         ..Default::default()
     };
     eframe::run_native(
-        "InkNote - Nét bút Rnote (GPLv3)",
+        "InkNote",
         options,
-        Box::new(|_cc| Ok(Box::<InkNoteApp>::default())),
+        Box::new(|cc| Ok(Box::new(InkNoteApp::new(cc)))),
     )
 }
