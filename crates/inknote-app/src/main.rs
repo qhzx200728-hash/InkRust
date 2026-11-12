@@ -6,6 +6,7 @@
 mod icons;
 mod theme;
 mod toolbar;
+mod view;
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -29,7 +30,26 @@ use crate::{
     icons::draw_dotted_paper,
     theme::Theme,
     toolbar::{ActiveTool, ToolbarState, show_toolbars},
+    view::View,
 };
+
+/// Lưới tam giác của 1 nét (toạ độ TRANG) + hộp bao để bỏ qua nét nằm ngoài màn hình.
+struct CachedStroke {
+    batches: Vec<DrawBatch>,
+    bbox: egui::Rect,
+}
+
+impl CachedStroke {
+    fn new(batches: Vec<DrawBatch>) -> Self {
+        let mut bbox = egui::Rect::NOTHING;
+        for b in &batches {
+            for &[x, y] in &b.vertices {
+                bbox.extend_with(egui::pos2(x, y));
+            }
+        }
+        Self { batches, bbox }
+    }
+}
 
 struct ActiveStroke {
     path: PenPath,
@@ -43,7 +63,12 @@ struct InkNoteApp {
     brush_config: BrushConfig,
     doc: Document,
     // Bộ nhớ đệm lưới tam giác của từng nét (khoá = id nét), không thuộc dữ liệu trang
-    batch_cache: HashMap<u64, Vec<DrawBatch>>,
+    batch_cache: HashMap<u64, CachedStroke>,
+    view: View,
+    confirm_clear: bool,
+    paint_ms: f32,
+    fps: f32,
+    last_frame: Instant,
     active: Option<ActiveStroke>,
     render_cx: CairoRenderContext,
 
@@ -65,12 +90,19 @@ struct InkNoteApp {
 impl InkNoteApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::setup_fonts(&cc.egui_ctx);
+        // Ctrl +/-/0 dùng để zoom TRANG, không zoom cả giao diện
+        cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
         Self {
             theme: Theme::default(),
             toolbar_state: ToolbarState::default(),
             brush_config: BrushConfig::default(),
             doc: Document::new(),
             batch_cache: HashMap::new(),
+            view: View::default(),
+            confirm_clear: false,
+            paint_ms: 0.0,
+            fps: 0.0,
+            last_frame: Instant::now(),
             active: None,
             render_cx: CairoRenderContext::new(),
             base_instant: Instant::now(),
@@ -110,14 +142,71 @@ impl InkNoteApp {
         if self.toolbar_state.read_only || self.toolbar_state.active_tool != ActiveTool::Pen {
             return false;
         }
-        if egui::Popup::is_any_open(ctx) {
+        if egui::Popup::is_any_open(ctx) || self.confirm_clear {
+            return false;
+        }
+        // Giữ Space để kéo trang bằng chuột/bút thay vì vẽ
+        if ctx.input(|i| i.key_down(egui::Key::Space)) {
             return false;
         }
         self.paper_rect.is_some_and(|r| r.contains(pos))
     }
 
+    /// Đổi toạ độ màn hình → toạ độ trang (theo zoom/kéo hiện tại).
+    fn to_page(&self, pos: egui::Pos2) -> egui::Pos2 {
+        match self.paper_rect {
+            Some(r) => self.view.to_page(r, pos),
+            None => pos,
+        }
+    }
+
+    /// Tạo `n` nét mẫu rải khắp trang (để test hiệu năng). 1 lần = 1 bước undo.
+    fn add_sample_strokes(&mut self, n: usize) {
+        let mut seed: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut rnd = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut list = Vec::with_capacity(n);
+        for _ in 0..n {
+            let (x0, y0) = (rnd() * 1800.0, rnd() * 1200.0);
+            let len = 60.0 + rnd() * 160.0;
+            let ang = rnd() * std::f64::consts::TAU;
+            let amp = 4.0 + rnd() * 16.0;
+            let freq = 2.0 + rnd() * 6.0;
+            let point = |t: f64| {
+                let along = t * len;
+                let wave = amp * (t * freq * std::f64::consts::TAU).sin();
+                let x = x0 + along * ang.cos() - wave * ang.sin();
+                let y = y0 + along * ang.sin() + wave * ang.cos();
+                let pressure = 0.2 + 0.6 * (t * std::f64::consts::PI).sin();
+                Element::new(Vector2::new(x, y), pressure)
+            };
+            self.brush_config.new_style_seeds();
+            let style = self.brush_config.style_for_current_options();
+            let mut path = PenPath::new(point(0.0));
+            let segs: Vec<Segment> = (1..=60)
+                .map(|i| Segment::LineTo {
+                    end: point(i as f64 / 60.0),
+                })
+                .collect();
+            path.extend(segs);
+
+            self.render_cx.clear_batches();
+            path.draw_composed(&mut self.render_cx, &style);
+            let batches = std::mem::take(&mut self.render_cx.batches);
+            let id = self.doc.alloc_id();
+            self.batch_cache.insert(id, CachedStroke::new(batches));
+            list.push(Stroke { id, path, style });
+        }
+        self.doc.execute(Command::AddStrokes(list));
+    }
+
     fn pen_down(&mut self, pos: egui::Pos2, pressure: f64, now: Instant) {
         self.cur_pressure = pressure;
+        let pos = self.to_page(pos);
         let element = Element::new(Vector2::new(pos.x as f64, pos.y as f64), pressure);
 
         if let Some(active) = &mut self.active {
@@ -155,6 +244,7 @@ impl InkNoteApp {
     fn pen_up(&mut self, pos: egui::Pos2, pressure: f64, now: Instant) {
         self.cur_pressure = pressure;
         self.last_up_pressure = pressure;
+        let pos = self.to_page(pos);
         let element = Element::new(Vector2::new(pos.x as f64, pos.y as f64), pressure);
 
         if let Some(active) = &mut self.active {
@@ -183,7 +273,7 @@ impl InkNoteApp {
                 .draw_composed(&mut self.render_cx, &active.style);
             let batches = std::mem::take(&mut self.render_cx.batches);
             let id = self.doc.alloc_id();
-            self.batch_cache.insert(id, batches);
+            self.batch_cache.insert(id, CachedStroke::new(batches));
             self.doc.execute(Command::AddStroke(Stroke {
                 id,
                 path: active.path,
@@ -192,7 +282,13 @@ impl InkNoteApp {
         }
     }
 
-    fn paint_batches(painter: &egui::Painter, batches: &[DrawBatch]) {
+    /// Vẽ lưới (toạ độ trang) lên màn hình: `origin` = gốc trang trên màn hình, `zoom` = tỉ lệ.
+    fn paint_batches(
+        painter: &egui::Painter,
+        batches: &[DrawBatch],
+        origin: egui::Pos2,
+        zoom: f32,
+    ) {
         for batch in batches {
             if batch.indices.is_empty() || batch.vertices.is_empty() {
                 continue;
@@ -204,7 +300,7 @@ impl InkNoteApp {
             mesh.vertices.reserve(batch.vertices.len());
             for &[x, y] in &batch.vertices {
                 mesh.vertices.push(egui::epaint::Vertex {
-                    pos: egui::pos2(x, y),
+                    pos: egui::pos2(origin.x + x * zoom, origin.y + y * zoom),
                     uv: egui::epaint::WHITE_UV,
                     color: col,
                 });
@@ -335,9 +431,96 @@ impl eframe::App for InkNoteApp {
                 self.doc.redo();
             }
             if actions.clear_clicked {
-                self.doc.execute(Command::ClearPage);
+                self.confirm_clear = true;
             }
         }
+
+        // Hộp xác nhận xoá trang (xoá xong vẫn Undo được)
+        if self.confirm_clear {
+            let mut do_clear = false;
+            let mut cancel = false;
+            // Id::new ổn định theo tên; Id::unique sẽ đổi mỗi khung
+            #[allow(deprecated)]
+            let modal = egui::Modal::new(egui::Id::new("confirm_clear_page")).show(&ctx, |ui| {
+                ui.set_width(300.0);
+                ui.heading("Clear this page?");
+                ui.add_space(4.0);
+                ui.label(
+                    "All strokes on this page will be removed. You can undo this with Ctrl+Z.",
+                );
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Clear page").clicked() {
+                        do_clear = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+            if do_clear {
+                self.doc.execute(Command::ClearPage);
+            }
+            if do_clear || cancel || modal.should_close() {
+                self.confirm_clear = false;
+            }
+        }
+
+        // Zoom / kéo trang
+        if let Some(paper) = self.paper_rect {
+            let (hover, zoom_delta, scroll, middle, space_drag, ptr_delta, keys) = ctx.input(|i| {
+                let cmd = i.modifiers.command;
+                (
+                    i.pointer.hover_pos(),
+                    i.zoom_delta(),
+                    i.smooth_scroll_delta,
+                    i.pointer.middle_down(),
+                    i.key_down(egui::Key::Space) && i.pointer.primary_down(),
+                    i.pointer.delta(),
+                    (
+                        cmd && i.key_pressed(egui::Key::Num0),
+                        cmd && (i.key_pressed(egui::Key::Equals) || i.key_pressed(egui::Key::Plus)),
+                        cmd && i.key_pressed(egui::Key::Minus),
+                    ),
+                )
+            });
+            let blocked = egui::Popup::is_any_open(&ctx) || self.confirm_clear;
+            if !blocked {
+                if keys.0 {
+                    self.view = View::default();
+                }
+                if keys.1 {
+                    self.view.zoom_at(paper, paper.center(), 1.25);
+                }
+                if keys.2 {
+                    self.view.zoom_at(paper, paper.center(), 0.8);
+                }
+                if let Some(h) = hover.filter(|h| paper.contains(*h)) {
+                    if zoom_delta != 1.0 {
+                        self.view.zoom_at(paper, h, zoom_delta);
+                    }
+                    self.view.pan += scroll;
+                    if middle || space_drag {
+                        self.view.pan += ptr_delta;
+                    }
+                }
+            }
+        }
+
+        // F9: thêm 2000 nét mẫu để test hiệu năng
+        if self.active.is_none() && ctx.input(|i| i.key_pressed(egui::Key::F9)) {
+            self.add_sample_strokes(2000);
+        }
+
+        // FPS (trung bình trượt)
+        let now = Instant::now();
+        let real_dt = now.duration_since(self.last_frame).as_secs_f32().max(1e-4);
+        self.last_frame = now;
+        self.fps = if self.fps == 0.0 {
+            1.0 / real_dt
+        } else {
+            self.fps * 0.9 + 0.1 / real_dt
+        };
 
         // Khu vực 3: Main Canvas (trang giấy chấm Dotted Paper)
         let workspace_frame = egui::Frame::central_panel(ui.style()).fill(self.theme.workspace_bg);
@@ -349,22 +532,32 @@ impl eframe::App for InkNoteApp {
                 self.paper_rect = Some(paper_rect);
 
                 let painter = ui.painter().with_clip_rect(paper_rect);
+                let view = self.view;
+                let origin = view.origin(paper_rect);
+                let paint_start = Instant::now();
 
                 // 1. Vẽ nền giấy trắng có chấm nhỏ đều nhau (Dotted Paper)
                 draw_dotted_paper(
                     &painter,
                     paper_rect,
+                    origin,
                     self.theme.paper_bg,
                     self.theme.paper_border,
                     self.theme.paper_dot_color,
-                    self.theme.paper_dot_spacing,
+                    self.theme.paper_dot_spacing * view.zoom,
                     self.theme.paper_dot_radius,
                 );
 
-                // 2. Vẽ các nét bút đã hoàn thành
+                // 2. Vẽ các nét bút đã hoàn thành (bỏ qua nét nằm ngoài màn hình)
                 for s in self.doc.strokes() {
-                    if let Some(batches) = self.batch_cache.get(&s.id) {
-                        Self::paint_batches(&painter, batches);
+                    if let Some(c) = self.batch_cache.get(&s.id) {
+                        if !view
+                            .rect_to_screen(paper_rect, c.bbox)
+                            .intersects(paper_rect)
+                        {
+                            continue;
+                        }
+                        Self::paint_batches(&painter, &c.batches, origin, view.zoom);
                     }
                 }
 
@@ -377,8 +570,24 @@ impl eframe::App for InkNoteApp {
                     active
                         .builder
                         .draw_styled(&mut self.render_cx, &active.style, 1.0);
-                    Self::paint_batches(&painter, &self.render_cx.batches);
+                    Self::paint_batches(&painter, &self.render_cx.batches, origin, view.zoom);
                 }
+
+                // 4. Thông số góc dưới-trái: zoom, thời gian dựng khung, FPS
+                self.paint_ms =
+                    self.paint_ms * 0.9 + paint_start.elapsed().as_secs_f32() * 1000.0 * 0.1;
+                painter.text(
+                    paper_rect.left_bottom() + egui::vec2(10.0, -8.0),
+                    egui::Align2::LEFT_BOTTOM,
+                    format!(
+                        "Zoom {:.0}%  |  build {:.1} ms  |  {:.0} fps  |  F9: +2000 strokes",
+                        view.zoom_percent(),
+                        self.paint_ms,
+                        self.fps
+                    ),
+                    egui::FontId::proportional(self.theme.font_size_small),
+                    self.theme.tool_text_muted,
+                );
             });
 
         ctx.request_repaint();
@@ -412,6 +621,11 @@ mod tests {
             brush_config: BrushConfig::default(),
             doc: Document::new(),
             batch_cache: HashMap::new(),
+            view: View::default(),
+            confirm_clear: false,
+            paint_ms: 0.0,
+            fps: 0.0,
+            last_frame: Instant::now(),
             active: None,
             render_cx: CairoRenderContext::new(),
             base_instant: Instant::now(),
@@ -425,6 +639,33 @@ mod tests {
             last_up_pressure: 0.0,
             last_source: "Test",
         }
+    }
+
+    #[test]
+    fn sample_2000_strokes_one_undo_and_fast_culling() {
+        let ctx = egui::Context::default();
+        let mut app = new_test_app(&ctx);
+        app.paper_rect = Some(Rect::from_min_size(
+            Pos2::new(20.0, 100.0),
+            vec2(1160.0, 680.0),
+        ));
+        app.add_sample_strokes(2000);
+        assert_eq!(app.doc.strokes().len(), 2000);
+        // Ở zoom 300%, chỉ 1 phần nhỏ nét nằm trong màn hình
+        let paper = app.paper_rect.unwrap();
+        app.view.zoom_at(paper, paper.center(), 3.0);
+        let visible = app
+            .doc
+            .strokes()
+            .iter()
+            .filter(|s| {
+                let c = &app.batch_cache[&s.id];
+                app.view.rect_to_screen(paper, c.bbox).intersects(paper)
+            })
+            .count();
+        assert!(visible < 2000 / 2, "visible = {visible}");
+        app.doc.undo();
+        assert!(app.doc.strokes().is_empty());
     }
 
     #[test]

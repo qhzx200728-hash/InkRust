@@ -1,7 +1,7 @@
 # memory.md – Bộ nhớ trạng thái dự án InkNote
 
 ## Mục tiêu hiện tại
-- Đã hoàn tất và được người dùng xác nhận ổn **Bước 1.6** (Khung giao diện P0 & căn chỉnh chuẩn). Chuẩn bị bắt đầu **Bước 1.7** (Undo/Redo cho nét bút qua hệ thống lệnh Command trong `inknote-core`).
+- Xong **Bước 1.7** (Undo/Redo, `step-1.7-ok`). Đã code **Bước 1.8** (Zoom/Pan + test 2000 nét), chờ người dùng test.
 
 ## Đã hoàn thành (kèm tên file đã tạo/sửa)
 - **Bước 0 – Spike (Thử nghiệm kỹ thuật)** (`commit fb30599`):
@@ -20,7 +20,8 @@
   - Tạo `AGENTS.md`, `memory.md`, `HANDOFF.md` và tinh gọn `GEMINI.md`.
 
 ## Đang làm dở
-- **Bước 1.7 đã code xong, chờ người dùng test thủ công** (chưa gắn tag step-1.7-ok): tạo crates/inknote-core/src/lib.rs (Document, Command::{AddStroke,ClearPage}, undo/redo, 4 unit test pass); nối vào main.rs (bộ đệm atch_cache), thêm icon/nút Redo (icons.rs, 	oolbar.rs). Không có việc dở ở Bước 1.6 (đã chốt `step-1.6-ok`). Bắt đầu phiên mới là làm ngay **Bước 1.7**.
+- **Bước 1.8 đã code xong, chờ người dùng test** (chưa gắn tag `step-1.8-ok`): zoom/kéo trang (`crates/inknote-app/src/view.rs`; nét lưu theo toạ độ TRANG; Ctrl+cuộn/Ctrl +/-/0 = zoom, cuộn/chuột giữa/Space+kéo = kéo trang; bỏ qua nét ngoài màn hình bằng hộp bao), phím **F9** thêm 2000 nét mẫu (`Command::AddStrokes`, 1 bước undo), dòng thông số (zoom, ms, fps) góc dưới-trái canvas, hộp xác nhận khi bấm Clear Page.
+- `step-1.7-ok` đã gắn (người dùng xác nhận).
 
 ## Quyết định đã chốt và lý do (không bàn lại)
 - **Bỏ hoàn toàn bản cũ (Electron/Flutter/web)**: viết mới 100% bằng Rust cho Windows.
@@ -46,7 +47,7 @@
 - Nút bấm phụ trên thân bút / đầu tẩy phía sau bút Wacom: chưa kiểm tra `egui` có nhận riêng được không (để sau).
 
 ## Việc tiếp theo (xếp theo thứ tự ưu tiên)
-1. **Bước 1.7**: Tạo crate `crates/inknote-core`, chuyển danh sách nét bút sang cấu trúc trang + lịch sử lệnh Command để hỗ trợ **Undo/Redo** (`Ctrl+Z`, `Ctrl+Y` / `Ctrl+Shift+Z`, và nút Undo trên toolbar).
+1. ~~**Bước 1.7**~~ (xong): Tạo crate `crates/inknote-core`, chuyển danh sách nét bút sang cấu trúc trang + lịch sử lệnh Command để hỗ trợ **Undo/Redo** (`Ctrl+Z`, `Ctrl+Y` / `Ctrl+Shift+Z`, và nút Undo trên toolbar).
 2. **Bước 1.8**: **Zoom/kéo trang (Pan & Zoom)** + **Test hiệu năng 2000 nét** vẫn mượt.
 3. **Bước 2 (2.1 → 2.3)**: Định dạng file (`format_version`, kiểu đối tượng, `first_page_thumbnail`), lưu/mở file (`Ctrl+S`), Paper Settings (P1), Auto-save.
 4. **Bước 3 (3.1 → 3.2)**: Nhiều trang & Thanh thumbnail trang (P1).

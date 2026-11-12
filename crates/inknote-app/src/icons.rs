@@ -319,6 +319,7 @@ pub fn draw_icon(painter: &Painter, rect: Rect, icon: ToolIcon, color: Color32) 
 pub fn draw_dotted_paper(
     painter: &Painter,
     paper_rect: Rect,
+    origin: Pos2,
     paper_bg: Color32,
     border_color: Color32,
     dot_color: Color32,
@@ -333,23 +334,24 @@ pub fn draw_dotted_paper(
         egui::StrokeKind::Middle,
     );
 
-    if spacing < 6.0 {
+    // `origin` = gốc trang trên màn hình; `spacing` đã nhân zoom. Chấm bám theo trang khi kéo/zoom.
+    if spacing <= 0.0 {
         return;
     }
+    let mut step = spacing;
+    while step < 8.0 {
+        step *= 2.0; // zoom nhỏ: thưa bớt chấm để không vẽ quá nhiều
+    }
 
-    let margin = spacing;
-    let x_start = paper_rect.left() + margin;
-    let x_end = paper_rect.right() - margin;
-    let y_start = paper_rect.top() + margin;
-    let y_end = paper_rect.bottom() - margin;
-
-    let mut y = y_start;
-    while y <= y_end {
-        let mut x = x_start;
-        while x <= x_end {
+    let first_x = ((paper_rect.left() - origin.x) / step).ceil();
+    let first_y = ((paper_rect.top() - origin.y) / step).ceil();
+    let mut y = origin.y + first_y * step;
+    while y <= paper_rect.bottom() {
+        let mut x = origin.x + first_x * step;
+        while x <= paper_rect.right() {
             painter.circle_filled(Pos2::new(x, y), dot_radius, dot_color);
-            x += spacing;
+            x += step;
         }
-        y += spacing;
+        y += step;
     }
 }

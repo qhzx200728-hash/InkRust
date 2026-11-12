@@ -15,6 +15,8 @@ pub struct Stroke {
 pub enum Command {
     /// Thêm một nét vào cuối trang.
     AddStroke(Stroke),
+    /// Thêm nhiều nét cùng lúc (1 bước undo).
+    AddStrokes(Vec<Stroke>),
     /// Xoá toàn bộ nét trên trang.
     ClearPage,
 }
@@ -22,6 +24,7 @@ pub enum Command {
 /// Lệnh đã thực thi, kèm dữ liệu cần để hoàn tác.
 enum Done {
     AddStroke(Stroke),
+    AddStrokes(Vec<Stroke>),
     ClearPage(Vec<Stroke>),
 }
 
@@ -64,6 +67,13 @@ impl Document {
                 self.strokes.push(s.clone());
                 Done::AddStroke(s)
             }
+            Command::AddStrokes(list) => {
+                if list.is_empty() {
+                    return;
+                }
+                self.strokes.extend(list.iter().cloned());
+                Done::AddStrokes(list)
+            }
             Command::ClearPage => {
                 if self.strokes.is_empty() {
                     return; // không có gì để xoá → không tạo bước undo rỗng
@@ -84,6 +94,10 @@ impl Document {
             Done::AddStroke(_) => {
                 self.strokes.pop();
             }
+            Done::AddStrokes(list) => {
+                let keep = self.strokes.len().saturating_sub(list.len());
+                self.strokes.truncate(keep);
+            }
             Done::ClearPage(removed) => self.strokes = removed.clone(),
         }
         self.redo_stack.push(done);
@@ -97,6 +111,7 @@ impl Document {
         };
         match &done {
             Done::AddStroke(s) => self.strokes.push(s.clone()),
+            Done::AddStrokes(list) => self.strokes.extend(list.iter().cloned()),
             Done::ClearPage(_) => self.strokes.clear(),
         }
         self.undo_stack.push(done);
@@ -169,6 +184,20 @@ mod tests {
         assert_eq!(ids(&d), vec![1, 2, 3]);
         d.redo();
         assert!(d.strokes().is_empty());
+    }
+
+    #[test]
+    fn add_many_strokes_is_one_undo_step() {
+        let mut d = Document::new();
+        let s = stroke(&mut d);
+        d.execute(Command::AddStroke(s));
+        let batch: Vec<Stroke> = (0..5).map(|_| stroke(&mut d)).collect();
+        d.execute(Command::AddStrokes(batch));
+        assert_eq!(d.strokes().len(), 6);
+        d.undo();
+        assert_eq!(ids(&d), vec![1]);
+        d.redo();
+        assert_eq!(d.strokes().len(), 6);
     }
 
     #[test]
