@@ -2,7 +2,7 @@
 // theo đặc tả docs/04-ui-spec.md (Ngôn ngữ giao diện: Tiếng Anh).
 
 use eframe::egui::{
-    self, Align, Align2, Color32, CornerRadius, Layout, Pos2, Rect, RichText, Sense, Stroke, Ui,
+    self, Align, Align2, Color32, CornerRadius, Layout, PopupCloseBehavior, Pos2, Rect, RichText, Sense, Stroke, Ui,
     UiBuilder, Vec2, pos2, vec2,
 };
 use inknote_core::{CanvasMode, PaperOrientation, PaperPattern, PaperSettings, PaperSize};
@@ -496,6 +496,7 @@ pub fn show_toolbars(
             );
 
             egui::Popup::from_toggle_button_response(&more_btn)
+                .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
                 .frame(theme.dark_popup_frame(right_ui.style()))
                 .show(|ui| {
                     ui.set_min_width(270.0);
@@ -913,6 +914,7 @@ fn show_pen_contextual_options(
         "Pen Settings (Stroke Builder & Pressure Curve)",
     );
     egui::Popup::from_toggle_button_response(&pen_settings_btn)
+        .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
         .frame(theme.dark_popup_frame(ui.style()))
         .show(|ui| {
             ui.set_min_width(240.0);
@@ -1013,6 +1015,7 @@ fn show_pen_contextual_options(
     let width_btn = stroke_width_value_button(ui, theme, cur_width);
 
     egui::Popup::from_toggle_button_response(&width_btn)
+        .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
         .frame(theme.dark_popup_frame(ui.style()))
         .show(|ui| {
             ui.set_min_width(210.0);
@@ -1048,6 +1051,7 @@ fn show_pen_contextual_options(
 
     let palette_btn = dark_bar_icon_button(ui, theme, ToolIcon::Palette, "More Colors");
     egui::Popup::from_toggle_button_response(&palette_btn)
+        .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
         .frame(theme.dark_popup_frame(ui.style()))
         .show(|ui| {
             ui.set_min_width(245.0);
