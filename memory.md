@@ -1,7 +1,7 @@
 # memory.md – Bộ nhớ trạng thái dự án InkNote
 
 ## Mục tiêu hiện tại
-- Bắt đầu **Bước 2.2**: Paper Settings (P1) – chọn kiểu giấy (trơn, chấm, kẻ ô, kẻ dòng), chỉnh cỡ ô và bật/tắt lề margin 2 bên.
+- Hoàn thiện và chốt kiểm thử **Bước 2.2**: Paper Settings (P1) – hỗ trợ 2 chế độ Canvas (`Paper` và `Whiteboard`), khổ giấy tiêu chuẩn (`A4`, `A5`), xoay (`Portrait`, `Landscape`), 4 kiểu template giấy (Plain, Dotted, Grid, Lined), cỡ ô và đường lề 2 bên (hồng pastel).
 
 ## Đã hoàn thành (kèm tên file đã tạo/sửa)
 - **Bước 0 – Spike (Thử nghiệm kỹ thuật)** (`commit fb30599`):
@@ -31,9 +31,14 @@
   - Tích hợp 3 nút Save, Open, New trong menu More (icon 3 chấm) trên toolbar.
   - Hộp thoại Modal hỏi lưu thay đổi (`Save changes?`) khi mở file khác hoặc tạo mới lúc có nét vẽ chưa lưu.
   - Cập nhật tiêu đề cửa sổ kèm dấu hoa thị `*` khi tài liệu bị sửa đổi chưa lưu.
+- **Bước 2.2 – Paper Settings (P1)** (`commit 5c76800`, `ed09af0`, `28c5765`, `414d853`, `0927a84`):
+  - `crates/inknote-core/src/lib.rs`: Bổ sung `CanvasMode` (Paper/Whiteboard), `PaperSize` (A4/A5), `PaperOrientation` (Portrait/Landscape), mở rộng `PaperSettings`.
+  - `crates/inknote-app/src/icons.rs`: Viết hàm vẽ nền `draw_paper` và tính khung tờ giấy `paper_sheet_rect`. Chế độ Paper có viền và đổ bóng mềm (drop shadow), có vạch lề hồng pastel; chế độ Whiteboard trải phẳng tràn màn hình 100% không có vạch lề.
+  - `crates/inknote-app/src/toolbar.rs`: Thêm cụm cấu hình Paper Settings vào menu More `...` (Canvas Mode, Paper Format, Template, Spacing, Margins). Cấu hình `PopupCloseBehavior::CloseOnClickOutside` cho tất cả pop-up để không bị tự tắt khi bấm chuột bên trong.
+  - `crates/inknote-app/src/main.rs`: Tự động căn giữa tờ giấy A4/A5 khi mở và khi bấm `Ctrl+0`; `drawable_rect` chỉ cho phép vẽ trên tờ giấy ở chế độ Paper (không vẽ lem ra bàn xám); clip nét vẽ gọn gàng trong trang; lưu thiết lập mặc định vào `%APPDATA%/InkNote/default_paper.json`.
 
 ## Đang làm dở
-- Chuẩn bị bước vào **Bước 2.2**: Paper Settings (P1).
+- Chờ người dùng kiểm thử lần cuối Bước 2.2 để gắn tag `step-2.2-ok`.
 
 ## Quyết định đã chốt và lý do (không bàn lại)
 - **Bỏ hoàn toàn bản cũ (Electron/Flutter/web)**: viết mới 100% bằng Rust cho Windows.
@@ -42,8 +47,10 @@
 - **Port nguyên văn `rnote-compose` sang `crates/inknote-pen`**: giữ nguyên 100% thuật toán làm mượt, `PressureCurve`, `SmoothOptions`, `BrushConfig`; ánh xạ `piet-cairo = { package = "inknote-render" }` để không sửa code gốc Rnote.
 - **Quyết định giao diện (`04-ui-spec.md`)**:
   - Ngôn ngữ UI mặc định: **Tiếng Anh** (nạp font `segoeui.ttf` hỗ trợ 100% dấu tiếng Việt).
-  - Giữ nút **Read-Only** và giữ màu **xanh dương** cho Thanh công cụ chính.
+  - Giữ màu **xanh dương** cho Thanh công cụ chính, giữ navbar tối giản (không thêm nút thừa).
   - Quy tắc Tẩy (Eraser): trên thanh có 2 chế độ (Tẩy thường, Tẩy nét) + Pop-up cài đặt nâng cao; mặc định chỉ xoá **nét bút**, không bao giờ xoá LaTeX/hình/ảnh.
+  - 2 chế độ Canvas: `Paper` (trang chuẩn A4/A5 có bóng đổ trên bàn xám) và `Whiteboard` (bảng trắng tràn màn hình, không có đường lề).
+  - Tất cả pop-up của `egui` phải có `PopupCloseBehavior::CloseOnClickOutside` để giữ mở khi tương tác.
 - **Quy tắc Git & Rollback**: Mỗi bước nhỏ = 1 commit; chỉ dùng `git revert` (không dùng `git reset --hard`); gắn tag `step-X.Y-ok` sau khi người dùng báo OK.
 
 ## Đã thử nhưng không được, và vì sao
@@ -53,20 +60,22 @@
 - **Gán `pressure = 0.5` khi `TouchPhase::End` có `force: None`**: làm cuối nét bút Wacom phình giọt nước. Đã sửa bằng truyền `pressure = 0.0` khi nhấc bút.
 - **Vẽ ngay ở `TouchPhase::Move` khi chưa có `TouchPhase::Start`**: làm bút Wacom hover đã tự vẽ. Đã chặn bằng kiểm tra `self.touch_active && self.active.is_some()`.
 - **Căn giữa bằng `ui.columns(3)` và `ui.vertical_centered`**: `ui.horizontal` bên trong luôn bắt đầu từ mép trái vùng chứa nên lệch tâm. Đã thay bằng `show_centered_in_bounds`.
+- **Đặt nút chuyển Canvas Mode ngay trên thanh Navbar**: Người dùng chê thừa và rối thanh công cụ; đã gỡ bỏ và gom toàn bộ vào menu More `...`.
+- **Dùng pop-up mặc định của `egui` (`CloseOnClick`)**: Vừa bấm nút hoặc kéo slider bên trong là pop-up tự biến mất. Đã sửa bằng `PopupCloseBehavior::CloseOnClickOutside`.
+- **Vẽ đường lề ở chế độ Whiteboard**: Làm mất tính chất bảng trắng vô tận; đã sửa để Whiteboard hoàn toàn không có đường lề và tràn phẳng viền.
 
 ## Lỗi/vấn đề đang tồn tại
-- 21 cảnh báo `missing_docs` trong `crates/inknote-pen` (do giữ nguyên code gốc Rnote) và 1 cảnh báo `unused_assignments` nhỏ trong `crates/inknote-render/src/lib.rs` (sẽ dọn ở Bước 7.4).
+- 21 cảnh báo `missing_docs` trong `crates/inknote-pen` (do giữ nguyên code gốc Rnote).
 - Nút bấm phụ trên thân bút / đầu tẩy phía sau bút Wacom: chưa kiểm tra `egui` có nhận riêng được không (để sau).
 
 ## Việc tiếp theo (xếp theo thứ tự ưu tiên)
-1. ~~**Bước 1.7**~~ (xong): Tạo crate `crates/inknote-core`, chuyển danh sách nét bút sang cấu trúc trang + lịch sử lệnh Command để hỗ trợ **Undo/Redo** (`Ctrl+Z`, `Ctrl+Y` / `Ctrl+Shift+Z`, và nút Undo trên toolbar).
-2. **Bước 1.8**: **Zoom/kéo trang (Pan & Zoom)** + **Test hiệu năng 2000 nét** vẫn mượt.
-3. **Bước 2 (2.1 → 2.3)**: Định dạng file (`format_version`, kiểu đối tượng, `first_page_thumbnail`), lưu/mở file (`Ctrl+S`), Paper Settings (P1), Auto-save.
-4. **Bước 3 (3.1 → 3.2)**: Nhiều trang & Thanh thumbnail trang (P1).
-5. **Bước 4 (4.1 → 4.5)**: Công thức LaTeX kiểu Xournal++ (`inknote-latex`, Live Preview, chèn/double-click sửa, lưu file).
-6. **Bước 5 (5.1 → 5.4)**: Tẩy (2 chế độ + Pop-up nâng cao, chỉ xoá nét bút), Lasso, Hình học, Văn bản.
-7. **Bước 6 (6.1 → 6.2)**: Chèn ảnh + nút dán ảnh từ clipboard, giữ ảnh sắc nét theo zoom.
-8. **Bước 7 (7.1 → 7.4)**: Màn hình Library (P3), Trash, xuất PDF/Ảnh, `README.md`.
+1. Chốt kiểm thử Bước 2.2 và gắn tag `step-2.2-ok`.
+2. **Bước 2.3**: **Auto-save**: tự động lưu ra file tạm rồi atomic rename đè lên file chính sau 2–3s kể từ khi có thay đổi.
+3. **Bước 3 (3.1 → 3.2)**: Nhiều trang & Thanh thumbnail trang (P1).
+4. **Bước 4 (4.1 → 4.5)**: Công thức LaTeX kiểu Xournal++ (`inknote-latex`, Live Preview, chèn/double-click sửa, lưu file).
+5. **Bước 5 (5.1 → 5.4)**: Tẩy (2 chế độ + Pop-up nâng cao, chỉ xoá nét bút), Lasso, Hình học, Văn bản.
+6. **Bước 6 (6.1 → 6.2)**: Chèn ảnh + nút dán ảnh từ clipboard, giữ ảnh sắc nét theo zoom.
+7. **Bước 7 (7.1 → 7.4)**: Màn hình Library (P3), Trash, xuất PDF/Ảnh, `README.md`.
 
 ## Cập nhật lần cuối
 - **Ngày**: 2026-11-12

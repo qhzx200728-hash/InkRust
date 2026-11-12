@@ -1,28 +1,25 @@
-# HANDOFF.md – Bàn giao trạng thái cho Model tiếp theo
+# HANDOFF.md – Bàn giao phiên làm việc InkNote
 
-## 1. Task hiện tại & Tiến độ
-Dự án **InkNote** (app ghi chú viết tay trên Windows bằng Rust + `egui 0.37` + bút Wacom) đã hoàn thành **Bước 1.7 (Undo/Redo, tag `step-1.7-ok`)**. Đang ở **Bước 1.8 (Zoom/Pan + test hiệu năng 2000 nét)**: đã code xong zoom/kéo trang, hộp xác nhận Clear Page, phím F9 tạo 2000 nét mẫu và đã hoàn tất tối ưu chống tụt FPS khi viết tay & khi vẽ 2000 nét. Đang chờ người dùng test lại.
+## 1. Đang làm gì, tới đâu
+Đang thực hiện **Bước 2.2: Paper Settings (P1)**, đã hoàn thành code và vượt qua 14/14 bài test tự động; đang chờ người dùng kiểm thử thực tế để chốt tag `step-2.2-ok`.
 
-## 2. Các file đã tạo/sửa trong phiên này
-- `crates/inknote-core/src/lib.rs`: Thêm trường `rev: u64` và hàm `pub fn revision(&self) -> u64` trên `Document` để theo dõi thay đổi trang.
-- `crates/inknote-app/src/main.rs`:
-  - Tối ưu nét đang viết (`active`): chốt dần theo đợt 16 đoạn (`advance_active_committed`), mỗi khung chỉ vẽ phần đuôi ngắn (< 16 đoạn) + đầu bút modeler.
-  - Tối ưu nét tĩnh: gom các nét tĩnh thành 1 `egui::epaint::Mesh` duy nhất và cache lại (`StaticKey`), tái sử dụng khi đang viết nét hoặc không đổi góc nhìn.
-  - Dọn dẹp modal xác nhận xoá trang bị lặp.
-- `crates/inknote-app/src/view.rs`: Bộ chuyển đổi toạ độ màn hình ↔ toạ độ trang theo zoom/pan.
-- `memory.md`, `docs/roadmap.md`: Cập nhật tiến độ.
+## 2. File đã sửa trong phiên này
+- `Cargo.lock` & `crates/inknote-app/Cargo.toml`: Thêm dependency `serde_json = "1.0"` để lưu/đọc cấu hình giấy mặc định.
+- `crates/inknote-core/src/lib.rs`: Thêm `CanvasMode` (Paper/Whiteboard), `PaperSize` (A4/A5), `PaperOrientation` (Portrait/Landscape), mở rộng `PaperSettings`.
+- `crates/inknote-app/src/theme.rs`: Thêm mã màu `paper_grid_color`, `paper_line_color`, `paper_margin_line_color` (hồng pastel).
+- `crates/inknote-app/src/icons.rs`: Viết `draw_paper`, `paper_sheet_rect`; Paper có đổ bóng và lề 2 bên, Whiteboard tràn viền phẳng không có lề.
+- `crates/inknote-app/src/toolbar.rs`: Bổ sung cài đặt giấy trong menu More; cấu hình `PopupCloseBehavior::CloseOnClickOutside` chống tự đóng pop-up.
+- `crates/inknote-app/src/main.rs`: Căn giữa tờ giấy (`Ctrl+0`), chặn vẽ lem ra bàn xám, clip nét trong trang giấy, lưu cấu hình mặc định vào APPDATA.
 
-## 3. Quyết định đã chốt
-- Dùng `egui 0.37` thuần Rust; port nguyên văn `rnote-compose` sang `inknote-pen` + tô lưới bằng `lyon` (`FillRule::NonZero`).
-- Giao diện mặc định **Tiếng Anh**, hỗ trợ 100% dấu tiếng Việt; giữ nút Read-Only và thanh công cụ chính màu **xanh dương**.
-- Tẩy (Eraser) có 2 chế độ + Pop-up nâng cao, mặc định chỉ xoá nét bút (không bao giờ xoá LaTeX/hình/ảnh).
+## 3. Quyết định vừa chốt & lý do
+- **2 chế độ Canvas**: `Paper` (trang chuẩn A4/A5 có bóng đổ trên bàn xám) và `Whiteboard` (bảng trắng vô tận tràn màn hình).
+- **Whiteboard không được có margin**: Bỏ hoàn toàn đường lề và ẩn mục chỉnh lề khi ở chế độ Whiteboard.
+- **Không đặt nút mode trên Navbar**: Giữ navbar tối giản đúng chuẩn P0; gom toàn bộ cấu hình giấy vào menu More `...`.
 
-## 4. Bước tiếp theo cụ thể (Làm ngay)
-- **Thực hiện Bước 1.7 (`docs/roadmap.md`)**: Tạo crate `crates/inknote-core`, cài đặt hệ thống lệnh Command cho **Undo/Redo nét bút** (`Ctrl+Z`, `Ctrl+Y` / `Ctrl+Shift+Z` và nút Undo/Redo trên toolbar), kèm cách test thủ công và lệnh rollback `git revert`.
+## 4. Việc đang dở & Bước tiếp theo
+- **Chờ test Bước 2.2**: Chạy `cargo run -p inknote-app`, test menu More chỉnh A4/A5, dọc/ngang, Paper/Whiteboard.
+- **Khi người dùng báo OK**: Gắn tag `step-2.2-ok`, cập nhật `docs/roadmap.md`, chuyển sang **Bước 2.3: Auto-save** (tự lưu atomic rename sau 2–3s debounce).
 
-## 5. Cảnh báo quan trọng
-- **Không sửa** `reference/` (chỉ đọc) và không sửa thuật toán gốc Rnote trong `crates/inknote-pen`.
-- **Wacom trên Windows**: Khi `TouchPhase::End` có `force: None` phải truyền `pressure = 0.0` (nếu truyền `0.5` cuối nét sẽ phình giọt nước); chỉ vẽ ở `TouchPhase::Move` khi `self.touch_active && self.active.is_some()` (tránh lỗi bút hover tự vẽ).
-- **Layout `egui`**: Không dùng `ui.columns(3)` hay `ui.vertical_centered` cho thanh công cụ vì sẽ lệch tâm cửa sổ; giữ nguyên hàm `show_centered_in_bounds`.
-- Trong headless test `ctx.run_ui`, phải gọi `out.textures_delta.clear()` để tránh panic của `epaint 0.37`.
-
+## 5. Cảnh báo & Đã thử không được
+- **Pop-up egui bị ẩn ngay khi click**: Mặc định là `CloseOnClick`. Phải luôn set `.close_behavior(PopupCloseBehavior::CloseOnClickOutside)`.
+- **Chống vẽ lem ra bàn xám**: Kiểm tra toạ độ qua `drawable_rect()` và clip nét bằng `painter.with_clip_rect()`.
