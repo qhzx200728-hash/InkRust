@@ -1,7 +1,7 @@
 # memory.md – Bộ nhớ trạng thái dự án InkNote
 
 ## Mục tiêu hiện tại
-- Bắt đầu **Bước 2.1**: Thiết kế định dạng file & Lưu/mở file (`Ctrl+S`, `Ctrl+O`) với `format_version`, danh sách đối tượng, và `first_page_thumbnail`.
+- Bắt đầu **Bước 2.2**: Paper Settings (P1) – chọn kiểu giấy (trơn, chấm, kẻ ô, kẻ dòng), chỉnh cỡ ô và bật/tắt lề margin 2 bên.
 
 ## Đã hoàn thành (kèm tên file đã tạo/sửa)
 - **Bước 0 – Spike (Thử nghiệm kỹ thuật)** (`commit fb30599`):
@@ -24,15 +24,16 @@
   - Tối ưu nét đang viết (`active`): chốt theo đợt 16 đoạn, giữ vững 144–146 FPS khi viết tay.
   - Tối ưu 2000 nét tĩnh: gom 1 `Mesh`, đặt trước dung lượng `reserve` (giảm 57% thời gian build mesh), nâng tolerance Lyon lên 0.5 (giảm 25% số đỉnh thừa).
   - Tối ưu GPU & VSync: chuyển `present_mode` sang `AutoNoVsync`, tắt `debug-assertions` trong profile dev, render khung chỉ 0.84ms (tương đương 1.190 FPS CPU), người dùng test thật đạt 200 FPS.
-
-## Đang làm dở
-- **Bước 2.1 đã code xong (commit `98a04fd`), chờ người dùng test thủ công** (chưa gắn tag `step-2.1-ok`):
+- **Bước 2.1 – Thiết kế định dạng file & Lưu/Mở file (`Ctrl+S`, `Ctrl+O`)** (`commit 98a04fd`, tag `step-2.1-ok` — người dùng xác nhận test OK):
   - Định dạng file `DocumentFile`: `format_version = 1`, `metadata`, `paper_settings`, `pages` chứa `objects` (`PageObject::BrushStroke`), `first_page_thumbnail`.
   - Cơ chế ghi an toàn (atomic save): ghi vào file tạm `.tmp` rồi đổi tên đè lên file chính, chống hỏng file khi tắt ngang.
   - Phím tắt `Ctrl+S` (Lưu), `Ctrl+Shift+S` (Lưu thành file mới), `Ctrl+O` (Mở file), `Ctrl+N` (Tạo ghi chú mới).
   - Tích hợp 3 nút Save, Open, New trong menu More (icon 3 chấm) trên toolbar.
   - Hộp thoại Modal hỏi lưu thay đổi (`Save changes?`) khi mở file khác hoặc tạo mới lúc có nét vẽ chưa lưu.
   - Cập nhật tiêu đề cửa sổ kèm dấu hoa thị `*` khi tài liệu bị sửa đổi chưa lưu.
+
+## Đang làm dở
+- Chuẩn bị bước vào **Bước 2.2**: Paper Settings (P1).
 
 ## Quyết định đã chốt và lý do (không bàn lại)
 - **Bỏ hoàn toàn bản cũ (Electron/Flutter/web)**: viết mới 100% bằng Rust cho Windows.
