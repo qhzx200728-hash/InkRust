@@ -5,7 +5,7 @@ use eframe::egui::{
     self, Align, Align2, Color32, CornerRadius, Layout, Pos2, Rect, RichText, Sense, Stroke, Ui,
     UiBuilder, Vec2, pos2, vec2,
 };
-use inknote_core::{CanvasMode, PaperPattern, PaperSettings};
+use inknote_core::{CanvasMode, PaperOrientation, PaperPattern, PaperSettings, PaperSize};
 use inknote_pen::{
     Color as PenColor,
     brushconfig::{BrushConfig, BrushStyle},
@@ -486,7 +486,7 @@ pub fn show_toolbars(
                     .max_rect(bar_rect)
                     .layout(Layout::right_to_left(Align::Center)),
             );
-            right_ui.spacing_mut().item_spacing.x = 6.0;
+            right_ui.spacing_mut().item_spacing.x = 4.0;
             let more_btn = nav_icon_button(
                 &mut right_ui,
                 theme,
@@ -494,30 +494,6 @@ pub fn show_toolbars(
                 false,
                 "More & Paper Settings",
             );
-
-            // Nút bấm chuyển nhanh chế độ Paper (Trang chuẩn) <-> Whiteboard (Bảng trắng)
-            let (mode_text, mode_tip) = match paper_settings.mode {
-                CanvasMode::Paper => ("Paper", "Đang ở chế độ Paper (Trang chuẩn A4). Bấm để chuyển sang Whiteboard"),
-                CanvasMode::Whiteboard => ("Board", "Đang ở chế độ Whiteboard (Bảng trắng vô tận). Bấm để chuyển sang Paper"),
-            };
-            if right_ui
-                .add(
-                    egui::Button::new(
-                        RichText::new(mode_text)
-                            .size(theme.font_size_small)
-                            .color(Color32::WHITE),
-                    )
-                    .fill(Color32::from_rgb(40, 100, 200))
-                    .corner_radius(CornerRadius::same(theme.nav_button_rounding)),
-                )
-                .on_hover_text(mode_tip)
-                .clicked()
-            {
-                paper_settings.mode = match paper_settings.mode {
-                    CanvasMode::Paper => CanvasMode::Whiteboard,
-                    CanvasMode::Whiteboard => CanvasMode::Paper,
-                };
-            }
 
             egui::Popup::from_toggle_button_response(&more_btn)
                 .frame(theme.dark_popup_frame(right_ui.style()))
@@ -562,7 +538,7 @@ pub fn show_toolbars(
                         .show(ui, |ui| {
                             // 0. Chế độ hiển thị: Paper vs Whiteboard
                             ui.label(
-                                RichText::new("Mode")
+                                RichText::new("Canvas Mode")
                                     .size(theme.font_size_small)
                                     .color(theme.tool_text_muted),
                             );
@@ -578,9 +554,62 @@ pub fn show_toolbars(
                                     "🔲 Whiteboard (Bảng trắng)",
                                 );
                             });
+
+                            // 1. Khổ giấy tiêu chuẩn (A4 / A5) khi ở chế độ Paper
+                            if paper_settings.mode == CanvasMode::Paper {
+                                ui.add_space(6.0);
+                                ui.label(
+                                    RichText::new("Paper Format")
+                                        .size(theme.font_size_small)
+                                        .color(theme.tool_text_muted),
+                                );
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .selectable_label(
+                                            paper_settings.paper_size == PaperSize::A4,
+                                            "A4 Paper",
+                                        )
+                                        .on_hover_text("Khổ A4 tiêu chuẩn (210 × 297 mm)")
+                                        .clicked()
+                                    {
+                                        paper_settings.set_paper_size(PaperSize::A4);
+                                    }
+                                    if ui
+                                        .selectable_label(
+                                            paper_settings.paper_size == PaperSize::A5,
+                                            "A5 Paper",
+                                        )
+                                        .on_hover_text("Khổ A5 tiêu chuẩn (148 × 210 mm)")
+                                        .clicked()
+                                    {
+                                        paper_settings.set_paper_size(PaperSize::A5);
+                                    }
+                                });
+                                ui.add_space(4.0);
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .selectable_label(
+                                            paper_settings.orientation == PaperOrientation::Portrait,
+                                            "Portrait (Dọc)",
+                                        )
+                                        .clicked()
+                                    {
+                                        paper_settings.set_orientation(PaperOrientation::Portrait);
+                                    }
+                                    if ui
+                                        .selectable_label(
+                                            paper_settings.orientation == PaperOrientation::Landscape,
+                                            "Landscape (Ngang)",
+                                        )
+                                        .clicked()
+                                    {
+                                        paper_settings.set_orientation(PaperOrientation::Landscape);
+                                    }
+                                });
+                            }
                             ui.add_space(6.0);
 
-                            // 1. Template chọn kiểu giấy
+                            // 2. Template chọn kiểu giấy
                             ui.label(
                                 RichText::new("Template")
                                     .size(theme.font_size_small)

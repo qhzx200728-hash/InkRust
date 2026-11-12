@@ -976,8 +976,8 @@ impl eframe::App for InkNoteApp {
                 self.paint_ms =
                     self.paint_ms * 0.9 + paint_start.elapsed().as_secs_f32() * 1000.0 * 0.1;
                 let mode_str = match settings.mode {
-                    CanvasMode::Paper => "Paper (A4)",
-                    CanvasMode::Whiteboard => "Whiteboard",
+                    CanvasMode::Paper => format!("Paper ({:?})", settings.paper_size),
+                    CanvasMode::Whiteboard => "Whiteboard".to_string(),
                 };
                 ui.painter().with_clip_rect(paper_rect).text(
                     paper_rect.left_bottom() + egui::vec2(10.0, -8.0),
@@ -1020,7 +1020,7 @@ fn main() -> eframe::Result {
 mod tests {
     use super::*;
     use eframe::egui::{Pos2, RawInput, Rect, vec2};
-    use inknote_core::{CanvasMode, PaperPattern};
+    use inknote_core::{CanvasMode, PaperOrientation, PaperPattern, PaperSize};
 
     fn new_test_app(ctx: &egui::Context) -> InkNoteApp {
         theme::setup_fonts(ctx);
@@ -1083,8 +1083,10 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = new_test_app(&ctx);
 
-        // Đổi sang Grid + bật Margins 2 bên + chuyển sang Whiteboard
-        app.doc.paper_settings_mut().mode = CanvasMode::Whiteboard;
+        // Đổi sang Grid + bật Margins 2 bên + chuyển sang Paper A5 Landscape
+        app.doc.paper_settings_mut().mode = CanvasMode::Paper;
+        app.doc.paper_settings_mut().set_paper_size(PaperSize::A5);
+        app.doc.paper_settings_mut().set_orientation(PaperOrientation::Landscape);
         app.doc.paper_settings_mut().pattern = PaperPattern::Grid;
         app.doc.paper_settings_mut().show_margins = true;
         app.doc.paper_settings_mut().left_margin = 100.0;
@@ -1094,10 +1096,14 @@ mod tests {
         let temp_file = std::env::temp_dir().join("test_paper_settings.inknote");
         app.doc.to_file().save_to_path(&temp_file).unwrap();
 
-        // Nạp vào app2: kiểu giấy và lề 2 bên phải còn nguyên vẹn
+        // Nạp vào app2: kiểu giấy, khổ A5 và lề 2 bên phải còn nguyên vẹn
         let mut app2 = new_test_app(&ctx);
         app2.load_document_from(temp_file.clone());
-        assert_eq!(app2.doc.paper_settings().mode, CanvasMode::Whiteboard);
+        assert_eq!(app2.doc.paper_settings().mode, CanvasMode::Paper);
+        assert_eq!(app2.doc.paper_settings().paper_size, PaperSize::A5);
+        assert_eq!(app2.doc.paper_settings().orientation, PaperOrientation::Landscape);
+        assert_eq!(app2.doc.paper_settings().page_width, 840.0);
+        assert_eq!(app2.doc.paper_settings().page_height, 594.0);
         assert_eq!(app2.doc.paper_settings().pattern, PaperPattern::Grid);
         assert!(app2.doc.paper_settings().show_margins);
         assert_eq!(app2.doc.paper_settings().left_margin, 100.0);

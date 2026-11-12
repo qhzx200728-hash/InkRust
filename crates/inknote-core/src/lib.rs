@@ -26,7 +26,7 @@ impl Default for PaperPattern {
 }
 
 /// Chế độ hiển thị Canvas:
-/// - `Paper`: Trang giấy chuẩn có kích thước cố định (mặc định A4), bóng đổ nổi trên nền bàn làm việc.
+/// - `Paper`: Trang giấy chuẩn có kích thước cố định (A4, A5), bóng đổ nổi trên nền bàn làm việc.
 /// - `Whiteboard`: Bảng trắng vô tận, trải rộng toàn màn hình không giới hạn biên.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -34,6 +34,58 @@ pub enum CanvasMode {
     #[default]
     Paper,
     Whiteboard,
+}
+
+/// Khổ giấy tiêu chuẩn (ISO 216):
+/// - A4: 840 x 1188 pt (210 x 297 mm, tỷ lệ 1 : 1.4142)
+/// - A5: 594 x 840 pt (148 x 210 mm, bằng một nửa A4)
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PaperSize {
+    #[default]
+    A4,
+    A5,
+    Custom,
+}
+
+impl PaperSize {
+    pub fn dimensions(&self, orientation: PaperOrientation) -> (f32, f32) {
+        let (mut w, mut h) = match self {
+            PaperSize::A4 => (840.0, 1188.0),
+            PaperSize::A5 => (594.0, 840.0),
+            PaperSize::Custom => (840.0, 1188.0),
+        };
+        if orientation == PaperOrientation::Landscape {
+            std::mem::swap(&mut w, &mut h);
+        }
+        (w, h)
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            PaperSize::A4 => "A4",
+            PaperSize::A5 => "A5",
+            PaperSize::Custom => "Custom",
+        }
+    }
+}
+
+/// Chiều trang giấy: Portrait (Dọc) hoặc Landscape (Ngang)
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PaperOrientation {
+    #[default]
+    Portrait,
+    Landscape,
+}
+
+impl PaperOrientation {
+    pub fn label(&self) -> &'static str {
+        match self {
+            PaperOrientation::Portrait => "Portrait",
+            PaperOrientation::Landscape => "Landscape",
+        }
+    }
 }
 
 fn default_page_width() -> f32 {
@@ -49,6 +101,10 @@ fn default_page_height() -> f32 {
 pub struct PaperSettings {
     #[serde(default)]
     pub mode: CanvasMode,
+    #[serde(default)]
+    pub paper_size: PaperSize,
+    #[serde(default)]
+    pub orientation: PaperOrientation,
     pub pattern: PaperPattern,
     pub dot_spacing: f32,
     #[serde(default = "default_page_width")]
@@ -60,14 +116,35 @@ pub struct PaperSettings {
     pub right_margin: f32,
 }
 
+impl PaperSettings {
+    pub fn set_paper_size(&mut self, size: PaperSize) {
+        self.paper_size = size;
+        if size != PaperSize::Custom {
+            let (w, h) = size.dimensions(self.orientation);
+            self.page_width = w;
+            self.page_height = h;
+        }
+    }
+
+    pub fn set_orientation(&mut self, orientation: PaperOrientation) {
+        self.orientation = orientation;
+        let (w, h) = self.paper_size.dimensions(orientation);
+        self.page_width = w;
+        self.page_height = h;
+    }
+}
+
 impl Default for PaperSettings {
     fn default() -> Self {
+        let (w, h) = PaperSize::A4.dimensions(PaperOrientation::Portrait);
         Self {
             mode: CanvasMode::Paper,
+            paper_size: PaperSize::A4,
+            orientation: PaperOrientation::Portrait,
             pattern: PaperPattern::Dotted,
             dot_spacing: 24.0,
-            page_width: 840.0,
-            page_height: 1188.0,
+            page_width: w,
+            page_height: h,
             show_margins: false,
             left_margin: 80.0,
             right_margin: 80.0,
