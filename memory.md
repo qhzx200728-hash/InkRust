@@ -1,7 +1,7 @@
 # memory.md – Bộ nhớ trạng thái dự án InkNote
 
 ## Mục tiêu hiện tại
-- Xong **Bước 1.7** (Undo/Redo, `step-1.7-ok`). Đã code **Bước 1.8** (Zoom/Pan + test 2000 nét), chờ người dùng test.
+- Bắt đầu **Bước 2.1**: Thiết kế định dạng file & Lưu/mở file (`Ctrl+S`, `Ctrl+O`) với `format_version`, danh sách đối tượng, và `first_page_thumbnail`.
 
 ## Đã hoàn thành (kèm tên file đã tạo/sửa)
 - **Bước 0 – Spike (Thử nghiệm kỹ thuật)** (`commit fb30599`):
@@ -13,19 +13,20 @@
   - Sửa lỗi phình giọt nước cuối nét và lỗi hover tự vẽ trên bút Wacom trong `crates/inknote-app/src/main.rs`.
 - **Bước 1.5 – Giấy phép GPL-3.0** (`commit 4ec3161`, tag `step-1.5-ok`):
   - Tạo `LICENSE` (toàn văn GPL-3.0) và `NOTICE` (ghi nguồn Rnote + commit hash, ý tưởng Xournal++, bộ icon).
-- **Bước 1.6 – Khung giao diện P0 & Sửa căn chỉnh UI Alignment** (`commit ed788b5`, `commit 04980fc`, tag `step-1.6-ok` — người dùng đã xác nhận "Đã ổn"):
+- **Bước 1.6 – Khung giao diện P0 & Sửa căn chỉnh UI Alignment** (`commit ed788b5`, `commit 04980fc`, tag `step-1.6-ok`):
   - Tạo và cập nhật `crates/inknote-app/src/theme.rs`, `crates/inknote-app/src/icons.rs`, `crates/inknote-app/src/toolbar.rs`, `crates/inknote-app/src/main.rs`.
   - Căn chỉnh chuẩn tâm cửa sổ bằng `show_centered_in_bounds`, đồng bộ chiều cao hàng `tool_row_height = 26.0`, thêm unit test kiểm tra toạ độ ở `1200×800`, `1366×768`, `1600×900` (pass `1/1`).
-- **Thiết lập bộ nhớ dự án cho đa model**:
-  - Tạo `AGENTS.md`, `memory.md`, `HANDOFF.md` và tinh gọn `GEMINI.md`.
+- **Bước 1.7 – Undo/Redo cho nét bút** (`commit a97b545`, tag `step-1.7-ok`):
+  - Tạo crate `crates/inknote-core`, cài đặt `Document`, `Command`, hệ thống Undo/Redo cho `AddStroke`, `AddStrokes`, `ClearPage`; tích hợp phím tắt `Ctrl+Z`, `Ctrl+Y` / `Ctrl+Shift+Z` và nút Redo trên toolbar.
+- **Bước 1.8 – Zoom/kéo trang Pan & Zoom + Test hiệu năng 2000 nét** (`commit b9ebc47`, `commit be4089e`, tag `step-1.8-ok` — người dùng xác nhận đạt 200 FPS rất mượt):
+  - Thêm `view.rs` xử lý toạ độ màn hình ↔ trang, zoom giữ tâm con trỏ, kéo trang bằng chuột giữa hoặc Space + chuột trái.
+  - Hộp thoại xác nhận xoá trang an toàn (vẫn hoàn tác được bằng Undo).
+  - Tối ưu nét đang viết (`active`): chốt theo đợt 16 đoạn, giữ vững 144–146 FPS khi viết tay.
+  - Tối ưu 2000 nét tĩnh: gom 1 `Mesh`, đặt trước dung lượng `reserve` (giảm 57% thời gian build mesh), nâng tolerance Lyon lên 0.5 (giảm 25% số đỉnh thừa).
+  - Tối ưu GPU & VSync: chuyển `present_mode` sang `AutoNoVsync`, tắt `debug-assertions` trong profile dev, render khung chỉ 0.84ms (tương đương 1.190 FPS CPU), người dùng test thật đạt 200 FPS.
 
 ## Đang làm dở
-- **Bước 1.8 đã tối ưu sâu hiệu năng (commit `be4089e`), chờ người dùng test lại** (chưa gắn tag `step-1.8-ok`):
-  - Tối ưu nét đang viết (`active`): chốt theo đợt 16 đoạn (`advance_active_committed`), mỗi khung chỉ tessellate phần đuôi ngắn (< 16 đoạn) + đầu bút modeler (giữ vững 144–146 FPS khi viết tay).
-  - Tối ưu 2000 nét tĩnh: gộp 1 `Mesh` duy nhất, thêm `reserve` trước khi gom (giảm 57% thời gian build mesh), nâng tolerance Lyon lên 0.5 (giảm thêm 25% đỉnh thừa xuống còn 334k vertices).
-  - Tối ưu GPU & VSync: chuyển `present_mode` sang `AutoNoVsync` (tránh cơ chế FIFO VSync tự động khoá tụt về 40 FPS), tắt `debug-assertions` trong profile dev để loại bỏ vòng lặp duyệt 1.73 triệu chỉ số tam giác trên CPU mỗi khung hình. Thời gian render khung giảm xuống còn 0.84ms (tương đương 1,190 FPS trên CPU).
-  - Đã có tính năng zoom/kéo trang (`view.rs`), phím F9 tạo 2000 nét mẫu (`Command::AddStrokes`), hộp thoại xác nhận Clear Page.
-- `step-1.7-ok` đã gắn (người dùng xác nhận).
+- Chuẩn bị bước vào **Bước 2.1**: Thiết kế định dạng file & Lưu/mở file (`Ctrl+S`).
 
 ## Quyết định đã chốt và lý do (không bàn lại)
 - **Bỏ hoàn toàn bản cũ (Electron/Flutter/web)**: viết mới 100% bằng Rust cho Windows.
