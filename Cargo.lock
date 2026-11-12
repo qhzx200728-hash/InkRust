@@ -1990,6 +1990,7 @@ dependencies = [
  "parry2d-f64",
  "piet",
  "rfd",
+ "serde_json",
 ]
 
 [[package]]

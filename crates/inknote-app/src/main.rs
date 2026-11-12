@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use inknote_core::{Command, Document, DocumentFile, Stroke};
+use inknote_core::{Command, Document, DocumentFile, PaperSettings, Stroke};
 use inknote_pen::{
     Constraints, PenEvent, PenPath, Style,
     brushconfig::BrushConfig,
@@ -28,7 +28,7 @@ use inknote_render::{CairoRenderContext, DrawBatch};
 use parry2d_f64::math::Vector2;
 
 use crate::{
-    icons::draw_dotted_paper,
+    icons::draw_paper,
     theme::Theme,
     toolbar::{ActiveTool, ToolbarState, show_toolbars},
     view::View,
@@ -96,11 +96,43 @@ enum UnsavedAction {
     Open,
 }
 
+fn default_paper_config_path() -> PathBuf {
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        PathBuf::from(appdata)
+            .join("InkNote")
+            .join("default_paper.json")
+    } else {
+        PathBuf::from(".inknote_default_paper.json")
+    }
+}
+
+fn load_default_paper_settings() -> PaperSettings {
+    let path = default_paper_config_path();
+    if let Ok(content) = std::fs::read_to_string(&path) {
+        if let Ok(settings) = serde_json::from_str(&content) {
+            return settings;
+        }
+    }
+    PaperSettings::default()
+}
+
+fn save_default_paper_settings(settings: &PaperSettings) {
+    let path = default_paper_config_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(settings) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
 struct InkNoteApp {
     theme: Theme,
     toolbar_state: ToolbarState,
     brush_config: BrushConfig,
     doc: Document,
+    // Cài đặt nền giấy mặc định (lưu nhớ giữa các phiên làm việc và áp dụng cho ghi chú mới)
+    default_paper_settings: PaperSettings,
     // Đường dẫn file .inknote hiện tại đang mở/lưu (None nếu là ghi chú mới chưa lưu)
     current_path: Option<PathBuf>,
     confirm_unsaved: Option<UnsavedAction>,
@@ -135,11 +167,15 @@ impl InkNoteApp {
         theme::setup_fonts(&cc.egui_ctx);
         // Ctrl +/-/0 dùng để zoom TRANG, không zoom cả giao diện
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        let default_paper = load_default_paper_settings();
+        let mut doc = Document::new();
+        *doc.paper_settings_mut() = default_paper.clone();
         Self {
             theme: Theme::default(),
             toolbar_state: ToolbarState::default(),
             brush_config: BrushConfig::default(),
-            doc: Document::new(),
+            doc,
+            default_paper_settings: default_paper,
             current_path: None,
             confirm_unsaved: None,
             batch_cache: HashMap::new(),
@@ -329,9 +365,10 @@ impl InkNoteApp {
         }
     }
 
-    /// Khởi tạo tài liệu trống mới.
+    /// Khởi tạo tài liệu trống mới (áp dụng PaperSettings mặc định).
     fn new_document(&mut self) {
         self.doc = Document::new();
+        *self.doc.paper_settings_mut() = self.default_paper_settings.clone();
         self.current_path = None;
         self.batch_cache.clear();
         self.static_cache = None;
@@ -623,13 +660,20 @@ impl eframe::App for InkNoteApp {
             self.last_up_pressure,
             self.doc.strokes().len()
         );
+        let mut paper_settings = self.doc.paper_settings().clone();
         let actions = show_toolbars(
             ui,
             &self.theme,
             &mut self.toolbar_state,
             &mut self.brush_config,
+            &mut paper_settings,
             &wacom_status,
         );
+        if paper_settings != *self.doc.paper_settings() {
+            *self.doc.paper_settings_mut() = paper_settings.clone();
+            self.default_paper_settings = paper_settings.clone();
+            save_default_paper_settings(&paper_settings);
+        }
         // Phím tắt: Ctrl+Z = Undo; Ctrl+Y hoặc Ctrl+Shift+Z = Redo
         // Phím tắt tệp: Ctrl+S = Save, Ctrl+Shift+S = Save As, Ctrl+O = Open, Ctrl+N = New
         let (key_undo, key_redo, key_save, key_save_as, key_open, key_new) = ctx.input(|i| {
@@ -831,16 +875,14 @@ impl eframe::App for InkNoteApp {
                 let origin = view.origin(paper_rect);
                 let paint_start = Instant::now();
 
-                // 1. Vẽ nền giấy trắng có chấm nhỏ đều nhau (Dotted Paper)
-                draw_dotted_paper(
+                // 1. Vẽ nền giấy theo PaperSettings (Plain, Dotted, Grid, Lined + Margin lines)
+                draw_paper(
                     &painter,
                     paper_rect,
                     origin,
-                    self.theme.paper_bg,
-                    self.theme.paper_border,
-                    self.theme.paper_dot_color,
-                    self.theme.paper_dot_spacing * view.zoom,
-                    self.theme.paper_dot_radius,
+                    &self.theme,
+                    self.doc.paper_settings(),
+                    view.zoom,
                 );
 
                 // 2. Vẽ các nét bút đã hoàn thành (gộp 1 Mesh và cache theo StaticKey)
@@ -932,6 +974,7 @@ fn main() -> eframe::Result {
 mod tests {
     use super::*;
     use eframe::egui::{Pos2, RawInput, Rect, vec2};
+    use inknote_core::PaperPattern;
 
     fn new_test_app(ctx: &egui::Context) -> InkNoteApp {
         theme::setup_fonts(ctx);
@@ -940,6 +983,7 @@ mod tests {
             toolbar_state: ToolbarState::default(),
             brush_config: BrushConfig::default(),
             doc: Document::new(),
+            default_paper_settings: PaperSettings::default(),
             current_path: None,
             confirm_unsaved: None,
             batch_cache: HashMap::new(),
@@ -989,6 +1033,32 @@ mod tests {
     }
 
     #[test]
+    fn test_paper_settings_persistence_and_switching() {
+        let ctx = egui::Context::default();
+        let mut app = new_test_app(&ctx);
+
+        // Đổi sang Grid + bật Margins 2 bên
+        app.doc.paper_settings_mut().pattern = PaperPattern::Grid;
+        app.doc.paper_settings_mut().show_margins = true;
+        app.doc.paper_settings_mut().left_margin = 100.0;
+        app.doc.paper_settings_mut().right_margin = 120.0;
+
+        // Lưu ra file .inknote
+        let temp_file = std::env::temp_dir().join("test_paper_settings.inknote");
+        app.doc.to_file().save_to_path(&temp_file).unwrap();
+
+        // Nạp vào app2: kiểu giấy và lề 2 bên phải còn nguyên vẹn
+        let mut app2 = new_test_app(&ctx);
+        app2.load_document_from(temp_file.clone());
+        assert_eq!(app2.doc.paper_settings().pattern, PaperPattern::Grid);
+        assert!(app2.doc.paper_settings().show_margins);
+        assert_eq!(app2.doc.paper_settings().left_margin, 100.0);
+        assert_eq!(app2.doc.paper_settings().right_margin, 120.0);
+
+        let _ = std::fs::remove_file(temp_file);
+    }
+
+    #[test]
     #[ignore = "benchmark: chạy bằng cargo test -p inknote-app bench -- --ignored --nocapture"]
     fn bench_paint_2000_strokes() {
         let ctx = egui::Context::default();
@@ -1023,15 +1093,13 @@ mod tests {
                 |ui| {
                     let painter = ui.painter().with_clip_rect(paper);
                     let t0 = Instant::now();
-                    draw_dotted_paper(
+                    draw_paper(
                         &painter,
                         paper,
                         paper.min,
-                        app.theme.paper_bg,
-                        app.theme.paper_border,
-                        app.theme.paper_dot_color,
-                        app.theme.paper_dot_spacing,
-                        app.theme.paper_dot_radius,
+                        &app.theme,
+                        app.doc.paper_settings(),
+                        app.view.zoom,
                     );
                     let t_dots = t0.elapsed();
                     let t1 = Instant::now();
@@ -1155,11 +1223,13 @@ mod tests {
                 };
                 let mut out = ctx.run_ui(raw_input, |ui| {
                     let wacom_status = "Test Stylus";
+                    let mut paper_settings = app.doc.paper_settings().clone();
                     let _ = show_toolbars(
                         ui,
                         &app.theme,
                         &mut app.toolbar_state,
                         &mut app.brush_config,
+                        &mut paper_settings,
                         wacom_status,
                     );
                     let workspace_frame =

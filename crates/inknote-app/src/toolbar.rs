@@ -5,6 +5,7 @@ use eframe::egui::{
     self, Align, Align2, Color32, CornerRadius, Layout, Pos2, Rect, RichText, Sense, Stroke, Ui,
     UiBuilder, Vec2, pos2, vec2,
 };
+use inknote_core::{PaperPattern, PaperSettings};
 use inknote_pen::{
     Color as PenColor,
     brushconfig::{BrushConfig, BrushStyle},
@@ -413,6 +414,7 @@ pub fn show_toolbars(
     theme: &Theme,
     state: &mut ToolbarState,
     brush_config: &mut BrushConfig,
+    paper_settings: &mut PaperSettings,
     wacom_status: &str,
 ) -> ToolbarActions {
     let mut actions = ToolbarActions {
@@ -523,7 +525,78 @@ pub fn show_toolbars(
                         });
                     ui.add_space(8.0);
                     ui.label(
-                        RichText::new("Document & Diagnostics")
+                        RichText::new("Paper Settings (P1)")
+                            .size(theme.font_size_title)
+                            .strong()
+                            .color(theme.popup_header_fg),
+                    );
+                    ui.add_space(4.0);
+                    egui::Frame::new()
+                        .fill(theme.popup_section_bg)
+                        .corner_radius(CornerRadius::same(8))
+                        .inner_margin(egui::Margin::same(8))
+                        .show(ui, |ui| {
+                            // 1. Template chọn kiểu giấy
+                            ui.label(
+                                RichText::new("Template")
+                                    .size(theme.font_size_small)
+                                    .color(theme.tool_text_muted),
+                            );
+                            ui.horizontal(|ui| {
+                                ui.selectable_value(&mut paper_settings.pattern, PaperPattern::Plain, "Plain");
+                                ui.selectable_value(&mut paper_settings.pattern, PaperPattern::Dotted, "Dotted");
+                                ui.selectable_value(&mut paper_settings.pattern, PaperPattern::Grid, "Grid");
+                                ui.selectable_value(&mut paper_settings.pattern, PaperPattern::Lined, "Lined");
+                            });
+
+                            // 2. Cỡ ô / khoảng cách
+                            if paper_settings.pattern != PaperPattern::Plain {
+                                ui.add_space(6.0);
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new("Spacing:")
+                                            .size(theme.font_size_small)
+                                            .color(theme.tool_text_fg),
+                                    );
+                                    ui.add(
+                                        egui::Slider::new(&mut paper_settings.dot_spacing, 14.0..=56.0)
+                                            .suffix(" pt"),
+                                    );
+                                });
+                            }
+
+                            // 3. Đường lề 2 bên
+                            ui.add_space(6.0);
+                            ui.checkbox(&mut paper_settings.show_margins, "Margin lines 2 bên");
+                            if paper_settings.show_margins {
+                                ui.add_space(4.0);
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new("Left:")
+                                            .size(theme.font_size_small)
+                                            .color(theme.tool_text_fg),
+                                    );
+                                    ui.add(
+                                        egui::Slider::new(&mut paper_settings.left_margin, 20.0..=240.0)
+                                            .suffix(" pt"),
+                                    );
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new("Right:")
+                                            .size(theme.font_size_small)
+                                            .color(theme.tool_text_fg),
+                                    );
+                                    ui.add(
+                                        egui::Slider::new(&mut paper_settings.right_margin, 20.0..=240.0)
+                                            .suffix(" pt"),
+                                    );
+                                });
+                            }
+                        });
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new("Diagnostics")
                             .size(theme.font_size_title)
                             .strong()
                             .color(theme.popup_header_fg),
@@ -534,11 +607,6 @@ pub fn show_toolbars(
                         .corner_radius(CornerRadius::same(8))
                         .inner_margin(egui::Margin::same(8))
                         .show(ui, |ui| {
-                            ui.label(
-                                RichText::new("Paper Template: Dotted Paper (Default)")
-                                    .size(theme.font_size_body)
-                                    .color(theme.tool_text_fg),
-                            );
                             ui.label(
                                 RichText::new(format!("Stylus: {wacom_status}"))
                                     .size(theme.font_size_small)

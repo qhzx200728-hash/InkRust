@@ -25,11 +25,17 @@ impl Default for PaperPattern {
     }
 }
 
+fn default_page_width() -> f32 {
+    1200.0
+}
+
 /// Cài đặt nền giấy (Paper Settings) theo docs/02-architecture.md mục 3.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PaperSettings {
     pub pattern: PaperPattern,
     pub dot_spacing: f32,
+    #[serde(default = "default_page_width")]
+    pub page_width: f32,
     pub show_margins: bool,
     pub left_margin: f32,
     pub right_margin: f32,
@@ -40,6 +46,7 @@ impl Default for PaperSettings {
         Self {
             pattern: PaperPattern::Dotted,
             dot_spacing: 24.0,
+            page_width: 1200.0,
             show_margins: false,
             left_margin: 80.0,
             right_margin: 80.0,

@@ -315,43 +315,113 @@ pub fn draw_icon(painter: &Painter, rect: Rect, icon: ToolIcon, color: Color32) 
     }
 }
 
-/// Vẽ chấm lưới cho nền giấy Dotted Paper
-pub fn draw_dotted_paper(
+use inknote_core::{PaperPattern, PaperSettings};
+use crate::theme::Theme;
+
+/// Vẽ nền trang giấy (Plain, Dotted, Grid, Lined) kèm đường lề 2 bên (Margin lines).
+pub fn draw_paper(
     painter: &Painter,
     paper_rect: Rect,
     origin: Pos2,
-    paper_bg: Color32,
-    border_color: Color32,
-    dot_color: Color32,
-    spacing: f32,
-    dot_radius: f32,
+    theme: &Theme,
+    settings: &PaperSettings,
+    zoom: f32,
 ) {
-    painter.rect_filled(paper_rect, 4.0, paper_bg);
+    // 1. Vẽ nền giấy trắng + viền giấy
+    painter.rect_filled(paper_rect, 4.0, theme.paper_bg);
     painter.rect_stroke(
         paper_rect,
         4.0,
-        Stroke::new(1.0, border_color),
+        Stroke::new(1.0, theme.paper_border),
         egui::StrokeKind::Middle,
     );
 
-    // `origin` = gốc trang trên màn hình; `spacing` đã nhân zoom. Chấm bám theo trang khi kéo/zoom.
-    if spacing <= 0.0 {
-        return;
-    }
-    let mut step = spacing;
-    while step < 8.0 {
-        step *= 2.0; // zoom nhỏ: thưa bớt chấm để không vẽ quá nhiều
+    let spacing = settings.dot_spacing * zoom;
+    if spacing > 0.0 {
+        match settings.pattern {
+            PaperPattern::Plain => {}
+            PaperPattern::Dotted => {
+                let mut step = spacing;
+                while step < 8.0 {
+                    step *= 2.0;
+                }
+                let first_x = ((paper_rect.left() - origin.x) / step).ceil();
+                let first_y = ((paper_rect.top() - origin.y) / step).ceil();
+                let mut y = origin.y + first_y * step;
+                while y <= paper_rect.bottom() {
+                    let mut x = origin.x + first_x * step;
+                    while x <= paper_rect.right() {
+                        painter.circle_filled(Pos2::new(x, y), theme.paper_dot_radius, theme.paper_dot_color);
+                        x += step;
+                    }
+                    y += step;
+                }
+            }
+            PaperPattern::Grid => {
+                let mut step = spacing;
+                while step < 8.0 {
+                    step *= 2.0;
+                }
+                let grid_stroke = Stroke::new(1.0, theme.paper_grid_color);
+                // Các đường kẻ dọc
+                let first_x = ((paper_rect.left() - origin.x) / step).ceil();
+                let mut x = origin.x + first_x * step;
+                while x <= paper_rect.right() {
+                    painter.line_segment(
+                        [Pos2::new(x, paper_rect.top()), Pos2::new(x, paper_rect.bottom())],
+                        grid_stroke,
+                    );
+                    x += step;
+                }
+                // Các đường kẻ ngang
+                let first_y = ((paper_rect.top() - origin.y) / step).ceil();
+                let mut y = origin.y + first_y * step;
+                while y <= paper_rect.bottom() {
+                    painter.line_segment(
+                        [Pos2::new(paper_rect.left(), y), Pos2::new(paper_rect.right(), y)],
+                        grid_stroke,
+                    );
+                    y += step;
+                }
+            }
+            PaperPattern::Lined => {
+                let mut step = spacing;
+                while step < 8.0 {
+                    step *= 2.0;
+                }
+                let line_stroke = Stroke::new(1.0, theme.paper_line_color);
+                // Các dòng kẻ ngang
+                let first_y = ((paper_rect.top() - origin.y) / step).ceil();
+                let mut y = origin.y + first_y * step;
+                while y <= paper_rect.bottom() {
+                    painter.line_segment(
+                        [Pos2::new(paper_rect.left(), y), Pos2::new(paper_rect.right(), y)],
+                        line_stroke,
+                    );
+                    y += step;
+                }
+            }
+        }
     }
 
-    let first_x = ((paper_rect.left() - origin.x) / step).ceil();
-    let first_y = ((paper_rect.top() - origin.y) / step).ceil();
-    let mut y = origin.y + first_y * step;
-    while y <= paper_rect.bottom() {
-        let mut x = origin.x + first_x * step;
-        while x <= paper_rect.right() {
-            painter.circle_filled(Pos2::new(x, y), dot_radius, dot_color);
-            x += step;
+    // 2. Vẽ đường lề 2 bên (Margin Lines màu đỏ nhạt / hồng pastel)
+    if settings.show_margins {
+        let margin_stroke = Stroke::new(1.5, theme.paper_margin_line_color);
+        // Đường lề trái
+        let left_x = origin.x + settings.left_margin * zoom;
+        if left_x >= paper_rect.left() && left_x <= paper_rect.right() {
+            painter.line_segment(
+                [Pos2::new(left_x, paper_rect.top()), Pos2::new(left_x, paper_rect.bottom())],
+                margin_stroke,
+            );
         }
-        y += step;
+        // Đường lề phải
+        let right_x = origin.x + (settings.page_width - settings.right_margin) * zoom;
+        if right_x >= paper_rect.left() && right_x <= paper_rect.right() {
+            painter.line_segment(
+                [Pos2::new(right_x, paper_rect.top()), Pos2::new(right_x, paper_rect.bottom())],
+                margin_stroke,
+            );
+        }
     }
 }

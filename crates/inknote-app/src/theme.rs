@@ -38,11 +38,15 @@ pub struct Theme {
     pub popup_header_fg: Color32,
     pub popup_section_bg: Color32,
 
-    // 4. Canvas và Trang giấy (Dotted Paper mặc định)
+    // 4. Canvas và Trang giấy (Paper Settings)
     pub workspace_bg: Color32,
     pub paper_bg: Color32,
     pub paper_border: Color32,
     pub paper_dot_color: Color32,
+    pub paper_grid_color: Color32,
+    pub paper_line_color: Color32,
+    pub paper_margin_line_color: Color32,
+    #[allow(dead_code)]
     pub paper_dot_spacing: f32,
     pub paper_dot_radius: f32,
     pub paper_margin: f32,
@@ -86,11 +90,14 @@ impl Default for Theme {
             popup_header_fg: Color32::WHITE,
             popup_section_bg: Color32::from_rgb(40, 43, 52),
 
-            // Canvas và trang giấy chấm (Dotted Paper)
+            // Canvas và trang giấy (Paper Settings)
             workspace_bg: Color32::from_rgb(228, 232, 238),
             paper_bg: Color32::WHITE,
             paper_border: Color32::from_rgb(204, 210, 220),
             paper_dot_color: Color32::from_rgb(198, 205, 216),
+            paper_grid_color: Color32::from_rgb(222, 227, 235),
+            paper_line_color: Color32::from_rgb(218, 224, 232),
+            paper_margin_line_color: Color32::from_rgba_unmultiplied(240, 110, 130, 180),
             paper_dot_spacing: 24.0,
             paper_dot_radius: 1.25,
             paper_margin: 14.0,
