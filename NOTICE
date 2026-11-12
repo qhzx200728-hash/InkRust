@@ -1,0 +1,32 @@
+# NOTICE – Thông tin bản quyền và nguồn gốc mã nguồn thứ ba (Third-Party Notices)
+
+Dự án **InkNote** được phân phối theo giấy phép **GNU General Public License v3.0 or later (GPL-3.0-or-later)**.
+Xem toàn văn giấy phép tại tệp `LICENSE`.
+
+---
+
+## 1. Rnote (`crates/inknote-pen`)
+
+Phần xử lý nét bút, đường cong, bộ dựng hình học và cấu hình bút trong thư mục `crates/inknote-pen/` được sao chép từ dự án **Rnote**:
+- **Tên dự án gốc**: Rnote (`rnote-compose` và một phần `rnote-engine`)
+- **Kho mã nguồn**: https://github.com/flxzt/rnote
+- **Commit hash tham chiếu (`reference/rnote`)**: `83a76367dbd3d6c461c10553c45231799a25ea4b` (ngày 2026-11-11)
+- **Tác giả bản quyền**: Felix Zwettler (`flxzt`) và các cộng tác viên của Rnote (xem danh sách tác giả của Rnote)
+- **Giấy phép**: GNU General Public License v3.0 or later (`GPL-3.0-or-later`)
+- **Chi tiết các tệp và những thay đổi nhỏ**: xem tài liệu `docs/03-port-rnote.md`.
+
+---
+
+## 2. Xournal++ (Chỉ tham khảo ý tưởng quy trình LaTeX)
+
+Quy trình chèn và chỉnh sửa công thức LaTeX (lưu mã nguồn LaTeX làm dữ liệu chính, nhấp đúp để mở lại mã cũ, xem trước trực tiếp, gộp thao tác sửa thành 1 bước hoàn tác) được lấy cảm hứng từ **Xournal++**:
+- **Kho mã nguồn tham khảo**: https://github.com/xournalpp/xournalpp
+- **Ghi chú pháp lý**: InkNote **chỉ đọc để hiểu ý tưởng quy trình** và tự viết lại hoàn toàn bằng Rust, **không sao chép mã nguồn** từ Xournal++.
+
+---
+
+## 3. Bộ biểu tượng giao diện (Icons)
+
+Các biểu tượng trên thanh công cụ và giao diện của InkNote được tự vẽ bằng hình học vector hoặc sử dụng từ các bộ biểu tượng mã nguồn mở tương thích với GPL-3.0:
+- **Lucide Icons**: https://github.com/lucide-icons/lucide — Giấy phép **ISC License** (Copyright (c) for portions of Lucide are held by Cole Bemis 2013-2022 as part of Feather (MIT). All other copyright (c) for Lucide are held by Lucide Contributors 2022).
+- **Phosphor Icons**: https://github.com/phosphor-icons/core — Giấy phép **MIT License** (Copyright (c) 2020 Phosphor Icons).
