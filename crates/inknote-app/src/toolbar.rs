@@ -49,6 +49,9 @@ pub struct ToolbarActions {
     pub undo_clicked: bool,
     pub redo_clicked: bool,
     pub clear_clicked: bool,
+    pub save_clicked: bool,
+    pub open_clicked: bool,
+    pub new_clicked: bool,
 }
 
 /// Thông tin hình học thực tế của các khu vực trên thanh công cụ (dùng để kiểm chứng alignment)
@@ -416,6 +419,9 @@ pub fn show_toolbars(
         undo_clicked: false,
         redo_clicked: false,
         clear_clicked: false,
+        save_clicked: false,
+        open_clicked: false,
+        new_clicked: false,
     };
 
     // =========================================================================
@@ -491,6 +497,31 @@ pub fn show_toolbars(
                 .frame(theme.dark_popup_frame(right_ui.style()))
                 .show(|ui| {
                     ui.set_min_width(270.0);
+                    ui.label(
+                        RichText::new("File")
+                            .size(theme.font_size_title)
+                            .strong()
+                            .color(theme.popup_header_fg),
+                    );
+                    ui.add_space(4.0);
+                    egui::Frame::new()
+                        .fill(theme.popup_section_bg)
+                        .corner_radius(CornerRadius::same(8))
+                        .inner_margin(egui::Margin::same(8))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                if ui.button("Save (Ctrl+S)").clicked() {
+                                    actions.save_clicked = true;
+                                }
+                                if ui.button("Open (Ctrl+O)").clicked() {
+                                    actions.open_clicked = true;
+                                }
+                                if ui.button("New (Ctrl+N)").clicked() {
+                                    actions.new_clicked = true;
+                                }
+                            });
+                        });
+                    ui.add_space(8.0);
                     ui.label(
                         RichText::new("Document & Diagnostics")
                             .size(theme.font_size_title)
