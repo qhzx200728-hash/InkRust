@@ -1,7 +1,10 @@
 // Thanh công cụ chính (Navigation Toolbar) và Thanh tuỳ chọn công cụ (Contextual Tool Options Bar)
 // theo đặc tả docs/04-ui-spec.md (Ngôn ngữ giao diện: Tiếng Anh).
 
-use eframe::egui::{self, Color32, CornerRadius, Pos2, Rect, RichText, Sense, Stroke, Ui, pos2, vec2};
+use eframe::egui::{
+    self, Align, Align2, Color32, CornerRadius, Layout, Pos2, Rect, RichText, Sense, Stroke, Ui,
+    UiBuilder, Vec2, pos2, vec2,
+};
 use inknote_pen::{
     Color as PenColor,
     brushconfig::{BrushConfig, BrushStyle},
@@ -47,11 +50,36 @@ pub struct ToolbarActions {
     pub clear_clicked: bool,
 }
 
+/// Thông tin hình học thực tế của các khu vực trên thanh công cụ (dùng để kiểm chứng alignment)
+#[derive(Clone, Copy, Debug)]
+pub struct ToolbarLayoutMetrics {
+    pub nav_bar_rect: Rect,
+    pub nav_left_rect: Rect,
+    pub nav_center_rect: Rect,
+    pub nav_right_rect: Rect,
+    pub tool_strip_rect: Rect,
+    pub tool_pill_rect: Rect,
+}
+
+impl Default for ToolbarLayoutMetrics {
+    fn default() -> Self {
+        Self {
+            nav_bar_rect: Rect::NOTHING,
+            nav_left_rect: Rect::NOTHING,
+            nav_center_rect: Rect::NOTHING,
+            nav_right_rect: Rect::NOTHING,
+            tool_strip_rect: Rect::NOTHING,
+            tool_pill_rect: Rect::NOTHING,
+        }
+    }
+}
+
 pub struct ToolbarState {
     pub active_tool: ActiveTool,
     pub read_only: bool,
     pub show_thumbnails_hint: bool,
     pub marker_alpha: f64,
+    pub last_metrics: ToolbarLayoutMetrics,
 }
 
 impl Default for ToolbarState {
@@ -61,8 +89,59 @@ impl Default for ToolbarState {
             read_only: false,
             show_thumbnails_hint: false,
             marker_alpha: 0.42,
+            last_metrics: ToolbarLayoutMetrics::default(),
         }
     }
+}
+
+/// Đặt một khối widget sao cho tâm của nó trùng với `target_center` (tâm cửa sổ),
+/// đồng thời kẹp trong `safe_bounds` để không bao giờ tràn hoặc chồng lấn lên nhóm hai bên.
+fn show_centered_in_bounds(
+    ui: &mut Ui,
+    id_salt: &'static str,
+    safe_bounds: Rect,
+    target_center: Pos2,
+    add_contents: impl FnOnce(&mut Ui),
+) -> Rect {
+    let id = ui.make_persistent_id(id_salt);
+    let size_id = id.with("measured_size");
+    let last_size: Option<Vec2> = ui.data(|d| d.get_temp(size_id));
+
+    let child_max_rect = if let Some(size) = last_size {
+        let ideal_left = target_center.x - size.x * 0.5;
+        let min_left = safe_bounds.left();
+        let max_left = (safe_bounds.right() - size.x).max(min_left);
+        let left = ideal_left.clamp(min_left, max_left);
+
+        let ideal_top = target_center.y - size.y * 0.5;
+        let min_top = safe_bounds.top();
+        let max_top = (safe_bounds.bottom() - size.y).max(min_top);
+        let top = ideal_top.clamp(min_top, max_top);
+
+        Rect::from_min_size(pos2(left, top), safe_bounds.size())
+    } else {
+        safe_bounds
+    };
+
+    let mut builder = UiBuilder::new()
+        .scope_id(id)
+        .max_rect(child_max_rect)
+        .layout(Layout::left_to_right(Align::Center));
+    if last_size.is_none() {
+        builder = builder.invisible();
+    }
+
+    let inner = ui.scope_builder(builder, add_contents);
+    let used_rect = inner.response.rect;
+    let measured = used_rect.size();
+
+    if last_size != Some(measured) {
+        ui.data_mut(|d| d.insert_temp(size_id, measured));
+        ui.ctx()
+            .request_discard("toolbar centered group size updated");
+    }
+
+    used_rect
 }
 
 /// Vẽ nút icon trên Thanh công cụ chính (Navigation Toolbar)
@@ -102,13 +181,15 @@ fn nav_icon_button(
     response.on_hover_text(tooltip)
 }
 
-/// Vẽ vạch ngăn cách dọc trên thanh công cụ
-fn draw_vertical_divider(ui: &mut Ui, height: f32, color: Color32) {
-    let (rect, _) = ui.allocate_exact_size(vec2(8.0, height), Sense::hover());
+/// Vẽ vạch ngăn cách dọc giữa các nhóm chức năng, căn giữa theo trục dọc `row_height`
+fn draw_vertical_divider(ui: &mut Ui, row_height: f32, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(vec2(10.0, row_height), Sense::hover());
     if ui.is_rect_visible(rect) {
         let x = rect.center().x;
+        let half_len = (row_height * 0.32).max(6.0);
+        let cy = rect.center().y;
         ui.painter().line_segment(
-            [pos2(x, rect.top() + 5.0), pos2(x, rect.bottom() - 5.0)],
+            [pos2(x, cy - half_len), pos2(x, cy + half_len)],
             Stroke::new(1.0, color),
         );
     }
@@ -122,7 +203,7 @@ fn brush_style_chip(
     label: &str,
     selected: bool,
 ) -> egui::Response {
-    let desired = vec2(78.0, 26.0);
+    let desired = vec2(78.0, theme.tool_row_height);
     let (rect, response) = ui.allocate_exact_size(desired, Sense::click());
 
     if ui.is_rect_visible(rect) {
@@ -143,12 +224,13 @@ fn brush_style_chip(
         } else {
             theme.tool_text_fg
         };
-        let icon_rect = Rect::from_min_size(pos2(rect.left() + 5.0, rect.top() + 4.0), vec2(18.0, 18.0));
+        let icon_rect =
+            Rect::from_center_size(pos2(rect.left() + 14.0, rect.center().y), vec2(18.0, 18.0));
         draw_icon(painter, icon_rect, icon, fg);
 
         painter.text(
             pos2(icon_rect.right() + 4.0, rect.center().y),
-            egui::Align2::LEFT_CENTER,
+            Align2::LEFT_CENTER,
             label,
             egui::FontId::proportional(theme.font_size_small),
             fg,
@@ -166,7 +248,8 @@ fn stroke_width_slot_button(
     selected: bool,
     vis_scale: f32,
 ) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(vec2(26.0, 26.0), Sense::click());
+    let h = theme.tool_row_height;
+    let (rect, response) = ui.allocate_exact_size(vec2(h, h), Sense::click());
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         if selected {
@@ -192,10 +275,38 @@ fn stroke_width_slot_button(
     response.on_hover_text(format!("{width:.1} px"))
 }
 
-/// Vẽ chấm màu tròn trên thanh tuỳ chọn hoặc trong Pop-up bảng màu
-fn color_swatch_button(ui: &mut Ui, rgb: [u8; 3], selected: bool, radius: f32) -> egui::Response {
-    let side = (radius + 4.0) * 2.0;
-    let (rect, response) = ui.allocate_exact_size(vec2(side, side), Sense::click());
+/// Vẽ nút hiển thị số px độ dày hiện tại (cùng chiều cao `tool_row_height` và căn giữa trục dọc)
+fn stroke_width_value_button(ui: &mut Ui, theme: &Theme, width: f64) -> egui::Response {
+    let desired = vec2(46.0, theme.tool_row_height);
+    let (rect, response) = ui.allocate_exact_size(desired, Sense::click());
+    if ui.is_rect_visible(rect) {
+        let bg = if response.hovered() {
+            theme.tool_selected_bg
+        } else {
+            theme.tool_hover_bg
+        };
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(theme.tool_item_rounding), bg);
+        ui.painter().text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            format!("{width:.1}px"),
+            egui::FontId::proportional(theme.font_size_small),
+            theme.tool_text_fg,
+        );
+    }
+    response.on_hover_text("Fine-tune Stroke Thickness")
+}
+
+/// Vẽ chấm màu tròn với kích thước ô chứa `box_side` cố định để thẳng hàng trục dọc
+fn color_swatch_button(
+    ui: &mut Ui,
+    rgb: [u8; 3],
+    selected: bool,
+    radius: f32,
+    box_side: f32,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(box_side, box_side), Sense::click());
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         let center: Pos2 = rect.center();
@@ -226,7 +337,8 @@ fn dark_bar_icon_button(
     icon: ToolIcon,
     tooltip: &str,
 ) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(vec2(26.0, 26.0), Sense::click());
+    let h = theme.tool_row_height;
+    let (rect, response) = ui.allocate_exact_size(vec2(h, h), Sense::click());
     if ui.is_rect_visible(rect) {
         if response.hovered() {
             ui.painter().rect_filled(
@@ -241,10 +353,7 @@ fn dark_bar_icon_button(
 }
 
 /// Đọc và cập nhật màu + độ dày của kiểu bút đang chọn trong `BrushConfig`
-fn current_width_and_color(
-    cfg: &BrushConfig,
-    marker_alpha: f64,
-) -> (f64, PenColor) {
+fn current_width_and_color(cfg: &BrushConfig, marker_alpha: f64) -> (f64, PenColor) {
     match cfg.style {
         BrushStyle::Solid => (
             cfg.solid_options.stroke_width,
@@ -313,134 +422,186 @@ pub fn show_toolbars(
     egui::Panel::top("navigation_toolbar")
         .frame(theme.nav_frame())
         .show(ui, |ui| {
-            ui.set_min_height(theme.nav_bar_height - 10.0);
-            ui.columns(3, |cols| {
-                // --- Nhóm Trái: Home, Pages, Read-only ---
-                cols[0].horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    if nav_icon_button(ui, theme, ToolIcon::Home, false, "Library (Step 7 - P3)").clicked() {
-                        // Sẽ chuyển về màn hình Library ở Bước 7.1
-                    }
-                    if nav_icon_button(
-                        ui,
-                        theme,
-                        ToolIcon::Pages,
-                        state.show_thumbnails_hint,
-                        "Page Thumbnails (Step 3.2 - P1)",
-                    )
-                    .clicked()
-                    {
-                        state.show_thumbnails_hint = !state.show_thumbnails_hint;
-                    }
-                    if nav_icon_button(
-                        ui,
-                        theme,
-                        ToolIcon::ReadOnly,
-                        state.read_only,
-                        "Read-Only Mode (Lock canvas drawing)",
-                    )
-                    .clicked()
-                    {
-                        state.read_only = !state.read_only;
-                    }
-                });
+            let nav_row_h = theme.nav_button_size[1].max(theme.nav_bar_height - 10.0);
+            let (bar_rect, _) =
+                ui.allocate_exact_size(vec2(ui.available_width(), nav_row_h), Sense::hover());
 
-                // --- Nhóm Giữa: Các công cụ chính (Lasso, Pen, Eraser, Text, Image, Shapes, LaTeX) ---
-                cols[1].with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
-                        let tools = [
-                            (ActiveTool::Lasso, ToolIcon::Lasso, "Lasso Select (Step 5.2)"),
-                            (ActiveTool::Pen, ToolIcon::Pen, "Pen (Rnote Brush)"),
-                            (ActiveTool::Eraser, ToolIcon::Eraser, "Eraser - Strokes Only (Step 5.1)"),
-                            (ActiveTool::Text, ToolIcon::Text, "Text Tool (Step 5.4)"),
-                            (ActiveTool::Image, ToolIcon::Image, "Insert / Paste Image (Step 6.1)"),
-                            (ActiveTool::Shapes, ToolIcon::Shapes, "Shapes (Step 5.3)"),
-                            (ActiveTool::Latex, ToolIcon::Latex, "Insert LaTeX Formula (Step 4)"),
-                        ];
-                        for (tool, icon, tip) in tools {
-                            let is_sel = !state.read_only && state.active_tool == tool;
-                            if nav_icon_button(ui, theme, icon, is_sel, tip).clicked() {
-                                state.read_only = false;
-                                state.active_tool = tool;
-                            }
-                        }
+            // 1. Nhóm Trái: luôn căn trái trong `bar_rect`
+            let mut left_ui = ui.new_child(
+                UiBuilder::new()
+                    .id_salt("nav_left_group")
+                    .max_rect(bar_rect)
+                    .layout(Layout::left_to_right(Align::Center)),
+            );
+            left_ui.spacing_mut().item_spacing.x = 4.0;
+            if nav_icon_button(
+                &mut left_ui,
+                theme,
+                ToolIcon::Home,
+                false,
+                "Library (Step 7 - P3)",
+            )
+            .clicked()
+            {
+                // Sẽ chuyển về màn hình Library ở Bước 7.1
+            }
+            if nav_icon_button(
+                &mut left_ui,
+                theme,
+                ToolIcon::Pages,
+                state.show_thumbnails_hint,
+                "Page Thumbnails (Step 3.2 - P1)",
+            )
+            .clicked()
+            {
+                state.show_thumbnails_hint = !state.show_thumbnails_hint;
+            }
+            if nav_icon_button(
+                &mut left_ui,
+                theme,
+                ToolIcon::ReadOnly,
+                state.read_only,
+                "Read-Only Mode (Lock canvas drawing)",
+            )
+            .clicked()
+            {
+                state.read_only = !state.read_only;
+            }
+            let left_rect = left_ui.min_rect();
 
-                        draw_vertical_divider(ui, 28.0, theme.nav_divider);
+            // 2. Nhóm Phải: luôn căn phải trong `bar_rect`
+            let mut right_ui = ui.new_child(
+                UiBuilder::new()
+                    .id_salt("nav_right_group")
+                    .max_rect(bar_rect)
+                    .layout(Layout::right_to_left(Align::Center)),
+            );
+            right_ui.spacing_mut().item_spacing.x = 4.0;
+            let more_btn = nav_icon_button(
+                &mut right_ui,
+                theme,
+                ToolIcon::More,
+                false,
+                "More & Paper Settings",
+            );
 
-                        if nav_icon_button(ui, theme, ToolIcon::Undo, false, "Undo (Ctrl+Z)").clicked() {
-                            actions.undo_clicked = true;
-                        }
-                        if nav_icon_button(ui, theme, ToolIcon::Trash, false, "Clear Page").clicked() {
-                            actions.clear_clicked = true;
-                        }
-                    });
-                });
-
-                // --- Nhóm Phải: Add Page, Export, More (•••) ---
-                cols[2].with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    let more_btn = nav_icon_button(
-                        ui,
-                        theme,
-                        ToolIcon::More,
-                        false,
-                        "More & Paper Settings",
+            egui::Popup::from_toggle_button_response(&more_btn)
+                .frame(theme.dark_popup_frame(right_ui.style()))
+                .show(|ui| {
+                    ui.set_min_width(270.0);
+                    ui.label(
+                        RichText::new("Document & Diagnostics")
+                            .size(theme.font_size_title)
+                            .strong()
+                            .color(theme.popup_header_fg),
                     );
-
-                    // Pop-up tối bo góc cho menu More (•••)
-                    egui::Popup::from_toggle_button_response(&more_btn)
-                        .frame(theme.dark_popup_frame(ui.style()))
-                        .show(|ui| {
-                            ui.set_min_width(270.0);
+                    ui.add_space(6.0);
+                    egui::Frame::new()
+                        .fill(theme.popup_section_bg)
+                        .corner_radius(CornerRadius::same(8))
+                        .inner_margin(egui::Margin::same(8))
+                        .show(ui, |ui| {
                             ui.label(
-                                RichText::new("Document & Diagnostics")
-                                    .size(theme.font_size_title)
-                                    .strong()
-                                    .color(theme.popup_header_fg),
+                                RichText::new("Paper Template: Dotted Paper (Default)")
+                                    .size(theme.font_size_body)
+                                    .color(theme.tool_text_fg),
                             );
-                            ui.add_space(6.0);
-                            egui::Frame::new()
-                                .fill(theme.popup_section_bg)
-                                .corner_radius(CornerRadius::same(8))
-                                .inner_margin(egui::Margin::same(8))
-                                .show(ui, |ui| {
-                                    ui.label(
-                                        RichText::new("Paper Template: Dotted Paper (Default)")
-                                            .size(theme.font_size_body)
-                                            .color(theme.tool_text_fg),
-                                    );
-                                    ui.label(
-                                        RichText::new(format!("Stylus: {wacom_status}"))
-                                            .size(theme.font_size_small)
-                                            .color(theme.tool_text_muted),
-                                    );
-                                    ui.label(
-                                        RichText::new(
-                                            "Font Check: Tiếng Việt, ắ ằ ẳ ẵ ặ ơ ư đ Đ",
-                                        )
-                                        .size(theme.font_size_small)
-                                        .color(theme.tool_text_fg),
-                                    );
-                                });
+                            ui.label(
+                                RichText::new(format!("Stylus: {wacom_status}"))
+                                    .size(theme.font_size_small)
+                                    .color(theme.tool_text_muted),
+                            );
+                            ui.label(
+                                RichText::new("Font Check: Tiếng Việt, ắ ằ ẳ ẵ ặ ơ ư đ Đ")
+                                    .size(theme.font_size_small)
+                                    .color(theme.tool_text_fg),
+                            );
                         });
-
-                    let _ = nav_icon_button(
-                        ui,
-                        theme,
-                        ToolIcon::Export,
-                        false,
-                        "Export PDF / Image (Step 7.3 - P3)",
-                    );
-                    let _ = nav_icon_button(
-                        ui,
-                        theme,
-                        ToolIcon::AddPage,
-                        false,
-                        "Add Page (Step 3.1 - P1)",
-                    );
                 });
-            });
+
+            let _ = nav_icon_button(
+                &mut right_ui,
+                theme,
+                ToolIcon::Export,
+                false,
+                "Export PDF / Image (Step 7.3 - P3)",
+            );
+            let _ = nav_icon_button(
+                &mut right_ui,
+                theme,
+                ToolIcon::AddPage,
+                false,
+                "Add Page (Step 3.1 - P1)",
+            );
+            let right_rect = right_ui.min_rect();
+
+            // 3. Nhóm Giữa: tâm trùng với tâm cửa sổ (`bar_rect.center()`),
+            // đồng thời giới hạn trong khoảng giữa Nhóm Trái và Nhóm Phải để không chồng lấn.
+            let min_gap = 8.0;
+            let safe_left = (left_rect.right() + min_gap).min(bar_rect.right());
+            let safe_right = (right_rect.left() - min_gap).max(safe_left);
+            let safe_center_bounds = Rect::from_min_max(
+                pos2(safe_left, bar_rect.top()),
+                pos2(safe_right, bar_rect.bottom()),
+            );
+
+            let center_rect = show_centered_in_bounds(
+                ui,
+                "nav_center_group",
+                safe_center_bounds,
+                bar_rect.center(),
+                |ui| {
+                    ui.set_min_height(nav_row_h);
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    let tools = [
+                        (
+                            ActiveTool::Lasso,
+                            ToolIcon::Lasso,
+                            "Lasso Select (Step 5.2)",
+                        ),
+                        (ActiveTool::Pen, ToolIcon::Pen, "Pen (Rnote Brush)"),
+                        (
+                            ActiveTool::Eraser,
+                            ToolIcon::Eraser,
+                            "Eraser - Strokes Only (Step 5.1)",
+                        ),
+                        (ActiveTool::Text, ToolIcon::Text, "Text Tool (Step 5.4)"),
+                        (
+                            ActiveTool::Image,
+                            ToolIcon::Image,
+                            "Insert / Paste Image (Step 6.1)",
+                        ),
+                        (ActiveTool::Shapes, ToolIcon::Shapes, "Shapes (Step 5.3)"),
+                        (
+                            ActiveTool::Latex,
+                            ToolIcon::Latex,
+                            "Insert LaTeX Formula (Step 4)",
+                        ),
+                    ];
+                    for (tool, icon, tip) in tools {
+                        let is_sel = !state.read_only && state.active_tool == tool;
+                        if nav_icon_button(ui, theme, icon, is_sel, tip).clicked() {
+                            state.read_only = false;
+                            state.active_tool = tool;
+                        }
+                    }
+
+                    draw_vertical_divider(ui, nav_row_h, theme.nav_divider);
+
+                    if nav_icon_button(ui, theme, ToolIcon::Undo, false, "Undo (Ctrl+Z)").clicked()
+                    {
+                        actions.undo_clicked = true;
+                    }
+                    if nav_icon_button(ui, theme, ToolIcon::Trash, false, "Clear Page").clicked() {
+                        actions.clear_clicked = true;
+                    }
+                },
+            );
+
+            state.last_metrics.nav_bar_rect = bar_rect;
+            state.last_metrics.nav_left_rect = left_rect;
+            state.last_metrics.nav_center_rect = center_rect;
+            state.last_metrics.nav_right_rect = right_rect;
         });
 
     // =========================================================================
@@ -449,38 +610,56 @@ pub fn show_toolbars(
     egui::Panel::top("contextual_tool_options_bar")
         .frame(theme.tool_strip_frame())
         .show(ui, |ui| {
-            ui.vertical_centered(|ui| {
-                theme.tool_pill_frame().show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
+            let pill_outer_h = theme.tool_row_height + 10.0; // inner_margin.y = 5 * 2
+            let (strip_rect, _) = ui.allocate_exact_size(
+                vec2(ui.available_width(), pill_outer_h),
+                Sense::hover(),
+            );
+            let mut pill_rect = Rect::NOTHING;
 
-                        if state.read_only {
-                            ui.label(
-                                RichText::new("Read-Only Mode is active — click the eye icon or any tool to resume drawing")
-                                    .size(theme.font_size_body)
-                                    .color(theme.tool_text_fg),
-                            );
-                            return;
-                        }
+            let _ = show_centered_in_bounds(
+                ui,
+                "contextual_options_pill_aligned",
+                strip_rect,
+                strip_rect.center(),
+                |ui| {
+                    let inner = theme.tool_pill_frame().show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.set_min_height(theme.tool_row_height);
+                            ui.spacing_mut().item_spacing.x = 6.0;
 
-                        match state.active_tool {
-                            ActiveTool::Pen => {
-                                show_pen_contextual_options(ui, theme, state, brush_config);
-                            }
-                            other => {
+                            if state.read_only {
                                 ui.label(
-                                    RichText::new(format!(
-                                        "{} — Contextual options will be enabled in its Roadmap step",
-                                        other.label()
-                                    ))
-                                    .size(theme.font_size_body)
-                                    .color(theme.tool_text_fg),
+                                    RichText::new("Read-Only Mode is active — click the eye icon or any tool to resume drawing")
+                                        .size(theme.font_size_body)
+                                        .color(theme.tool_text_fg),
                                 );
+                                return;
                             }
-                        }
+
+                            match state.active_tool {
+                                ActiveTool::Pen => {
+                                    show_pen_contextual_options(ui, theme, state, brush_config);
+                                }
+                                other => {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "{} — Contextual options will be enabled in its Roadmap step",
+                                            other.label()
+                                        ))
+                                        .size(theme.font_size_body)
+                                        .color(theme.tool_text_fg),
+                                    );
+                                }
+                            }
+                        });
                     });
-                });
-            });
+                    pill_rect = inner.response.rect;
+                },
+            );
+
+            state.last_metrics.tool_strip_rect = strip_rect;
+            state.last_metrics.tool_pill_rect = pill_rect;
         });
 
     actions
@@ -493,6 +672,8 @@ fn show_pen_contextual_options(
     state: &mut ToolbarState,
     brush_config: &mut BrushConfig,
 ) {
+    let row_h = theme.tool_row_height;
+
     // 1. Nhóm chọn Kiểu bút (Solid / Marker / Textured)
     if brush_style_chip(
         ui,
@@ -516,7 +697,6 @@ fn show_pen_contextual_options(
     .clicked()
     {
         brush_config.style = BrushStyle::Marker;
-        // Đảm bảo bút Marker có độ trong suốt (alpha) để tô dạ quang không che chữ
         let (_, c) = current_width_and_color(brush_config, state.marker_alpha);
         if c.a >= 0.95 {
             brush_config.marker_options.stroke_color = Some(PenColor {
@@ -559,7 +739,6 @@ fn show_pen_contextual_options(
             );
             ui.add_space(6.0);
 
-            // Nhóm 1: Stroke Builder
             egui::Frame::new()
                 .fill(theme.popup_section_bg)
                 .corner_radius(CornerRadius::same(8))
@@ -593,7 +772,6 @@ fn show_pen_contextual_options(
 
             ui.add_space(6.0);
 
-            // Nhóm 2: Pressure Curve (cho bút Solid)
             egui::Frame::new()
                 .fill(theme.popup_section_bg)
                 .corner_radius(CornerRadius::same(8))
@@ -613,9 +791,9 @@ fn show_pen_contextual_options(
                             (PressureCurve::Pow3, "Pow3"),
                             (PressureCurve::Const, "Const"),
                         ] {
-                            let sel = std::mem::discriminant(
-                                &brush_config.solid_options.pressure_curve,
-                            ) == std::mem::discriminant(&curve);
+                            let sel =
+                                std::mem::discriminant(&brush_config.solid_options.pressure_curve)
+                                    == std::mem::discriminant(&curve);
                             if ui
                                 .selectable_label(
                                     sel,
@@ -630,7 +808,7 @@ fn show_pen_contextual_options(
                 });
         });
 
-    draw_vertical_divider(ui, 24.0, theme.tool_bar_pill_stroke);
+    draw_vertical_divider(ui, row_h, theme.tool_bar_pill_stroke);
 
     // 2. Nhóm Độ dày nét bút (5 mức nhanh + Pop-up thanh trượt)
     let (cur_width, cur_color) = current_width_and_color(brush_config, state.marker_alpha);
@@ -646,18 +824,8 @@ fn show_pen_contextual_options(
         }
     }
 
-    // Nút hiển thị số px hiện tại & mở Pop-up thanh trượt độ dày
-    let width_btn = ui
-        .add(
-            egui::Button::new(
-                RichText::new(format!("{cur_width:.1}px"))
-                    .size(theme.font_size_small)
-                    .color(theme.tool_text_fg),
-            )
-            .fill(theme.tool_hover_bg)
-            .corner_radius(CornerRadius::same(theme.tool_item_rounding)),
-        )
-        .on_hover_text("Fine-tune Stroke Thickness");
+    // Nút hiển thị số px hiện tại & mở Pop-up thanh trượt độ dày (cao đúng `row_h`)
+    let width_btn = stroke_width_value_button(ui, theme, cur_width);
 
     egui::Popup::from_toggle_button_response(&width_btn)
         .frame(theme.dark_popup_frame(ui.style()))
@@ -683,12 +851,12 @@ fn show_pen_contextual_options(
             }
         });
 
-    draw_vertical_divider(ui, 24.0, theme.tool_bar_pill_stroke);
+    draw_vertical_divider(ui, row_h, theme.tool_bar_pill_stroke);
 
-    // 3. Hàng chấm màu nhanh (6 màu) + Nút mở Pop-up Bảng màu mở rộng
+    // 3. Hàng chấm màu nhanh (6 màu) + Nút mở Pop-up Bảng màu mở rộng (tất cả cao đúng `row_h`)
     for rgb in QUICK_COLORS {
         let is_sel = same_rgb(cur_color, rgb);
-        if color_swatch_button(ui, rgb, is_sel, 8.5).clicked() {
+        if color_swatch_button(ui, rgb, is_sel, 8.5, row_h).clicked() {
             set_current_color(brush_config, rgb, state.marker_alpha);
         }
     }
@@ -716,7 +884,7 @@ fn show_pen_contextual_options(
                         .show(ui, |ui| {
                             for (idx, rgb) in EXTENDED_PALETTE.iter().copied().enumerate() {
                                 let is_sel = same_rgb(cur_color, rgb);
-                                if color_swatch_button(ui, rgb, is_sel, 9.5).clicked() {
+                                if color_swatch_button(ui, rgb, is_sel, 9.5, 26.0).clicked() {
                                     set_current_color(brush_config, rgb, state.marker_alpha);
                                 }
                                 if (idx + 1) % 8 == 0 {

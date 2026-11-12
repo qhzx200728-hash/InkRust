@@ -24,6 +24,7 @@ pub struct Theme {
     pub tool_bar_pill_bg: Color32,
     pub tool_bar_pill_stroke: Color32,
     pub tool_bar_rounding: u8,
+    pub tool_row_height: f32,
     pub tool_text_fg: Color32,
     pub tool_text_muted: Color32,
     pub tool_selected_bg: Color32,
@@ -71,6 +72,7 @@ impl Default for Theme {
             tool_bar_pill_bg: Color32::from_rgb(34, 36, 42),
             tool_bar_pill_stroke: Color32::from_rgb(56, 59, 68),
             tool_bar_rounding: 18,
+            tool_row_height: 26.0,
             tool_text_fg: Color32::from_rgb(242, 244, 248),
             tool_text_muted: Color32::from_rgb(168, 174, 186),
             tool_selected_bg: Color32::from_rgb(56, 116, 203),
@@ -139,12 +141,12 @@ pub const MARKER_QUICK_WIDTHS: [f64; 5] = [8.0, 12.0, 18.0, 24.0, 32.0];
 
 /// Hàng chấm màu nhanh trên thanh tuỳ chọn Bút
 pub const QUICK_COLORS: [[u8; 3]; 6] = [
-    [20, 22, 25],    // Black
-    [25, 103, 210],  // Blue
-    [217, 48, 37],   // Red
-    [24, 128, 56],   // Green
-    [242, 153, 0],   // Amber / Orange
-    [147, 52, 230],  // Purple
+    [20, 22, 25],   // Black
+    [25, 103, 210], // Blue
+    [217, 48, 37],  // Red
+    [24, 128, 56],  // Green
+    [242, 153, 0],  // Amber / Orange
+    [147, 52, 230], // Purple
 ];
 
 /// Bảng màu mở rộng trong Pop-up (3 hàng x 8 cột = 24 màu)
@@ -203,20 +205,18 @@ pub fn setup_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
 
     if let Ok(bytes) = std::fs::read(r"C:\Windows\Fonts\segoeui.ttf") {
-        fonts.font_data.insert(
-            "segoeui".to_owned(),
-            Arc::new(FontData::from_owned(bytes)),
-        );
+        fonts
+            .font_data
+            .insert("segoeui".to_owned(), Arc::new(FontData::from_owned(bytes)));
         if let Some(prop) = fonts.families.get_mut(&FontFamily::Proportional) {
             prop.insert(0, "segoeui".to_owned());
         }
     }
 
     if let Ok(bytes) = std::fs::read(r"C:\Windows\Fonts\consola.ttf") {
-        fonts.font_data.insert(
-            "consolas".to_owned(),
-            Arc::new(FontData::from_owned(bytes)),
-        );
+        fonts
+            .font_data
+            .insert("consolas".to_owned(), Arc::new(FontData::from_owned(bytes)));
         if let Some(mono) = fonts.families.get_mut(&FontFamily::Monospace) {
             mono.insert(0, "consolas".to_owned());
         }

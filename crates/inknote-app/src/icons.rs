@@ -64,7 +64,11 @@ pub fn draw_icon(painter: &Painter, rect: Rect, icon: ToolIcon, color: Color32) 
                 pos2(c.x + s * 0.45, c.y + s * 0.95),
             );
             painter.rect_stroke(back, 2.0, stroke, egui::StrokeKind::Middle);
-            painter.rect_filled(front, 2.0, Color32::from_rgba_unmultiplied(24, 90, 188, 220));
+            painter.rect_filled(
+                front,
+                2.0,
+                Color32::from_rgba_unmultiplied(24, 90, 188, 220),
+            );
             painter.rect_stroke(front, 2.0, stroke, egui::StrokeKind::Middle);
         }
         ToolIcon::ReadOnly => {
@@ -169,7 +173,10 @@ pub fn draw_icon(painter: &Painter, rect: Rect, icon: ToolIcon, color: Color32) 
             painter.rect_stroke(box_r, 2.5, stroke, egui::StrokeKind::Middle);
             let top_y = c.y - s * 0.48;
             let bot_y = c.y + s * 0.55;
-            painter.line_segment([pos2(c.x - s * 0.48, top_y), pos2(c.x + s * 0.48, top_y)], stroke);
+            painter.line_segment(
+                [pos2(c.x - s * 0.48, top_y), pos2(c.x + s * 0.48, top_y)],
+                stroke,
+            );
             painter.line_segment([pos2(c.x, top_y), pos2(c.x, bot_y)], stroke);
         }
         ToolIcon::Image => {
@@ -214,8 +221,14 @@ pub fn draw_icon(painter: &Painter, rect: Rect, icon: ToolIcon, color: Color32) 
             // Trang giấy có dấu cộng (+) ở giữa
             let page = Rect::from_center_size(c, vec2(s * 1.45, s * 1.8));
             painter.rect_stroke(page, 2.0, stroke, egui::StrokeKind::Middle);
-            painter.line_segment([pos2(c.x - s * 0.38, c.y), pos2(c.x + s * 0.38, c.y)], stroke);
-            painter.line_segment([pos2(c.x, c.y - s * 0.38), pos2(c.x, c.y + s * 0.38)], stroke);
+            painter.line_segment(
+                [pos2(c.x - s * 0.38, c.y), pos2(c.x + s * 0.38, c.y)],
+                stroke,
+            );
+            painter.line_segment(
+                [pos2(c.x, c.y - s * 0.38), pos2(c.x, c.y + s * 0.38)],
+                stroke,
+            );
         }
         ToolIcon::Export => {
             // Khay dưới + mũi tên hướng lên (Share / Export)
@@ -260,8 +273,14 @@ pub fn draw_icon(painter: &Painter, rect: Rect, icon: ToolIcon, color: Color32) 
             let p_bot = pos2(c.x + s * 0.65, c.y + s * 0.55);
             painter.line_segment([p_left, p_mid], stroke);
             painter.line_segment([p_mid, p_bot], stroke);
-            painter.line_segment([p_left, pos2(p_left.x + s * 0.4, p_left.y - s * 0.38)], stroke);
-            painter.line_segment([p_left, pos2(p_left.x + s * 0.4, p_left.y + s * 0.38)], stroke);
+            painter.line_segment(
+                [p_left, pos2(p_left.x + s * 0.4, p_left.y - s * 0.38)],
+                stroke,
+            );
+            painter.line_segment(
+                [p_left, pos2(p_left.x + s * 0.4, p_left.y + s * 0.38)],
+                stroke,
+            );
         }
         ToolIcon::Trash => {
             // Thùng rác nhỏ

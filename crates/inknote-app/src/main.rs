@@ -182,7 +182,9 @@ impl InkNoteApp {
     fn finish_active_stroke(&mut self) {
         if let Some(active) = self.active.take() {
             self.render_cx.clear_batches();
-            active.path.draw_composed(&mut self.render_cx, &active.style);
+            active
+                .path
+                .draw_composed(&mut self.render_cx, &active.style);
             let batches = std::mem::take(&mut self.render_cx.batches);
             self.strokes.push(FinishedStroke {
                 path: active.path,
@@ -330,8 +332,7 @@ impl eframe::App for InkNoteApp {
         }
 
         // Khu vực 3: Main Canvas (trang giấy chấm Dotted Paper)
-        let workspace_frame =
-            egui::Frame::central_panel(ui.style()).fill(self.theme.workspace_bg);
+        let workspace_frame = egui::Frame::central_panel(ui.style()).fill(self.theme.workspace_bg);
         egui::CentralPanel::default()
             .frame(workspace_frame)
             .show(ui, |ui| {
@@ -360,7 +361,9 @@ impl eframe::App for InkNoteApp {
                 // 3. Vẽ nét bút đang kéo (active)
                 if let Some(active) = &self.active {
                     self.render_cx.clear_batches();
-                    active.path.draw_composed(&mut self.render_cx, &active.style);
+                    active
+                        .path
+                        .draw_composed(&mut self.render_cx, &active.style);
                     active
                         .builder
                         .draw_styled(&mut self.render_cx, &active.style, 1.0);
@@ -384,4 +387,143 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| Ok(Box::new(InkNoteApp::new(cc)))),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eframe::egui::{Pos2, RawInput, Rect, vec2};
+
+    fn new_test_app(ctx: &egui::Context) -> InkNoteApp {
+        theme::setup_fonts(ctx);
+        InkNoteApp {
+            theme: Theme::default(),
+            toolbar_state: ToolbarState::default(),
+            brush_config: BrushConfig::default(),
+            strokes: Vec::new(),
+            active: None,
+            render_cx: CairoRenderContext::new(),
+            base_instant: Instant::now(),
+            prev_frame_t: 0.0,
+            last_event_secs: 0.0,
+            touch_active: false,
+            stylus_has_force: false,
+            stylus_mode: false,
+            paper_rect: None,
+            cur_pressure: 0.0,
+            last_up_pressure: 0.0,
+            last_source: "Test",
+        }
+    }
+
+    #[test]
+    fn verify_toolbar_and_canvas_alignment_at_required_resolutions() {
+        let resolutions = [(1200.0, 800.0), (1366.0, 768.0), (1600.0, 900.0)];
+
+        for (w, h) in resolutions {
+            let ctx = egui::Context::default();
+            let mut app = new_test_app(&ctx);
+
+            // Chạy 3 pass để cơ chế đo kích thước tự động (show_centered_in_bounds) hội tụ hoàn toàn
+            for pass in 0..3 {
+                let raw_input = RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(w, h))),
+                    time: Some(pass as f64 * 0.016),
+                    ..Default::default()
+                };
+                let mut out = ctx.run_ui(raw_input, |ui| {
+                    let wacom_status = "Test Stylus";
+                    let _ = show_toolbars(
+                        ui,
+                        &app.theme,
+                        &mut app.toolbar_state,
+                        &mut app.brush_config,
+                        wacom_status,
+                    );
+                    let workspace_frame =
+                        egui::Frame::central_panel(ui.style()).fill(app.theme.workspace_bg);
+                    egui::CentralPanel::default()
+                        .frame(workspace_frame)
+                        .show(ui, |ui| {
+                            let avail = ui.max_rect();
+                            app.paper_rect = Some(avail.shrink(app.theme.paper_margin));
+                        });
+                });
+                out.textures_delta.clear();
+            }
+
+            let m = app.toolbar_state.last_metrics;
+            let win_center_x = w * 0.5;
+
+            // 1. Nhóm Trái căn sát lề trái (margin = 12px)
+            assert!(
+                (m.nav_left_rect.left() - 12.0).abs() <= 1.5,
+                "[{w}x{h}] nav_left_rect.left() = {} (expected ~12.0)",
+                m.nav_left_rect.left()
+            );
+
+            // 2. Nhóm Phải căn sát lề phải (w - 12px)
+            assert!(
+                (m.nav_right_rect.right() - (w - 12.0)).abs() <= 1.5,
+                "[{w}x{h}] nav_right_rect.right() = {} (expected ~{})",
+                m.nav_right_rect.right(),
+                w - 12.0
+            );
+
+            // 3. Tâm Nhóm Giữa của Navigation Toolbar trùng tâm cửa sổ
+            assert!(
+                (m.nav_center_rect.center().x - win_center_x).abs() <= 1.0,
+                "[{w}x{h}] nav_center_rect.center().x = {} != win_center_x = {}",
+                m.nav_center_rect.center().x,
+                win_center_x
+            );
+
+            // 4. Ba nhóm trên Navigation Toolbar cùng trục dọc và không chồng lấn
+            assert!(
+                (m.nav_left_rect.center().y - m.nav_center_rect.center().y).abs() <= 1.0
+                    && (m.nav_right_rect.center().y - m.nav_center_rect.center().y).abs() <= 1.0,
+                "[{w}x{h}] nav groups vertical centers misaligned: L={}, C={}, R={}",
+                m.nav_left_rect.center().y,
+                m.nav_center_rect.center().y,
+                m.nav_right_rect.center().y
+            );
+            assert!(
+                m.nav_left_rect.right() < m.nav_center_rect.left()
+                    && m.nav_center_rect.right() < m.nav_right_rect.left(),
+                "[{w}x{h}] nav groups overlap: L={:?}, C={:?}, R={:?}",
+                m.nav_left_rect,
+                m.nav_center_rect,
+                m.nav_right_rect
+            );
+
+            // 5. Tâm của Thanh tuỳ chọn công cụ dạng pill (Contextual Tool Options) trùng tâm cửa sổ
+            assert!(
+                (m.tool_pill_rect.center().x - win_center_x).abs() <= 1.0,
+                "[{w}x{h}] tool_pill_rect.center().x = {} != win_center_x = {} (pill_rect={:?})",
+                m.tool_pill_rect.center().x,
+                win_center_x,
+                m.tool_pill_rect
+            );
+            assert!(
+                m.tool_pill_rect.width() < w - 40.0 && m.tool_pill_rect.width() > 300.0,
+                "[{w}x{h}] unexpected tool_pill_rect width: {}",
+                m.tool_pill_rect.width()
+            );
+
+            // 6. Canvas giấy chấm bắt đầu ngay dưới 2 thanh công cụ và chiếm diện tích còn lại
+            let paper = app.paper_rect.expect("paper_rect must be set");
+            assert!(
+                paper.top() > m.tool_strip_rect.bottom(),
+                "[{w}x{h}] paper_rect.top()={} should be below tool_strip_rect.bottom()={}",
+                paper.top(),
+                m.tool_strip_rect.bottom()
+            );
+            assert!(
+                (paper.center().x - win_center_x).abs() <= 1.0,
+                "[{w}x{h}] paper_rect.center().x = {} != win_center_x = {}",
+                paper.center().x,
+                win_center_x
+            );
+        }
+    }
 }
