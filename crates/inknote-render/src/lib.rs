@@ -133,7 +133,7 @@ impl CairoRenderContext {
         let mut tessellator = FillTessellator::new();
         let options = FillOptions::default()
             .with_fill_rule(rule)
-            .with_tolerance(0.05);
+            .with_tolerance(0.2);
 
         if tessellator
             .tessellate_path(
@@ -172,7 +172,7 @@ impl CairoRenderContext {
         let mut tessellator = StrokeTessellator::new();
         let mut options = StrokeOptions::default()
             .with_line_width(width as f32)
-            .with_tolerance(0.05);
+            .with_tolerance(0.2);
 
         if let Some(st) = style {
             options = options.with_line_cap(match st.line_cap {
@@ -180,14 +180,15 @@ impl CairoRenderContext {
                 LineCap::Round => LyonCap::Round,
                 LineCap::Square => LyonCap::Square,
             });
-            options = options.with_line_join(match st.line_join {
-                LineJoin::Miter { limit } => {
-                    options = options.with_miter_limit(limit as f32);
-                    LyonJoin::Miter
-                }
-                LineJoin::Round => LyonJoin::Round,
-                LineJoin::Bevel => LyonJoin::Bevel,
-            });
+            let (join, miter_limit) = match st.line_join {
+                LineJoin::Miter { limit } => (LyonJoin::Miter, Some(limit as f32)),
+                LineJoin::Round => (LyonJoin::Round, None),
+                LineJoin::Bevel => (LyonJoin::Bevel, None),
+            };
+            options = options.with_line_join(join);
+            if let Some(limit) = miter_limit {
+                options = options.with_miter_limit(limit);
+            }
         }
 
         if tessellator

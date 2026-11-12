@@ -221,9 +221,11 @@ impl InkNoteApp {
             self.brush_config.new_style_seeds();
             let style = self.brush_config.style_for_current_options();
             let mut path = PenPath::new(point(0.0));
-            let segs: Vec<Segment> = (1..=60)
+            // Mật độ điểm mẫu ~5-6px/điểm, sát với thực tế khi viết tay bằng Wacom
+            let n_segs = (len / 6.0).clamp(12.0, 36.0) as usize;
+            let segs: Vec<Segment> = (1..=n_segs)
                 .map(|i| Segment::LineTo {
-                    end: point(i as f64 / 60.0),
+                    end: point(i as f64 / n_segs as f64),
                 })
                 .collect();
             path.extend(segs);
