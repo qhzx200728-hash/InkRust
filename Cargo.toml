@@ -1,5 +1,5 @@
 ﻿[workspace]
-members = ["crates/inknote-pen", "crates/inknote-render", "crates/inknote-app"]
+members = ["crates/inknote-pen", "crates/inknote-render", "crates/inknote-core", "crates/inknote-app"]
 exclude = ["spike", "reference"]
 resolver = "2"
 
@@ -13,3 +13,4 @@ piet = { git = "https://github.com/linebender/piet", rev = "22210f03b8a2b203e2ad
 
 [profile.dev]
 opt-level = 2
+

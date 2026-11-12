@@ -7,10 +7,11 @@ mod icons;
 mod theme;
 mod toolbar;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
+use inknote_core::{Command, Document, Stroke};
 use inknote_pen::{
     Constraints, PenEvent, PenPath, Style,
     brushconfig::BrushConfig,
@@ -30,14 +31,6 @@ use crate::{
     toolbar::{ActiveTool, ToolbarState, show_toolbars},
 };
 
-struct FinishedStroke {
-    #[allow(dead_code)]
-    path: PenPath,
-    #[allow(dead_code)]
-    style: Style,
-    batches: Vec<DrawBatch>,
-}
-
 struct ActiveStroke {
     path: PenPath,
     style: Style,
@@ -48,7 +41,9 @@ struct InkNoteApp {
     theme: Theme,
     toolbar_state: ToolbarState,
     brush_config: BrushConfig,
-    strokes: Vec<FinishedStroke>,
+    doc: Document,
+    // Bộ nhớ đệm lưới tam giác của từng nét (khoá = id nét), không thuộc dữ liệu trang
+    batch_cache: HashMap<u64, Vec<DrawBatch>>,
     active: Option<ActiveStroke>,
     render_cx: CairoRenderContext,
 
@@ -74,7 +69,8 @@ impl InkNoteApp {
             theme: Theme::default(),
             toolbar_state: ToolbarState::default(),
             brush_config: BrushConfig::default(),
-            strokes: Vec::new(),
+            doc: Document::new(),
+            batch_cache: HashMap::new(),
             active: None,
             render_cx: CairoRenderContext::new(),
             base_instant: Instant::now(),
@@ -186,11 +182,13 @@ impl InkNoteApp {
                 .path
                 .draw_composed(&mut self.render_cx, &active.style);
             let batches = std::mem::take(&mut self.render_cx.batches);
-            self.strokes.push(FinishedStroke {
+            let id = self.doc.alloc_id();
+            self.batch_cache.insert(id, batches);
+            self.doc.execute(Command::AddStroke(Stroke {
+                id,
                 path: active.path,
                 style: active.style,
-                batches,
-            });
+            }));
         }
     }
 
@@ -310,7 +308,7 @@ impl eframe::App for InkNoteApp {
             self.last_source,
             self.cur_pressure,
             self.last_up_pressure,
-            self.strokes.len()
+            self.doc.strokes().len()
         );
         let actions = show_toolbars(
             ui,
@@ -319,16 +317,26 @@ impl eframe::App for InkNoteApp {
             &mut self.brush_config,
             &wacom_status,
         );
-        if actions.undo_clicked {
-            self.strokes.pop();
-        }
-        if actions.clear_clicked {
-            self.strokes.clear();
-        }
-
-        // Phím tắt Ctrl+Z
-        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Z)) {
-            self.strokes.pop();
+        // Phím tắt: Ctrl+Z = Undo; Ctrl+Y hoặc Ctrl+Shift+Z = Redo
+        let (key_undo, key_redo) = ctx.input(|i| {
+            let cmd = i.modifiers.command;
+            let z = i.key_pressed(egui::Key::Z);
+            (
+                cmd && !i.modifiers.shift && z,
+                cmd && ((i.modifiers.shift && z) || i.key_pressed(egui::Key::Y)),
+            )
+        });
+        // Không hoàn tác khi đang kéo nét dở
+        if self.active.is_none() {
+            if actions.undo_clicked || key_undo {
+                self.doc.undo();
+            }
+            if actions.redo_clicked || key_redo {
+                self.doc.redo();
+            }
+            if actions.clear_clicked {
+                self.doc.execute(Command::ClearPage);
+            }
         }
 
         // Khu vực 3: Main Canvas (trang giấy chấm Dotted Paper)
@@ -354,8 +362,10 @@ impl eframe::App for InkNoteApp {
                 );
 
                 // 2. Vẽ các nét bút đã hoàn thành
-                for s in &self.strokes {
-                    Self::paint_batches(&painter, &s.batches);
+                for s in self.doc.strokes() {
+                    if let Some(batches) = self.batch_cache.get(&s.id) {
+                        Self::paint_batches(&painter, batches);
+                    }
                 }
 
                 // 3. Vẽ nét bút đang kéo (active)
@@ -400,7 +410,8 @@ mod tests {
             theme: Theme::default(),
             toolbar_state: ToolbarState::default(),
             brush_config: BrushConfig::default(),
-            strokes: Vec::new(),
+            doc: Document::new(),
+            batch_cache: HashMap::new(),
             active: None,
             render_cx: CairoRenderContext::new(),
             base_instant: Instant::now(),

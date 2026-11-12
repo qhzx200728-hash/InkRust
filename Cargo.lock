@@ -1926,11 +1926,20 @@ name = "inknote-app"
 version = "0.1.0"
 dependencies = [
  "eframe",
+ "inknote-core",
  "inknote-pen",
  "inknote-render",
  "kurbo",
  "parry2d-f64",
  "piet",
+]
+
+[[package]]
+name = "inknote-core"
+version = "0.1.0"
+dependencies = [
+ "inknote-pen",
+ "parry2d-f64",
 ]
 
 [[package]]

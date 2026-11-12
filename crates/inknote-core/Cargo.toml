@@ -1,0 +1,12 @@
+﻿[package]
+name = "inknote-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Loi du lieu InkNote: trang, net but, he thong lenh (Command) va Undo/Redo"
+
+[dependencies]
+inknote-pen = { path = "../inknote-pen" }
+
+[dev-dependencies]
+parry2d-f64 = "0.31.1"

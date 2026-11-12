@@ -20,7 +20,7 @@
   - Tạo `AGENTS.md`, `memory.md`, `HANDOFF.md` và tinh gọn `GEMINI.md`.
 
 ## Đang làm dở
-- Không có việc làm dở dang ở Bước 1.6 (đã chốt `step-1.6-ok`). Bắt đầu phiên mới là làm ngay **Bước 1.7**.
+- **Bước 1.7 đã code xong, chờ người dùng test thủ công** (chưa gắn tag step-1.7-ok): tạo crates/inknote-core/src/lib.rs (Document, Command::{AddStroke,ClearPage}, undo/redo, 4 unit test pass); nối vào main.rs (bộ đệm atch_cache), thêm icon/nút Redo (icons.rs, 	oolbar.rs). Không có việc dở ở Bước 1.6 (đã chốt `step-1.6-ok`). Bắt đầu phiên mới là làm ngay **Bước 1.7**.
 
 ## Quyết định đã chốt và lý do (không bàn lại)
 - **Bỏ hoàn toàn bản cũ (Electron/Flutter/web)**: viết mới 100% bằng Rust cho Windows.

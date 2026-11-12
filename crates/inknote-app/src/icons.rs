@@ -28,6 +28,7 @@ pub enum ToolIcon {
     Sliders,
     Palette,
     Undo,
+    Redo,
     Trash,
 }
 
@@ -279,6 +280,22 @@ pub fn draw_icon(painter: &Painter, rect: Rect, icon: ToolIcon, color: Color32) 
             );
             painter.line_segment(
                 [p_left, pos2(p_left.x + s * 0.4, p_left.y + s * 0.38)],
+                stroke,
+            );
+        }
+        ToolIcon::Redo => {
+            // Mũi tên vòng quay xuôi (đối xứng Undo)
+            let p_right = pos2(c.x + s * 0.75, c.y - s * 0.15);
+            let p_mid = pos2(c.x - s * 0.25, c.y - s * 0.15);
+            let p_bot = pos2(c.x - s * 0.65, c.y + s * 0.55);
+            painter.line_segment([p_right, p_mid], stroke);
+            painter.line_segment([p_mid, p_bot], stroke);
+            painter.line_segment(
+                [p_right, pos2(p_right.x - s * 0.4, p_right.y - s * 0.38)],
+                stroke,
+            );
+            painter.line_segment(
+                [p_right, pos2(p_right.x - s * 0.4, p_right.y + s * 0.38)],
                 stroke,
             );
         }

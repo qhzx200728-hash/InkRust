@@ -24,3 +24,4 @@ Dự án **InkNote** (app ghi chú viết tay trên Windows bằng Rust + `egui 
 - **Wacom trên Windows**: Khi `TouchPhase::End` có `force: None` phải truyền `pressure = 0.0` (nếu truyền `0.5` cuối nét sẽ phình giọt nước); chỉ vẽ ở `TouchPhase::Move` khi `self.touch_active && self.active.is_some()` (tránh lỗi bút hover tự vẽ).
 - **Layout `egui`**: Không dùng `ui.columns(3)` hay `ui.vertical_centered` cho thanh công cụ vì sẽ lệch tâm cửa sổ; giữ nguyên hàm `show_centered_in_bounds`.
 - Trong headless test `ctx.run_ui`, phải gọi `out.textures_delta.clear()` để tránh panic của `epaint 0.37`.
+

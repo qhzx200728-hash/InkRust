@@ -11,3 +11,4 @@ inknote-render = { path = "../inknote-render" }
 parry2d-f64 = "0.31.1"
 piet = "0.8.0"
 kurbo = "0.13.1"
+inknote-core = { path = "../inknote-core" }

@@ -47,6 +47,7 @@ impl ActiveTool {
 
 pub struct ToolbarActions {
     pub undo_clicked: bool,
+    pub redo_clicked: bool,
     pub clear_clicked: bool,
 }
 
@@ -413,6 +414,7 @@ pub fn show_toolbars(
 ) -> ToolbarActions {
     let mut actions = ToolbarActions {
         undo_clicked: false,
+        redo_clicked: false,
         clear_clicked: false,
     };
 
@@ -591,6 +593,17 @@ pub fn show_toolbars(
                     if nav_icon_button(ui, theme, ToolIcon::Undo, false, "Undo (Ctrl+Z)").clicked()
                     {
                         actions.undo_clicked = true;
+                    }
+                    if nav_icon_button(
+                        ui,
+                        theme,
+                        ToolIcon::Redo,
+                        false,
+                        "Redo (Ctrl+Y / Ctrl+Shift+Z)",
+                    )
+                    .clicked()
+                    {
+                        actions.redo_clicked = true;
                     }
                     if nav_icon_button(ui, theme, ToolIcon::Trash, false, "Clear Page").clicked() {
                         actions.clear_clicked = true;
