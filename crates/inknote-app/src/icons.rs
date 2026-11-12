@@ -361,14 +361,8 @@ pub fn draw_paper(
             (sheet, painter.with_clip_rect(clipped))
         }
         CanvasMode::Whiteboard => {
-            // Chế độ bảng trắng vô tận: phủ kín toàn bộ vùng làm việc
-            painter.rect_filled(paper_rect, 4.0, theme.paper_bg);
-            painter.rect_stroke(
-                paper_rect,
-                4.0,
-                Stroke::new(1.0, theme.paper_border),
-                egui::StrokeKind::Middle,
-            );
+            // Chế độ bảng trắng vô tận: phủ kín toàn bộ vùng làm việc, không viền, không bo góc
+            painter.rect_filled(paper_rect, 0.0, theme.paper_bg);
             (paper_rect, painter.clone())
         }
     };
@@ -441,8 +435,8 @@ pub fn draw_paper(
         }
     }
 
-    // 2. Vẽ đường lề 2 bên (Margin Lines màu đỏ nhạt / hồng pastel)
-    if settings.show_margins {
+    // 2. Vẽ đường lề 2 bên (Margin Lines màu đỏ nhạt / hồng pastel) - chỉ dành riêng cho chế độ Paper, Whiteboard không có lề
+    if settings.show_margins && settings.mode == CanvasMode::Paper {
         let margin_stroke = Stroke::new(1.5, theme.paper_margin_line_color);
         // Đường lề trái
         let left_x = origin.x + settings.left_margin * zoom;

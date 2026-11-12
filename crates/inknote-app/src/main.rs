@@ -889,12 +889,15 @@ impl eframe::App for InkNoteApp {
             .frame(workspace_frame)
             .show(ui, |ui| {
                 let avail = ui.max_rect();
-                let paper_rect = avail.shrink(self.theme.paper_margin);
+                let settings = self.doc.paper_settings();
+                let paper_rect = match settings.mode {
+                    CanvasMode::Paper => avail.shrink(self.theme.paper_margin),
+                    CanvasMode::Whiteboard => avail,
+                };
                 self.paper_rect = Some(paper_rect);
 
                 let view = self.view;
                 let origin = view.origin(paper_rect);
-                let settings = self.doc.paper_settings();
 
                 // 1. Tự động căn giữa trang ở chế độ Paper khi mở ghi chú mới (pan chưa đặt)
                 if self.view.pan == egui::Vec2::ZERO && settings.mode == CanvasMode::Paper {

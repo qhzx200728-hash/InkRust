@@ -639,33 +639,35 @@ pub fn show_toolbars(
                                 });
                             }
 
-                            // 3. Đường lề 2 bên
-                            ui.add_space(6.0);
-                            ui.checkbox(&mut paper_settings.show_margins, "Margin lines 2 bên");
-                            if paper_settings.show_margins {
-                                ui.add_space(4.0);
-                                ui.horizontal(|ui| {
-                                    ui.label(
-                                        RichText::new("Left:")
-                                            .size(theme.font_size_small)
-                                            .color(theme.tool_text_fg),
-                                    );
-                                    ui.add(
-                                        egui::Slider::new(&mut paper_settings.left_margin, 20.0..=240.0)
-                                            .suffix(" pt"),
-                                    );
-                                });
-                                ui.horizontal(|ui| {
-                                    ui.label(
-                                        RichText::new("Right:")
-                                            .size(theme.font_size_small)
-                                            .color(theme.tool_text_fg),
-                                    );
-                                    ui.add(
-                                        egui::Slider::new(&mut paper_settings.right_margin, 20.0..=240.0)
-                                            .suffix(" pt"),
-                                    );
-                                });
+                            // 3. Đường lề 2 bên (chỉ áp dụng cho chế độ Paper, Whiteboard không có lề)
+                            if paper_settings.mode == CanvasMode::Paper {
+                                ui.add_space(6.0);
+                                ui.checkbox(&mut paper_settings.show_margins, "Margin lines 2 bên");
+                                if paper_settings.show_margins {
+                                    ui.add_space(4.0);
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new("Left:")
+                                                .size(theme.font_size_small)
+                                                .color(theme.tool_text_fg),
+                                        );
+                                        ui.add(
+                                            egui::Slider::new(&mut paper_settings.left_margin, 20.0..=240.0)
+                                                .suffix(" pt"),
+                                        );
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new("Right:")
+                                                .size(theme.font_size_small)
+                                                .color(theme.tool_text_fg),
+                                        );
+                                        ui.add(
+                                            egui::Slider::new(&mut paper_settings.right_margin, 20.0..=240.0)
+                                                .suffix(" pt"),
+                                        );
+                                    });
+                                }
                             }
                         });
                     ui.add_space(8.0);
