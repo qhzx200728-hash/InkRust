@@ -55,6 +55,38 @@ struct ActiveStroke {
     path: PenPath,
     style: Style,
     builder: Box<dyn Buildable<Emit = Segment>>,
+    // Dựng lưới tăng dần khi đang viết: phần đầu nét đã chốt được giữ lại,
+    // mỗi khung chỉ dựng lại phần đuôi ngắn (< 16 đoạn) + đầu bút modeler.
+    committed_batches: Vec<DrawBatch>,
+    committed_segs: usize,
+}
+
+/// Khoá bộ nhớ đệm lưới tĩnh: (revision trang, zoom, pan, vùng giấy).
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct StaticKey {
+    rev: u64,
+    zoom_bits: u32,
+    pan_x_bits: u32,
+    pan_y_bits: u32,
+    paper_min_x: u32,
+    paper_min_y: u32,
+    paper_max_x: u32,
+    paper_max_y: u32,
+}
+
+impl StaticKey {
+    fn new(rev: u64, zoom: f32, pan: egui::Vec2, paper: egui::Rect) -> Self {
+        Self {
+            rev,
+            zoom_bits: zoom.to_bits(),
+            pan_x_bits: pan.x.to_bits(),
+            pan_y_bits: pan.y.to_bits(),
+            paper_min_x: paper.min.x.to_bits(),
+            paper_min_y: paper.min.y.to_bits(),
+            paper_max_x: paper.max.x.to_bits(),
+            paper_max_y: paper.max.y.to_bits(),
+        }
+    }
 }
 
 struct InkNoteApp {
@@ -70,6 +102,7 @@ struct InkNoteApp {
     fps: f32,
     last_frame: Instant,
     active: Option<ActiveStroke>,
+    static_cache: Option<(StaticKey, std::sync::Arc<egui::epaint::Mesh>)>,
     render_cx: CairoRenderContext,
 
     // Quản lý thời gian sự kiện cho ink-stroke-modeler-rs
@@ -104,6 +137,7 @@ impl InkNoteApp {
             fps: 0.0,
             last_frame: Instant::now(),
             active: None,
+            static_cache: None,
             render_cx: CairoRenderContext::new(),
             base_instant: Instant::now(),
             prev_frame_t: 0.0,
@@ -226,8 +260,10 @@ impl InkNoteApp {
                 BuilderProgress::Finished(segments) => {
                     active.path.extend(segments);
                     self.finish_active_stroke();
+                    return;
                 }
             }
+            self.advance_active_committed();
         } else {
             self.brush_config.new_style_seeds();
             let style = self.brush_config.style_for_current_options();
@@ -237,8 +273,63 @@ impl InkNoteApp {
                 path,
                 style,
                 builder,
+                committed_batches: Vec::new(),
+                committed_segs: 0,
             });
         }
+    }
+
+    /// Chốt phần đầu nét đã vẽ thành lưới tam giác theo từng đợt (16 đoạn/đợt) để không phải vẽ lại từ đầu
+    fn advance_active_committed(&mut self) {
+        let Some(active) = &mut self.active else {
+            return;
+        };
+        const CHUNK_SIZE: usize = 16;
+        let total = active.path.segments.len();
+        if total >= active.committed_segs + CHUNK_SIZE {
+            let chunk_segs = &active.path.segments[active.committed_segs..total];
+            let start = if active.committed_segs == 0 {
+                active.path.start
+            } else {
+                active.path.segments[active.committed_segs - 1].end()
+            };
+            let chunk_path = PenPath::new_w_segments(start, chunk_segs.to_vec());
+            self.render_cx.clear_batches();
+            chunk_path.draw_composed(&mut self.render_cx, &active.style);
+            active.committed_batches.append(&mut self.render_cx.batches);
+            active.committed_segs = total;
+        }
+    }
+
+    /// Dựng lại lưới tĩnh của các nét đã xong (gộp thành 1 mesh, toạ độ màn hình).
+    fn build_static_mesh(&self, paper: egui::Rect) -> egui::epaint::Mesh {
+        let view = self.view;
+        let origin = view.origin(paper);
+        let mut mesh = egui::epaint::Mesh::default();
+        for s in self.doc.strokes() {
+            let Some(c) = self.batch_cache.get(&s.id) else {
+                continue;
+            };
+            if !view.rect_to_screen(paper, c.bbox).intersects(paper) {
+                continue;
+            }
+            for batch in &c.batches {
+                if batch.indices.is_empty() || batch.vertices.is_empty() {
+                    continue;
+                }
+                let [r, g, b, a] = batch.color;
+                let col = egui::Color32::from_rgba_unmultiplied(r, g, b, a);
+                let base = mesh.vertices.len() as u32;
+                mesh.vertices
+                    .extend(batch.vertices.iter().map(|&[x, y]| egui::epaint::Vertex {
+                        pos: egui::pos2(origin.x + x * view.zoom, origin.y + y * view.zoom),
+                        uv: egui::epaint::WHITE_UV,
+                        color: col,
+                    }));
+                mesh.indices.extend(batch.indices.iter().map(|i| i + base));
+            }
+        }
+        mesh
     }
 
     fn pen_up(&mut self, pos: egui::Pos2, pressure: f64, now: Instant) {
@@ -439,7 +530,6 @@ impl eframe::App for InkNoteApp {
         if self.confirm_clear {
             let mut do_clear = false;
             let mut cancel = false;
-            // Id::new ổn định theo tên; Id::unique sẽ đổi mỗi khung
             #[allow(deprecated)]
             let modal = egui::Modal::new(egui::Id::new("confirm_clear_page")).show(&ctx, |ui| {
                 ui.set_width(300.0);
@@ -548,25 +638,46 @@ impl eframe::App for InkNoteApp {
                     self.theme.paper_dot_radius,
                 );
 
-                // 2. Vẽ các nét bút đã hoàn thành (bỏ qua nét nằm ngoài màn hình)
-                for s in self.doc.strokes() {
-                    if let Some(c) = self.batch_cache.get(&s.id) {
-                        if !view
-                            .rect_to_screen(paper_rect, c.bbox)
-                            .intersects(paper_rect)
-                        {
-                            continue;
-                        }
-                        Self::paint_batches(&painter, &c.batches, origin, view.zoom);
+                // 2. Vẽ các nét bút đã hoàn thành (gộp 1 Mesh và cache theo StaticKey)
+                let static_key =
+                    StaticKey::new(self.doc.revision(), view.zoom, view.pan, paper_rect);
+                let static_mesh = match &self.static_cache {
+                    Some((k, mesh)) if *k == static_key => mesh.clone(),
+                    _ => {
+                        let mesh = std::sync::Arc::new(self.build_static_mesh(paper_rect));
+                        self.static_cache = Some((static_key, mesh.clone()));
+                        mesh
                     }
+                };
+                if !static_mesh.is_empty() {
+                    painter.add(egui::Shape::Mesh(static_mesh));
                 }
 
                 // 3. Vẽ nét bút đang kéo (active)
                 if let Some(active) = &self.active {
+                    // 3a. Các đoạn nét đã chốt (đã tessellate sẵn)
+                    if !active.committed_batches.is_empty() {
+                        Self::paint_batches(&painter, &active.committed_batches, origin, view.zoom);
+                    }
+
+                    // 3b. Phần đuôi ngắn chưa chốt (< 16 đoạn)
+                    if active.path.segments.len() > active.committed_segs {
+                        let tail_start = if active.committed_segs == 0 {
+                            active.path.start
+                        } else {
+                            active.path.segments[active.committed_segs - 1].end()
+                        };
+                        let tail_path = PenPath::new_w_segments(
+                            tail_start,
+                            active.path.segments[active.committed_segs..].to_vec(),
+                        );
+                        self.render_cx.clear_batches();
+                        tail_path.draw_composed(&mut self.render_cx, &active.style);
+                        Self::paint_batches(&painter, &self.render_cx.batches, origin, view.zoom);
+                    }
+
+                    // 3c. Đầu bút động và dự đoán nét từ Modeler
                     self.render_cx.clear_batches();
-                    active
-                        .path
-                        .draw_composed(&mut self.render_cx, &active.style);
                     active
                         .builder
                         .draw_styled(&mut self.render_cx, &active.style, 1.0);
@@ -627,6 +738,7 @@ mod tests {
             fps: 0.0,
             last_frame: Instant::now(),
             active: None,
+            static_cache: None,
             render_cx: CairoRenderContext::new(),
             base_instant: Instant::now(),
             prev_frame_t: 0.0,
@@ -638,6 +750,129 @@ mod tests {
             cur_pressure: 0.0,
             last_up_pressure: 0.0,
             last_source: "Test",
+        }
+    }
+
+    #[test]
+    #[ignore = "benchmark: chạy bằng cargo test -p inknote-app bench -- --ignored --nocapture"]
+    fn bench_paint_2000_strokes() {
+        let ctx = egui::Context::default();
+        let mut app = new_test_app(&ctx);
+        let paper = Rect::from_min_size(Pos2::new(20.0, 100.0), vec2(1160.0, 680.0));
+        app.paper_rect = Some(paper);
+        let t = Instant::now();
+        app.add_sample_strokes(2000);
+        println!("generate 2000: {:?}", t.elapsed());
+        let verts: usize = app
+            .batch_cache
+            .values()
+            .flat_map(|c| c.batches.iter())
+            .map(|b| b.vertices.len())
+            .sum();
+        let tris: usize = app
+            .batch_cache
+            .values()
+            .flat_map(|c| c.batches.iter())
+            .map(|b| b.indices.len() / 3)
+            .sum();
+        println!("total vertices = {verts}, triangles = {tris}");
+        for pass in 0..4 {
+            let t_build = Instant::now();
+            let mut build_dur = Duration::ZERO;
+            let mut out = ctx.run_ui(
+                RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 800.0))),
+                    time: Some(pass as f64 * 0.016),
+                    ..Default::default()
+                },
+                |ui| {
+                    let painter = ui.painter().with_clip_rect(paper);
+                    let t0 = Instant::now();
+                    draw_dotted_paper(
+                        &painter,
+                        paper,
+                        paper.min,
+                        app.theme.paper_bg,
+                        app.theme.paper_border,
+                        app.theme.paper_dot_color,
+                        app.theme.paper_dot_spacing,
+                        app.theme.paper_dot_radius,
+                    );
+                    let t_dots = t0.elapsed();
+                    let t1 = Instant::now();
+                    let static_key =
+                        StaticKey::new(app.doc.revision(), app.view.zoom, app.view.pan, paper);
+                    let static_mesh = match &app.static_cache {
+                        Some((k, mesh)) if *k == static_key => mesh.clone(),
+                        _ => {
+                            let mesh = std::sync::Arc::new(app.build_static_mesh(paper));
+                            app.static_cache = Some((static_key, mesh.clone()));
+                            mesh
+                        }
+                    };
+                    if !static_mesh.is_empty() {
+                        painter.add(egui::Shape::Mesh(static_mesh));
+                    }
+                    build_dur = t1.elapsed();
+                    println!("  pass {pass} -> dots: {t_dots:?}, mesh build: {build_dur:?}");
+                },
+            );
+            let t_tess = Instant::now();
+            out.textures_delta.clear();
+            let prims = ctx.tessellate(out.shapes, out.pixels_per_point);
+            println!(
+                "pass {pass}: strokes build {:?}, tessellate {:?}, prims {}, total {:?}",
+                build_dur,
+                t_tess.elapsed(),
+                prims.len(),
+                t_build.elapsed()
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "benchmark"]
+    fn bench_active_stroke() {
+        let ctx = egui::Context::default();
+        let mut app = new_test_app(&ctx);
+        let paper = Rect::from_min_size(Pos2::new(20.0, 100.0), vec2(1160.0, 680.0));
+        app.paper_rect = Some(paper);
+        let start = Instant::now();
+        for k in 0..2000u32 {
+            let t = k as f32 * 0.005;
+            let pos = Pos2::new(
+                300.0 + 200.0 * (t * 2.0).cos() + t * 10.0,
+                400.0 + 150.0 * (t * 3.0).sin(),
+            );
+            let at = start + Duration::from_secs_f64(k as f64 * 0.005);
+            app.pen_down(pos, 0.5, at);
+            if k % 250 == 249 {
+                let a = app.active.as_ref().unwrap();
+                let t0 = Instant::now();
+                if a.path.segments.len() > a.committed_segs {
+                    let tail_start = if a.committed_segs == 0 {
+                        a.path.start
+                    } else {
+                        a.path.segments[a.committed_segs - 1].end()
+                    };
+                    let tail_path = PenPath::new_w_segments(
+                        tail_start,
+                        a.path.segments[a.committed_segs..].to_vec(),
+                    );
+                    app.render_cx.clear_batches();
+                    tail_path.draw_composed(&mut app.render_cx, &a.style);
+                }
+                app.render_cx.clear_batches();
+                a.builder.draw_styled(&mut app.render_cx, &a.style, 1.0);
+                let live_draw_time = t0.elapsed();
+                println!(
+                    "events {}: segs {}, committed {}, live_draw_time {:?}",
+                    k + 1,
+                    a.path.segments.len(),
+                    a.committed_segs,
+                    live_draw_time
+                );
+            }
         }
     }
 

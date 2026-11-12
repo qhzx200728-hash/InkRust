@@ -1,15 +1,16 @@
 # HANDOFF.md – Bàn giao trạng thái cho Model tiếp theo
 
 ## 1. Task hiện tại & Tiến độ
-Dự án **InkNote** (app ghi chú viết tay trên Windows bằng Rust + `egui 0.37` + bút Wacom) vừa hoàn thành **Bước 1.6 (Khung giao diện P0 & căn chỉnh chuẩn)** và đã được người dùng xác nhận ổn (`step-1.6-ok`). Phiên tiếp theo bắt đầu ngay **Bước 1.7**.
+Dự án **InkNote** (app ghi chú viết tay trên Windows bằng Rust + `egui 0.37` + bút Wacom) đã hoàn thành **Bước 1.7 (Undo/Redo, tag `step-1.7-ok`)**. Đang ở **Bước 1.8 (Zoom/Pan + test hiệu năng 2000 nét)**: đã code xong zoom/kéo trang, hộp xác nhận Clear Page, phím F9 tạo 2000 nét mẫu và đã hoàn tất tối ưu chống tụt FPS khi viết tay & khi vẽ 2000 nét. Đang chờ người dùng test lại.
 
 ## 2. Các file đã tạo/sửa trong phiên này
-- `LICENSE`, `NOTICE`: Thêm toàn văn GPL-3.0 và ghi công nguồn Rnote (commit `83a76367dbd3d6c461c10553c45231799a25ea4b`), ý tưởng Xournal++, bộ icon.
-- `crates/inknote-app/src/theme.rs`: Gom toàn bộ bảng màu, cỡ chữ, bo góc, `tool_row_height = 26.0` và nạp font `C:\Windows\Fonts\segoeui.ttf`.
-- `crates/inknote-app/src/icons.rs`: Vẽ toàn bộ icon vector trên toolbar và nền giấy chấm (`draw_dotted_paper`).
-- `crates/inknote-app/src/toolbar.rs`: Xây dựng Navigation Toolbar (3 nhóm Trái–Giữa–Phải), Contextual Tool Options Bar (pill tối căn giữa qua `show_centered_in_bounds`) và các Pop-up tối bo góc.
-- `crates/inknote-app/src/main.rs`: Kết nối giao diện P0 với bộ vẽ nét Rnote, xử lý sự kiện bút Wacom và thêm unit test kiểm tra căn chỉnh ở 3 độ phân giải (`1200×800`, `1366×768`, `1600×900`).
-- `AGENTS.md`, `memory.md`, `GEMINI.md`, `docs/roadmap.md`, `docs/02-architecture.md`: Thiết lập bộ nhớ dự án và lộ trình P0→P3.
+- `crates/inknote-core/src/lib.rs`: Thêm trường `rev: u64` và hàm `pub fn revision(&self) -> u64` trên `Document` để theo dõi thay đổi trang.
+- `crates/inknote-app/src/main.rs`:
+  - Tối ưu nét đang viết (`active`): chốt dần theo đợt 16 đoạn (`advance_active_committed`), mỗi khung chỉ vẽ phần đuôi ngắn (< 16 đoạn) + đầu bút modeler.
+  - Tối ưu nét tĩnh: gom các nét tĩnh thành 1 `egui::epaint::Mesh` duy nhất và cache lại (`StaticKey`), tái sử dụng khi đang viết nét hoặc không đổi góc nhìn.
+  - Dọn dẹp modal xác nhận xoá trang bị lặp.
+- `crates/inknote-app/src/view.rs`: Bộ chuyển đổi toạ độ màn hình ↔ toạ độ trang theo zoom/pan.
+- `memory.md`, `docs/roadmap.md`: Cập nhật tiến độ.
 
 ## 3. Quyết định đã chốt
 - Dùng `egui 0.37` thuần Rust; port nguyên văn `rnote-compose` sang `inknote-pen` + tô lưới bằng `lyon` (`FillRule::NonZero`).

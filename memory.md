@@ -20,7 +20,10 @@
   - Tạo `AGENTS.md`, `memory.md`, `HANDOFF.md` và tinh gọn `GEMINI.md`.
 
 ## Đang làm dở
-- **Bước 1.8 đã code xong, chờ người dùng test** (chưa gắn tag `step-1.8-ok`): zoom/kéo trang (`crates/inknote-app/src/view.rs`; nét lưu theo toạ độ TRANG; Ctrl+cuộn/Ctrl +/-/0 = zoom, cuộn/chuột giữa/Space+kéo = kéo trang; bỏ qua nét ngoài màn hình bằng hộp bao), phím **F9** thêm 2000 nét mẫu (`Command::AddStrokes`, 1 bước undo), dòng thông số (zoom, ms, fps) góc dưới-trái canvas, hộp xác nhận khi bấm Clear Page.
+- **Bước 1.8 đã tối ưu hiệu năng và sửa drop FPS, chờ người dùng test lại** (chưa gắn tag `step-1.8-ok`):
+  - Tối ưu nét đang viết (`active`): chốt theo đợt 16 đoạn (`advance_active_committed`), mỗi khung chỉ tessellate phần đuôi ngắn (< 16 đoạn) + đầu bút modeler (giảm thời gian vẽ từ ~13ms xuống ~0.03ms).
+  - Tối ưu 2000 nét tĩnh: gom toàn bộ thành 1 `egui::epaint::Mesh` duy nhất và cache lại (`StaticKey`), khi đang viết nét mới hoặc không zoom/pan thì tái sử dụng trực tiếp (thời gian dựng mesh giảm từ ~16ms xuống ~0.001ms).
+  - Đã có tính năng zoom/kéo trang (`view.rs`), phím F9 tạo 2000 nét mẫu (`Command::AddStrokes`), hộp thoại xác nhận Clear Page.
 - `step-1.7-ok` đã gắn (người dùng xác nhận).
 
 ## Quyết định đã chốt và lý do (không bàn lại)

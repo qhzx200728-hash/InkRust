@@ -35,6 +35,7 @@ pub struct Document {
     undo_stack: Vec<Done>,
     redo_stack: Vec<Done>,
     next_id: u64,
+    rev: u64,
 }
 
 impl Document {
@@ -50,6 +51,11 @@ impl Document {
 
     pub fn strokes(&self) -> &[Stroke] {
         &self.strokes
+    }
+
+    /// Số đổi mỗi khi nội dung trang thay đổi (execute/undo/redo) — dùng để làm mới bộ nhớ đệm hình vẽ.
+    pub fn revision(&self) -> u64 {
+        self.rev
     }
 
     pub fn can_undo(&self) -> bool {
@@ -83,6 +89,7 @@ impl Document {
         };
         self.undo_stack.push(done);
         self.redo_stack.clear();
+        self.rev += 1;
     }
 
     /// Hoàn tác 1 bước. Trả về `true` nếu có thay đổi.
@@ -101,6 +108,7 @@ impl Document {
             Done::ClearPage(removed) => self.strokes = removed.clone(),
         }
         self.redo_stack.push(done);
+        self.rev += 1;
         true
     }
 
@@ -115,6 +123,7 @@ impl Document {
             Done::ClearPage(_) => self.strokes.clear(),
         }
         self.undo_stack.push(done);
+        self.rev += 1;
         true
     }
 }
