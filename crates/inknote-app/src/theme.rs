@@ -46,7 +46,6 @@ pub struct Theme {
     pub paper_grid_color: Color32,
     pub paper_line_color: Color32,
     pub paper_margin_line_color: Color32,
-    #[allow(dead_code)]
     pub paper_dot_spacing: f32,
     pub paper_dot_radius: f32,
     pub paper_margin: f32,

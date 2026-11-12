@@ -315,10 +315,19 @@ pub fn draw_icon(painter: &Painter, rect: Rect, icon: ToolIcon, color: Color32) 
     }
 }
 
-use inknote_core::{PaperPattern, PaperSettings};
+use inknote_core::{CanvasMode, PaperPattern, PaperSettings};
 use crate::theme::Theme;
 
+/// Trả về khung chữ nhật của tờ giấy theo toạ độ màn hình (dành cho chế độ Paper).
+pub fn paper_sheet_rect(origin: Pos2, settings: &PaperSettings, zoom: f32) -> Rect {
+    Rect::from_min_size(
+        origin,
+        vec2(settings.page_width * zoom, settings.page_height * zoom),
+    )
+}
+
 /// Vẽ nền trang giấy (Plain, Dotted, Grid, Lined) kèm đường lề 2 bên (Margin lines).
+/// Hỗ trợ 2 chế độ: Paper (Trang giấy chuẩn có bóng đổ) và Whiteboard (Bảng trắng vô tận).
 pub fn draw_paper(
     painter: &Painter,
     paper_rect: Rect,
@@ -327,14 +336,42 @@ pub fn draw_paper(
     settings: &PaperSettings,
     zoom: f32,
 ) {
-    // 1. Vẽ nền giấy trắng + viền giấy
-    painter.rect_filled(paper_rect, 4.0, theme.paper_bg);
-    painter.rect_stroke(
-        paper_rect,
-        4.0,
-        Stroke::new(1.0, theme.paper_border),
-        egui::StrokeKind::Middle,
-    );
+    let (sheet_rect, sheet_painter) = match settings.mode {
+        CanvasMode::Paper => {
+            let sheet = paper_sheet_rect(origin, settings, zoom);
+            if !sheet.intersects(paper_rect) {
+                return;
+            }
+            // Đổ bóng mềm tạo cảm giác tờ giấy thật nằm nổi trên mặt bàn làm việc
+            let shadow1 = sheet.translate(vec2(0.0, 4.0));
+            painter.rect_filled(shadow1, 4.0, Color32::from_black_alpha(20));
+            let shadow2 = sheet.translate(vec2(0.0, 2.0));
+            painter.rect_filled(shadow2, 2.0, Color32::from_black_alpha(30));
+
+            // Tờ giấy trắng với viền tinh tế
+            painter.rect_filled(sheet, 2.0, theme.paper_bg);
+            painter.rect_stroke(
+                sheet,
+                2.0,
+                Stroke::new(1.0, theme.paper_border),
+                egui::StrokeKind::Outside,
+            );
+
+            let clipped = sheet.intersect(paper_rect);
+            (sheet, painter.with_clip_rect(clipped))
+        }
+        CanvasMode::Whiteboard => {
+            // Chế độ bảng trắng vô tận: phủ kín toàn bộ vùng làm việc
+            painter.rect_filled(paper_rect, 4.0, theme.paper_bg);
+            painter.rect_stroke(
+                paper_rect,
+                4.0,
+                Stroke::new(1.0, theme.paper_border),
+                egui::StrokeKind::Middle,
+            );
+            (paper_rect, painter.clone())
+        }
+    };
 
     let spacing = settings.dot_spacing * zoom;
     if spacing > 0.0 {
@@ -345,13 +382,13 @@ pub fn draw_paper(
                 while step < 8.0 {
                     step *= 2.0;
                 }
-                let first_x = ((paper_rect.left() - origin.x) / step).ceil();
-                let first_y = ((paper_rect.top() - origin.y) / step).ceil();
+                let first_x = ((sheet_rect.left() - origin.x) / step).ceil();
+                let first_y = ((sheet_rect.top() - origin.y) / step).ceil();
                 let mut y = origin.y + first_y * step;
-                while y <= paper_rect.bottom() {
+                while y <= sheet_rect.bottom() {
                     let mut x = origin.x + first_x * step;
-                    while x <= paper_rect.right() {
-                        painter.circle_filled(Pos2::new(x, y), theme.paper_dot_radius, theme.paper_dot_color);
+                    while x <= sheet_rect.right() {
+                        sheet_painter.circle_filled(Pos2::new(x, y), theme.paper_dot_radius, theme.paper_dot_color);
                         x += step;
                     }
                     y += step;
@@ -364,21 +401,21 @@ pub fn draw_paper(
                 }
                 let grid_stroke = Stroke::new(1.0, theme.paper_grid_color);
                 // Các đường kẻ dọc
-                let first_x = ((paper_rect.left() - origin.x) / step).ceil();
+                let first_x = ((sheet_rect.left() - origin.x) / step).ceil();
                 let mut x = origin.x + first_x * step;
-                while x <= paper_rect.right() {
-                    painter.line_segment(
-                        [Pos2::new(x, paper_rect.top()), Pos2::new(x, paper_rect.bottom())],
+                while x <= sheet_rect.right() {
+                    sheet_painter.line_segment(
+                        [Pos2::new(x, sheet_rect.top()), Pos2::new(x, sheet_rect.bottom())],
                         grid_stroke,
                     );
                     x += step;
                 }
                 // Các đường kẻ ngang
-                let first_y = ((paper_rect.top() - origin.y) / step).ceil();
+                let first_y = ((sheet_rect.top() - origin.y) / step).ceil();
                 let mut y = origin.y + first_y * step;
-                while y <= paper_rect.bottom() {
-                    painter.line_segment(
-                        [Pos2::new(paper_rect.left(), y), Pos2::new(paper_rect.right(), y)],
+                while y <= sheet_rect.bottom() {
+                    sheet_painter.line_segment(
+                        [Pos2::new(sheet_rect.left(), y), Pos2::new(sheet_rect.right(), y)],
                         grid_stroke,
                     );
                     y += step;
@@ -391,11 +428,11 @@ pub fn draw_paper(
                 }
                 let line_stroke = Stroke::new(1.0, theme.paper_line_color);
                 // Các dòng kẻ ngang
-                let first_y = ((paper_rect.top() - origin.y) / step).ceil();
+                let first_y = ((sheet_rect.top() - origin.y) / step).ceil();
                 let mut y = origin.y + first_y * step;
-                while y <= paper_rect.bottom() {
-                    painter.line_segment(
-                        [Pos2::new(paper_rect.left(), y), Pos2::new(paper_rect.right(), y)],
+                while y <= sheet_rect.bottom() {
+                    sheet_painter.line_segment(
+                        [Pos2::new(sheet_rect.left(), y), Pos2::new(sheet_rect.right(), y)],
                         line_stroke,
                     );
                     y += step;
@@ -409,17 +446,17 @@ pub fn draw_paper(
         let margin_stroke = Stroke::new(1.5, theme.paper_margin_line_color);
         // Đường lề trái
         let left_x = origin.x + settings.left_margin * zoom;
-        if left_x >= paper_rect.left() && left_x <= paper_rect.right() {
-            painter.line_segment(
-                [Pos2::new(left_x, paper_rect.top()), Pos2::new(left_x, paper_rect.bottom())],
+        if left_x >= sheet_rect.left() && left_x <= sheet_rect.right() {
+            sheet_painter.line_segment(
+                [Pos2::new(left_x, sheet_rect.top()), Pos2::new(left_x, sheet_rect.bottom())],
                 margin_stroke,
             );
         }
         // Đường lề phải
         let right_x = origin.x + (settings.page_width - settings.right_margin) * zoom;
-        if right_x >= paper_rect.left() && right_x <= paper_rect.right() {
-            painter.line_segment(
-                [Pos2::new(right_x, paper_rect.top()), Pos2::new(right_x, paper_rect.bottom())],
+        if right_x >= sheet_rect.left() && right_x <= sheet_rect.right() {
+            sheet_painter.line_segment(
+                [Pos2::new(right_x, sheet_rect.top()), Pos2::new(right_x, sheet_rect.bottom())],
                 margin_stroke,
             );
         }

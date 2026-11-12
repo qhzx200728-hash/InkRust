@@ -25,17 +25,36 @@ impl Default for PaperPattern {
     }
 }
 
+/// Chế độ hiển thị Canvas:
+/// - `Paper`: Trang giấy chuẩn có kích thước cố định (mặc định A4), bóng đổ nổi trên nền bàn làm việc.
+/// - `Whiteboard`: Bảng trắng vô tận, trải rộng toàn màn hình không giới hạn biên.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CanvasMode {
+    #[default]
+    Paper,
+    Whiteboard,
+}
+
 fn default_page_width() -> f32 {
-    1200.0
+    840.0
+}
+
+fn default_page_height() -> f32 {
+    1188.0
 }
 
 /// Cài đặt nền giấy (Paper Settings) theo docs/02-architecture.md mục 3.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PaperSettings {
+    #[serde(default)]
+    pub mode: CanvasMode,
     pub pattern: PaperPattern,
     pub dot_spacing: f32,
     #[serde(default = "default_page_width")]
     pub page_width: f32,
+    #[serde(default = "default_page_height")]
+    pub page_height: f32,
     pub show_margins: bool,
     pub left_margin: f32,
     pub right_margin: f32,
@@ -44,9 +63,11 @@ pub struct PaperSettings {
 impl Default for PaperSettings {
     fn default() -> Self {
         Self {
+            mode: CanvasMode::Paper,
             pattern: PaperPattern::Dotted,
             dot_spacing: 24.0,
-            page_width: 1200.0,
+            page_width: 840.0,
+            page_height: 1188.0,
             show_margins: false,
             left_margin: 80.0,
             right_margin: 80.0,

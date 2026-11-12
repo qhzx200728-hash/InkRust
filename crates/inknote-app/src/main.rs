@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use inknote_core::{Command, Document, DocumentFile, PaperSettings, Stroke};
+use inknote_core::{CanvasMode, Command, Document, DocumentFile, PaperSettings, Stroke};
 use inknote_pen::{
     Constraints, PenEvent, PenPath, Style,
     brushconfig::BrushConfig,
@@ -28,7 +28,7 @@ use inknote_render::{CairoRenderContext, DrawBatch};
 use parry2d_f64::math::Vector2;
 
 use crate::{
-    icons::draw_paper,
+    icons::{draw_paper, paper_sheet_rect},
     theme::Theme,
     toolbar::{ActiveTool, ToolbarState, show_toolbars},
     view::View,
@@ -231,7 +231,23 @@ impl InkNoteApp {
         if ctx.input(|i| i.key_down(egui::Key::Space)) {
             return false;
         }
-        self.paper_rect.is_some_and(|r| r.contains(pos))
+        self.drawable_rect().is_some_and(|r| r.contains(pos))
+    }
+
+    /// Khung chữ nhật có thể viết vẽ trên màn hình:
+    /// - Ở chế độ Paper: chính là diện tích tờ giấy (không vẽ lên mặt bàn xám bên ngoài).
+    /// - Ở chế độ Whiteboard: là toàn bộ vùng làm việc.
+    fn drawable_rect(&self) -> Option<egui::Rect> {
+        let workspace = self.paper_rect?;
+        let origin = self.view.origin(workspace);
+        match self.doc.paper_settings().mode {
+            CanvasMode::Paper => Some(paper_sheet_rect(
+                origin,
+                self.doc.paper_settings(),
+                self.view.zoom,
+            )),
+            CanvasMode::Whiteboard => Some(workspace),
+        }
     }
 
     /// Đổi toạ độ màn hình → toạ độ trang (theo zoom/kéo hiện tại).
@@ -826,7 +842,13 @@ impl eframe::App for InkNoteApp {
                 || self.confirm_unsaved.is_some();
             if !blocked {
                 if keys.0 {
-                    self.view = View::default();
+                    self.view.zoom = 1.0;
+                    if self.doc.paper_settings().mode == CanvasMode::Paper {
+                        let centered_x = ((paper.width() - self.doc.paper_settings().page_width).max(0.0)) * 0.5;
+                        self.view.pan = egui::vec2(centered_x, 24.0);
+                    } else {
+                        self.view.pan = egui::Vec2::ZERO;
+                    }
                 }
                 if keys.1 {
                     self.view.zoom_at(paper, paper.center(), 1.25);
@@ -870,22 +892,41 @@ impl eframe::App for InkNoteApp {
                 let paper_rect = avail.shrink(self.theme.paper_margin);
                 self.paper_rect = Some(paper_rect);
 
-                let painter = ui.painter().with_clip_rect(paper_rect);
                 let view = self.view;
                 let origin = view.origin(paper_rect);
-                let paint_start = Instant::now();
+                let settings = self.doc.paper_settings();
 
-                // 1. Vẽ nền giấy theo PaperSettings (Plain, Dotted, Grid, Lined + Margin lines)
+                // 1. Tự động căn giữa trang ở chế độ Paper khi mở ghi chú mới (pan chưa đặt)
+                if self.view.pan == egui::Vec2::ZERO && settings.mode == CanvasMode::Paper {
+                    let centered_x =
+                        ((paper_rect.width() - settings.page_width * view.zoom).max(0.0)) * 0.5;
+                    self.view.pan = egui::vec2(centered_x, 24.0);
+                }
+
+                // 2. Vẽ nền giấy theo PaperSettings (Plain, Dotted, Grid, Lined + Margin lines)
                 draw_paper(
-                    &painter,
+                    ui.painter(),
                     paper_rect,
                     origin,
                     &self.theme,
-                    self.doc.paper_settings(),
+                    settings,
                     view.zoom,
                 );
 
-                // 2. Vẽ các nét bút đã hoàn thành (gộp 1 Mesh và cache theo StaticKey)
+                // 3. Vùng giới hạn nét vẽ (clip_rect):
+                // - Paper: Giới hạn nghiêm ngặt trong tờ giấy (không vẽ lem ra bàn xám)
+                // - Whiteboard: Tràn toàn bộ vùng làm việc
+                let clip_rect = match settings.mode {
+                    CanvasMode::Paper => {
+                        let sheet = paper_sheet_rect(origin, settings, view.zoom);
+                        sheet.intersect(paper_rect)
+                    }
+                    CanvasMode::Whiteboard => paper_rect,
+                };
+                let painter = ui.painter().with_clip_rect(clip_rect);
+                let paint_start = Instant::now();
+
+                // 4. Vẽ các nét bút đã hoàn thành (gộp 1 Mesh và cache theo StaticKey)
                 let static_key =
                     StaticKey::new(self.doc.revision(), view.zoom, view.pan, paper_rect);
                 let static_mesh = match &self.static_cache {
@@ -900,14 +941,14 @@ impl eframe::App for InkNoteApp {
                     painter.add(egui::Shape::Mesh(static_mesh));
                 }
 
-                // 3. Vẽ nét bút đang kéo (active)
+                // 5. Vẽ nét bút đang kéo (active)
                 if let Some(active) = &self.active {
-                    // 3a. Các đoạn nét đã chốt (đã tessellate sẵn)
+                    // 5a. Các đoạn nét đã chốt (đã tessellate sẵn)
                     if !active.committed_batches.is_empty() {
                         Self::paint_batches(&painter, &active.committed_batches, origin, view.zoom);
                     }
 
-                    // 3b. Phần đuôi ngắn chưa chốt (< 16 đoạn)
+                    // 5b. Phần đuôi ngắn chưa chốt (< 16 đoạn)
                     if active.path.segments.len() > active.committed_segs {
                         let tail_start = if active.committed_segs == 0 {
                             active.path.start
@@ -923,7 +964,7 @@ impl eframe::App for InkNoteApp {
                         Self::paint_batches(&painter, &self.render_cx.batches, origin, view.zoom);
                     }
 
-                    // 3c. Đầu bút động và dự đoán nét từ Modeler
+                    // 5c. Đầu bút động và dự đoán nét từ Modeler
                     self.render_cx.clear_batches();
                     active
                         .builder
@@ -931,14 +972,19 @@ impl eframe::App for InkNoteApp {
                     Self::paint_batches(&painter, &self.render_cx.batches, origin, view.zoom);
                 }
 
-                // 4. Thông số góc dưới-trái: zoom, thời gian dựng khung, FPS
+                // 6. Thông số góc dưới-trái: Mode, zoom, thời gian dựng khung, FPS
                 self.paint_ms =
                     self.paint_ms * 0.9 + paint_start.elapsed().as_secs_f32() * 1000.0 * 0.1;
-                painter.text(
+                let mode_str = match settings.mode {
+                    CanvasMode::Paper => "Paper (A4)",
+                    CanvasMode::Whiteboard => "Whiteboard",
+                };
+                ui.painter().with_clip_rect(paper_rect).text(
                     paper_rect.left_bottom() + egui::vec2(10.0, -8.0),
                     egui::Align2::LEFT_BOTTOM,
                     format!(
-                        "Zoom {:.0}%  |  build {:.1} ms  |  {:.0} fps  |  F9: +2000 strokes",
+                        "Mode: {}  |  Zoom {:.0}%  |  build {:.1} ms  |  {:.0} fps  |  F9: +2000 strokes",
+                        mode_str,
                         view.zoom_percent(),
                         self.paint_ms,
                         self.fps
@@ -974,7 +1020,7 @@ fn main() -> eframe::Result {
 mod tests {
     use super::*;
     use eframe::egui::{Pos2, RawInput, Rect, vec2};
-    use inknote_core::PaperPattern;
+    use inknote_core::{CanvasMode, PaperPattern};
 
     fn new_test_app(ctx: &egui::Context) -> InkNoteApp {
         theme::setup_fonts(ctx);
@@ -1037,7 +1083,8 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = new_test_app(&ctx);
 
-        // Đổi sang Grid + bật Margins 2 bên
+        // Đổi sang Grid + bật Margins 2 bên + chuyển sang Whiteboard
+        app.doc.paper_settings_mut().mode = CanvasMode::Whiteboard;
         app.doc.paper_settings_mut().pattern = PaperPattern::Grid;
         app.doc.paper_settings_mut().show_margins = true;
         app.doc.paper_settings_mut().left_margin = 100.0;
@@ -1050,6 +1097,7 @@ mod tests {
         // Nạp vào app2: kiểu giấy và lề 2 bên phải còn nguyên vẹn
         let mut app2 = new_test_app(&ctx);
         app2.load_document_from(temp_file.clone());
+        assert_eq!(app2.doc.paper_settings().mode, CanvasMode::Whiteboard);
         assert_eq!(app2.doc.paper_settings().pattern, PaperPattern::Grid);
         assert!(app2.doc.paper_settings().show_margins);
         assert_eq!(app2.doc.paper_settings().left_margin, 100.0);
