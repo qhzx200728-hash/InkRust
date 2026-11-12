@@ -1,0 +1,6 @@
+﻿target/
+*.aux
+*.log
+*.dvi
+reference/
+.vscode/
