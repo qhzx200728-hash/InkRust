@@ -46,6 +46,8 @@ struct InkNoteApp {
     // Trạng thái bút cảm ứng / chuột
     touch_active: bool,
     stylus_has_force: bool,
+    stylus_mode: bool,
+    canvas_rect: Option<egui::Rect>,
     cur_pressure: f64,
     last_up_pressure: f64,
     last_source: &'static str,
@@ -63,6 +65,8 @@ impl Default for InkNoteApp {
             last_event_secs: 0.0,
             touch_active: false,
             stylus_has_force: false,
+            stylus_mode: false,
+            canvas_rect: None,
             cur_pressure: 0.0,
             last_up_pressure: 0.0,
             last_source: "(chưa có)",
@@ -199,55 +203,58 @@ impl eframe::App for InkNoteApp {
                 egui::Event::Touch {
                     phase, pos, force, ..
                 } => {
+                    self.stylus_mode = true;
+                    let in_canvas = self.canvas_rect.is_none_or(|r| r.contains(pos));
                     match phase {
                         egui::TouchPhase::Start => {
+                            if !in_canvas {
+                                continue;
+                            }
                             self.touch_active = true;
                             self.stylus_has_force = force.is_some();
+                            // Trong winit trên Windows (normalize_pointer_pressure):
+                            // pressure 1..=1024 -> Some(p), còn pressure == 0 -> None.
                             let p = match force {
                                 Some(f) => (f as f64).clamp(0.0, 1.0),
-                                None => Element::PRESSURE_DEFAULT,
+                                None => 0.0,
                             };
                             self.last_source = if force.is_some() {
-                                "BÚT WACOM (có force)"
+                                "BÚT WACOM (chạm)"
                             } else {
-                                "CẢM ỨNG (không force)"
+                                "BÚT WACOM (chạm nhẹ p=0)"
                             };
                             let now = self.monotonic_instant(ev_secs);
                             self.pen_down(pos, p, now);
                         }
                         egui::TouchPhase::Move => {
-                            if force.is_some() {
-                                self.stylus_has_force = true;
-                            }
-                            let p = match force {
-                                Some(f) => (f as f64).clamp(0.0, 1.0),
-                                None => {
-                                    if self.stylus_has_force {
-                                        self.cur_pressure
-                                    } else {
-                                        Element::PRESSURE_DEFAULT
-                                    }
+                            // QUAN TRỌNG: Khi bút Wacom lơ lửng (hover) trên không, Windows vẫn gửi
+                            // WM_POINTERUPDATE -> winit phát TouchPhase::Move.
+                            // Chỉ vẽ khi đầu bút ĐÃ chạm xuống mặt bảng (self.touch_active && self.active.is_some())!
+                            if self.touch_active && self.active.is_some() {
+                                if force.is_some() {
+                                    self.stylus_has_force = true;
                                 }
-                            };
-                            let now = self.monotonic_instant(ev_secs);
-                            self.pen_down(pos, p, now);
+                                let p = match force {
+                                    Some(f) => (f as f64).clamp(0.0, 1.0),
+                                    None => 0.0,
+                                };
+                                self.last_source = "BÚT WACOM (đang vẽ)";
+                                let now = self.monotonic_instant(ev_secs);
+                                self.pen_down(pos, p, now);
+                            } else {
+                                self.last_source = "BÚT WACOM (lơ lửng / hover - không vẽ)";
+                            }
                         }
                         egui::TouchPhase::End | egui::TouchPhase::Cancel => {
-                            // Khi nhấc bút cảm ứng khỏi mặt bảng, nếu hệ điều hành báo force: None
-                            // thì áp lực tại thời điểm rời mặt bảng là 0.0 (giống trục Pressure của GDK/Rnote khi nhấc bút),
-                            // không phải PRESSURE_DEFAULT (0.5) của chuột.
-                            let p = match force {
-                                Some(f) => (f as f64).clamp(0.0, 1.0),
-                                None => {
-                                    if self.stylus_has_force {
-                                        0.0
-                                    } else {
-                                        Element::PRESSURE_DEFAULT
-                                    }
-                                }
-                            };
-                            let now = self.monotonic_instant(ev_secs);
-                            self.pen_up(pos, p, now);
+                            if self.active.is_some() {
+                                // Trong winit, khi nhấc bút (pressure == 0), normalize_pointer_pressure trả về None.
+                                let p = match force {
+                                    Some(f) => (f as f64).clamp(0.0, 1.0),
+                                    None => 0.0,
+                                };
+                                let now = self.monotonic_instant(ev_secs);
+                                self.pen_up(pos, p, now);
+                            }
                             self.touch_active = false;
                             self.stylus_has_force = false;
                         }
@@ -258,16 +265,17 @@ impl eframe::App for InkNoteApp {
                     button: egui::PointerButton::Primary,
                     pressed,
                     ..
-                } if !self.touch_active => {
+                } if !self.touch_active && !self.stylus_mode => {
+                    let in_canvas = self.canvas_rect.is_none_or(|r| r.contains(pos));
                     self.last_source = "CHUỘT (PRESSURE_DEFAULT = 0.5)";
                     let now = self.monotonic_instant(ev_secs);
-                    if pressed {
+                    if pressed && in_canvas {
                         self.pen_down(pos, Element::PRESSURE_DEFAULT, now);
-                    } else if self.active.is_some() {
+                    } else if !pressed && self.active.is_some() {
                         self.pen_up(pos, Element::PRESSURE_DEFAULT, now);
                     }
                 }
-                egui::Event::PointerMoved(pos) if !self.touch_active => {
+                egui::Event::PointerMoved(pos) if !self.touch_active && !self.stylus_mode => {
                     if self.active.is_some() {
                         let now = self.monotonic_instant(ev_secs);
                         self.pen_down(pos, Element::PRESSURE_DEFAULT, now);
@@ -385,6 +393,7 @@ impl eframe::App for InkNoteApp {
 
         let central_frame = egui::Frame::central_panel(ui.style()).fill(egui::Color32::WHITE);
         egui::CentralPanel::default().frame(central_frame).show(ui, |ui| {
+            self.canvas_rect = Some(ui.max_rect());
             let painter = ui.painter();
 
             // 1. Vẽ các nét đã hoàn thành

@@ -1,4 +1,4 @@
-﻿// SPIKE A1: egui - thu pressure but Wacom tren Windows.
+// SPIKE A1: egui - thu pressure but Wacom tren Windows.
 // Ve bang but: net day/mong theo pressure, so pressure hien ngay tren man hinh.
 // Co o "Lam muot kieu Rnote" de thu ink-stroke-modeler-rs (bai B).
 use eframe::egui;
@@ -229,6 +229,106 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native("Spike egui - pressure Wacom", options, Box::new(|_cc| Ok(Box::<App>::default())))
+}
+
+#[cfg(test)]
+mod ui_check {
+    use eframe::egui;
+
+    #[test]
+    fn test_ui_spec_capabilities() {
+        let ctx = egui::Context::default();
+        let vn_sample = "Tiếng Việt, ắ ằ ẳ ẵ ặ ơ ư đ Đ";
+        let font_id = egui::FontId::proportional(14.0);
+
+        // 1. Kiểm tra font mặc định của egui (chưa nạp Segoe UI)
+        let mut out1 = ctx.run_ui(Default::default(), |ui| {
+            ui.fonts_mut(|f| {
+                for ch in ['ắ', 'ằ', 'ẳ', 'ẵ', 'ặ', 'ơ', 'ư', 'đ', 'Đ'] {
+                    println!("default font has {ch:?}: {}", f.has_glyph(&font_id, ch));
+                }
+            });
+        });
+        out1.textures_delta.clear();
+
+        // 2. Nạp font hệ thống Windows (Segoe UI) và kiểm tra lại
+        let segoe_bytes = std::fs::read(r"C:\Windows\Fonts\segoeui.ttf").expect("doc segoeui.ttf");
+        let mut fonts = egui::FontDefinitions::default();
+        fonts.font_data.insert(
+            "segoeui".to_owned(),
+            std::sync::Arc::new(egui::FontData::from_owned(segoe_bytes)),
+        );
+        fonts
+            .families
+            .get_mut(&egui::FontFamily::Proportional)
+            .unwrap()
+            .insert(0, "segoeui".to_owned());
+        ctx.set_fonts(fonts);
+
+        // 3. Chạy thử: thanh trên nền màu bo góc, Pop-up tối bo góc, lưới thumbnail, tiếng Việt đủ dấu
+        let mut out2 = ctx.run_ui(Default::default(), |ui| {
+            ui.fonts_mut(|f| {
+                for ch in ['ắ', 'ằ', 'ẳ', 'ẵ', 'ặ', 'ơ', 'ư', 'đ', 'Đ'] {
+                    assert!(f.has_glyph(&font_id, ch), "thieu glyph {ch:?}");
+                }
+            });
+
+            // (a) Thanh trên nền xanh dương + nút chọn có ô nền sáng bo góc
+            let nav_frame = egui::Frame::new()
+                .fill(egui::Color32::from_rgb(25, 118, 210))
+                .inner_margin(egui::Margin::symmetric(12, 6));
+            egui::Panel::top("nav_bar").frame(nav_frame).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    egui::Frame::new()
+                        .fill(egui::Color32::from_rgba_unmultiplied(255, 255, 255, 50))
+                        .corner_radius(egui::CornerRadius::same(8))
+                        .inner_margin(egui::Margin::symmetric(8, 4))
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new("Bút").color(egui::Color32::WHITE));
+                        });
+                });
+            });
+
+            // (b) Thanh tuỳ chọn công cụ bo tròn, nền tối + Pop-up tối bo góc
+            egui::CentralPanel::default().show(ui, |ui| {
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgb(38, 38, 42))
+                    .corner_radius(egui::CornerRadius::same(16))
+                    .inner_margin(egui::Margin::symmetric(14, 6))
+                    .show(ui, |ui| {
+                        let btn = ui.button(vn_sample);
+                        let popup_frame = egui::Frame::popup(ui.style())
+                            .fill(egui::Color32::from_rgb(30, 30, 34))
+                            .corner_radius(egui::CornerRadius::same(12));
+                        egui::Popup::from_toggle_button_response(&btn)
+                            .frame(popup_frame)
+                            .show(|ui| {
+                                ui.label(vn_sample);
+                            });
+                    });
+
+                // (c) Lưới thumbnail (5 cột, tự xuống hàng)
+                egui::Grid::new("thumb_grid")
+                    .spacing(egui::vec2(20.0, 20.0))
+                    .show(ui, |ui| {
+                        for idx in 0..10 {
+                            egui::Frame::new()
+                                .fill(egui::Color32::from_gray(245))
+                                .corner_radius(egui::CornerRadius::same(8))
+                                .inner_margin(egui::Margin::same(8))
+                                .show(ui, |ui| {
+                                    ui.set_min_size(egui::vec2(120.0, 160.0));
+                                    ui.label(format!("Ghi chú #{idx} - {vn_sample}"));
+                                });
+                            if (idx + 1) % 5 == 0 {
+                                ui.end_row();
+                            }
+                        }
+                    });
+            });
+        });
+        out2.textures_delta.clear();
+    }
 }
 
 
