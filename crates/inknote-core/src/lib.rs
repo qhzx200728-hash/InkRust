@@ -289,11 +289,12 @@ pub enum Command {
     DeletePage(usize),
     /// Chèn một đối tượng LaTeX vào trang tại vị trí `page_index` (1 bước undo).
     AddLatex { page_index: usize, obj: LatexObject },
-    /// Cập nhật `source` và `svg_cache` của `LatexObject` (giữ nguyên vị trí & kích thước, 1 bước undo).
+    /// Cập nhật `source`, `size` và `svg_cache` của `LatexObject` (giữ nguyên vị trí `pos`, 1 bước undo).
     UpdateLatex {
         page_index: usize,
         obj_id: u64,
         new_source: String,
+        new_size: [f64; 2],
         new_svg_cache: Option<String>,
     },
 }
@@ -343,8 +344,10 @@ enum Done {
         page_index: usize,
         obj_id: u64,
         old_source: String,
+        old_size: [f64; 2],
         old_svg_cache: Option<String>,
         new_source: String,
+        new_size: [f64; 2],
         new_svg_cache: Option<String>,
     },
 }
@@ -653,6 +656,7 @@ impl Document {
                 page_index,
                 obj_id,
                 new_source,
+                new_size,
                 new_svg_cache,
             } => {
                 let target_idx = page_index.min(self.pages.len().saturating_sub(1));
@@ -663,18 +667,24 @@ impl Document {
                 else {
                     return;
                 };
-                if obj.source == new_source && obj.svg_cache == new_svg_cache {
+                if obj.source == new_source
+                    && obj.size == new_size
+                    && obj.svg_cache == new_svg_cache
+                {
                     return;
                 }
                 let old_source = std::mem::replace(&mut obj.source, new_source.clone());
+                let old_size = std::mem::replace(&mut obj.size, new_size);
                 let old_svg_cache = std::mem::replace(&mut obj.svg_cache, new_svg_cache.clone());
                 self.active_page_idx = target_idx;
                 Done::UpdateLatex {
                     page_index: target_idx,
                     obj_id,
                     old_source,
+                    old_size,
                     old_svg_cache,
                     new_source,
+                    new_size,
                     new_svg_cache,
                 }
             }
@@ -741,6 +751,7 @@ impl Document {
                 page_index,
                 obj_id,
                 old_source,
+                old_size,
                 old_svg_cache,
                 ..
             } => {
@@ -750,6 +761,7 @@ impl Document {
                     .find(|o| o.id == *obj_id)
                 {
                     obj.source = old_source.clone();
+                    obj.size = *old_size;
                     obj.svg_cache = old_svg_cache.clone();
                 }
                 self.active_page_idx = *page_index;
@@ -804,6 +816,7 @@ impl Document {
                 page_index,
                 obj_id,
                 new_source,
+                new_size,
                 new_svg_cache,
                 ..
             } => {
@@ -813,6 +826,7 @@ impl Document {
                     .find(|o| o.id == *obj_id)
                 {
                     obj.source = new_source.clone();
+                    obj.size = *new_size;
                     obj.svg_cache = new_svg_cache.clone();
                 }
                 self.active_page_idx = *page_index;
@@ -1260,7 +1274,7 @@ mod tests {
     }
 
     #[test]
-    fn update_latex_preserves_pos_size_and_is_one_undo_step() {
+    fn update_latex_preserves_pos_updates_size_and_is_one_undo_step() {
         let mut d = Document::new();
         let id = d.alloc_id();
         d.execute(Command::AddLatex {
@@ -1277,13 +1291,14 @@ mod tests {
         d.execute(Command::UpdateLatex {
             page_index: 0,
             obj_id: id,
-            new_source: "a^2 + b^2".to_string(),
+            new_source: "a^2 + b^2 + c^2".to_string(),
+            new_size: [180.0, 36.0],
             new_svg_cache: Some("<svg>new</svg>".to_string()),
         });
         let updated = &d.pages()[0].latex_objects[0];
-        assert_eq!(updated.source, "a^2 + b^2");
+        assert_eq!(updated.source, "a^2 + b^2 + c^2");
         assert_eq!(updated.pos, [150.0, 260.0]);
-        assert_eq!(updated.size, [90.0, 30.0]);
+        assert_eq!(updated.size, [180.0, 36.0]);
 
         assert!(d.undo());
         let reverted = &d.pages()[0].latex_objects[0];
@@ -1293,6 +1308,8 @@ mod tests {
         assert_eq!(reverted.size, [90.0, 30.0]);
 
         assert!(d.redo());
-        assert_eq!(d.pages()[0].latex_objects[0].source, "a^2 + b^2");
+        let redone = &d.pages()[0].latex_objects[0];
+        assert_eq!(redone.source, "a^2 + b^2 + c^2");
+        assert_eq!(redone.size, [180.0, 36.0]);
     }
 }

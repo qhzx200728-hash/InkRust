@@ -1217,57 +1217,57 @@ impl InkNoteApp {
             LatexDialogAction::Cancel => {
                 self.pending_latex_target = None;
             }
-            LatexDialogAction::Confirm { source, svg } => match self.pending_latex_target.take() {
-                Some(LatexTarget::Edit { page_index, obj_id }) => {
-                    self.doc.execute(Command::UpdateLatex {
-                        page_index,
-                        obj_id,
-                        new_source: source,
-                        new_svg_cache: Some(svg),
-                    });
+            LatexDialogAction::Confirm { source, svg } => {
+                let target = self.pending_latex_target.take();
+                let obj_id = match target {
+                    Some(LatexTarget::Edit { obj_id, .. }) => obj_id,
+                    Some(LatexTarget::New { .. }) | None => self.doc.alloc_id(),
+                };
+                let (w, h) = match self
+                    .svg_cache
+                    .get_or_render(&ctx, obj_id, &svg, self.view.zoom)
+                {
+                    Ok((_, logical)) => (
+                        logical.x as f64 * LATEX_DISPLAY_SCALE as f64,
+                        logical.y as f64 * LATEX_DISPLAY_SCALE as f64,
+                    ),
+                    Err(_) => (120.0, 40.0),
+                };
+                match target {
+                    Some(LatexTarget::Edit { page_index, obj_id }) => {
+                        self.doc.execute(Command::UpdateLatex {
+                            page_index,
+                            obj_id,
+                            new_source: source,
+                            new_size: [w, h],
+                            new_svg_cache: Some(svg),
+                        });
+                    }
+                    Some(LatexTarget::New { page_index, pos }) => {
+                        let obj = LatexObject {
+                            id: obj_id,
+                            source,
+                            pos,
+                            size: [w, h],
+                            svg_cache: Some(svg),
+                        };
+                        self.doc.execute(Command::AddLatex { page_index, obj });
+                    }
+                    None => {
+                        let obj = LatexObject {
+                            id: obj_id,
+                            source,
+                            pos: [100.0, 120.0],
+                            size: [w, h],
+                            svg_cache: Some(svg),
+                        };
+                        self.doc.execute(Command::AddLatex {
+                            page_index: self.doc.active_page_index(),
+                            obj,
+                        });
+                    }
                 }
-                Some(LatexTarget::New { page_index, pos }) => {
-                    let id = self.doc.alloc_id();
-                    let (w, h) = match self.svg_cache.get_or_render(&ctx, id, &svg, self.view.zoom)
-                    {
-                        Ok((_, logical)) => (
-                            logical.x as f64 * LATEX_DISPLAY_SCALE as f64,
-                            logical.y as f64 * LATEX_DISPLAY_SCALE as f64,
-                        ),
-                        Err(_) => (120.0, 40.0),
-                    };
-                    let obj = LatexObject {
-                        id,
-                        source,
-                        pos,
-                        size: [w, h],
-                        svg_cache: Some(svg),
-                    };
-                    self.doc.execute(Command::AddLatex { page_index, obj });
-                }
-                None => {
-                    let id = self.doc.alloc_id();
-                    let (w, h) = match self.svg_cache.get_or_render(&ctx, id, &svg, self.view.zoom)
-                    {
-                        Ok((_, logical)) => (
-                            logical.x as f64 * LATEX_DISPLAY_SCALE as f64,
-                            logical.y as f64 * LATEX_DISPLAY_SCALE as f64,
-                        ),
-                        Err(_) => (120.0, 40.0),
-                    };
-                    let obj = LatexObject {
-                        id,
-                        source,
-                        pos: [100.0, 120.0],
-                        size: [w, h],
-                        svg_cache: Some(svg),
-                    };
-                    self.doc.execute(Command::AddLatex {
-                        page_index: self.doc.active_page_index(),
-                        obj,
-                    });
-                }
-            },
+            }
         }
 
         // Hộp xác nhận lưu thay đổi trước khi mở file khác, tạo mới hoặc tắt app khi chưa lưu file
