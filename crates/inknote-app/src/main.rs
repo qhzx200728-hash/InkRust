@@ -335,6 +335,7 @@ impl InkNoteApp {
             || self.confirm_clear.is_some()
             || self.confirm_delete_page.is_some()
             || self.confirm_unsaved.is_some()
+            || self.toolbar_state.last_metrics.tool_pill_rect.contains(pos)
         {
             return None;
         }
@@ -378,7 +379,7 @@ impl InkNoteApp {
                 ((workspace.width() - settings.page_width * self.view.zoom).max(0.0)) * 0.5;
         }
         let top_pad = if settings.mode == CanvasMode::Paper {
-            24.0
+            48.0
         } else {
             0.0
         };
@@ -1243,7 +1244,10 @@ impl eframe::App for InkNoteApp {
                     self.view.zoom_at(paper, paper.center(), 0.8);
                     scrolled_or_panned = true;
                 }
-                if let Some(h) = hover.filter(|h| paper.contains(*h)) {
+                if let Some(h) = hover.filter(|h| {
+                    paper.contains(*h)
+                        && !self.toolbar_state.last_metrics.tool_pill_rect.contains(*h)
+                }) {
                     if zoom_delta != 1.0 {
                         self.view.zoom_at(paper, h, zoom_delta);
                         scrolled_or_panned = true;
@@ -1283,11 +1287,11 @@ impl eframe::App for InkNoteApp {
         if self.toolbar_state.show_thumbnails {
             let panel_frame = egui::Frame::new()
                 .fill(self.theme.thumb_panel_bg)
-                .stroke(egui::Stroke::new(1.0, self.theme.thumb_panel_stroke))
-                .inner_margin(egui::Margin::symmetric(8, 6));
+                .inner_margin(egui::Margin::symmetric(12, 10));
             let mut thumb_action = ThumbnailAction::None;
             egui::Panel::left("page_thumbnails_sidebar")
                 .resizable(false)
+                .show_separator_line(false)
                 .exact_size(self.theme.thumb_panel_width)
                 .frame(panel_frame)
                 .show(ui, |ui| {
@@ -1362,7 +1366,7 @@ impl eframe::App for InkNoteApp {
                 if self.view.pan == egui::Vec2::ZERO && settings.mode == CanvasMode::Paper {
                     let centered_x =
                         ((paper_rect.width() - settings.page_width * view.zoom).max(0.0)) * 0.5;
-                    self.view.pan = egui::vec2(centered_x, 24.0);
+                    self.view.pan = egui::vec2(centered_x, 48.0);
                 }
 
                 // 2. Vẽ nền giấy cho từng trang đang nằm trong khung nhìn
@@ -1979,13 +1983,25 @@ mod tests {
                 m.tool_pill_rect.width()
             );
 
-            // 6. Canvas giấy chấm bắt đầu ngay dưới 2 thanh công cụ và chiếm diện tích còn lại
+            // 6. Canvas bắt đầu ngay dưới thanh xanh (không còn dải nền trắng) và thanh pill nổi đè phía trên
             let paper = app.paper_rect.expect("paper_rect must be set");
             assert!(
-                paper.top() > m.tool_strip_rect.bottom(),
-                "[{w}x{h}] paper_rect.top()={} should be below tool_strip_rect.bottom()={}",
+                paper.top() > m.nav_outer_rect.bottom(),
+                "[{w}x{h}] paper_rect.top()={} should be below nav_outer_rect.bottom()={}",
                 paper.top(),
-                m.tool_strip_rect.bottom()
+                m.nav_outer_rect.bottom()
+            );
+            assert!(
+                m.tool_pill_rect.top() > m.nav_outer_rect.bottom(),
+                "[{w}x{h}] tool_pill_rect.top()={} should be below nav_outer_rect.bottom()={}",
+                m.tool_pill_rect.top(),
+                m.nav_outer_rect.bottom()
+            );
+            assert!(
+                m.tool_pill_rect.top() <= paper.top() + 10.0,
+                "[{w}x{h}] tool_pill_rect.top()={} should float over top of workspace (paper.top()={})",
+                m.tool_pill_rect.top(),
+                paper.top()
             );
             assert!(
                 (paper.center().x - win_center_x).abs() <= 1.0,

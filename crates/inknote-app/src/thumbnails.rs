@@ -319,26 +319,26 @@ pub fn show_thumbnail_panel(
         action = ThumbnailAction::Close;
     }
 
-    ui.add_space(6.0);
-    ui.separator();
-    ui.add_space(8.0);
+    ui.add_space(10.0);
 
     let aspect = (settings.page_height / settings.page_width.max(1.0)).clamp(0.45, 2.0);
     ScrollArea::vertical()
         .id_salt("page_thumbnails_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            let col_gap = 14.0;
+            let side_pad = 6.0;
+            let col_gap = 16.0;
             let row_gap = 14.0;
             let avail_w = ui.available_width();
-            let card_w = ((avail_w - col_gap - 8.0) * 0.5).max(80.0);
+            let card_w = ((avail_w - side_pad * 2.0 - col_gap) * 0.5).max(80.0);
             let thumb_h = (card_w * aspect).round();
             let scale = card_w / settings.page_width.max(1.0);
-            let footer_h = 22.0;
+            let footer_h = 24.0;
 
+            ui.add_space(4.0);
             for row_start in (0..page_count).step_by(2) {
                 ui.horizontal(|ui| {
-                    ui.add_space(4.0);
+                    ui.add_space(side_pad);
                     for col in 0..2 {
                         let idx = row_start + col;
                         if idx >= page_count {
@@ -365,9 +365,9 @@ pub fn show_thumbnail_panel(
 
                         if ui.is_rect_visible(card_rect) {
                             ui.painter().rect_filled(
-                                card_rect.translate(vec2(0.0, 1.5)),
-                                CornerRadius::same(4),
-                                Color32::from_rgba_unmultiplied(0, 0, 0, 20),
+                                card_rect.translate(vec2(0.0, 2.0)),
+                                CornerRadius::same(6),
+                                Color32::from_rgba_unmultiplied(15, 23, 42, 18),
                             );
                             draw_thumbnail_paper_bg(
                                 ui.painter(),
@@ -402,9 +402,9 @@ pub fn show_thumbnail_panel(
                             };
                             ui.painter().rect_stroke(
                                 card_rect,
-                                CornerRadius::same(4),
+                                CornerRadius::same(6),
                                 border,
-                                StrokeKind::Outside,
+                                StrokeKind::Inside,
                             );
                         }
 
@@ -485,9 +485,19 @@ pub fn show_thumbnail_panel(
                                     ui.close();
                                 }
 
-                                ui.add_space(2.0);
-                                ui.separator();
-                                ui.add_space(2.0);
+                                ui.add_space(4.0);
+                                let (sep_rect, _) = ui.allocate_exact_size(
+                                    vec2(ui.available_width(), 1.0),
+                                    Sense::hover(),
+                                );
+                                ui.painter().line_segment(
+                                    [
+                                        pos2(sep_rect.left() + 8.0, sep_rect.center().y),
+                                        pos2(sep_rect.right() - 8.0, sep_rect.center().y),
+                                    ],
+                                    Stroke::new(1.0, Color32::from_rgb(236, 239, 245)),
+                                );
+                                ui.add_space(4.0);
 
                                 if popup_menu_item(ui, "Clear Page", danger_fg, true) {
                                     action = ThumbnailAction::ClearPage(idx);
