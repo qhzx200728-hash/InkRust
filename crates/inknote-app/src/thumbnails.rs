@@ -534,9 +534,16 @@ pub fn show_thumbnail_panel(
                         );
                         rendered_cards.push((idx, card_rect));
 
+                        let card_resp = ui.interact(
+                            card_rect,
+                            ui.scope_id().with(("thumb_card", page.id)),
+                            Sense::click_and_drag(),
+                        );
+
+                        // Đăng ký ô tích tròn SAU card_resp để nằm trên cùng khi nhận click/hover
                         let check_rect = Rect::from_center_size(
-                            pos2(card_rect.right() - 12.0, card_rect.top() + 12.0),
-                            vec2(18.0, 18.0),
+                            pos2(card_rect.right() - 13.0, card_rect.top() + 13.0),
+                            vec2(22.0, 22.0),
                         );
                         let check_resp = ui.interact(
                             check_rect,
@@ -544,13 +551,9 @@ pub fn show_thumbnail_panel(
                             Sense::click(),
                         );
 
-                        let card_resp = ui.interact(
-                            card_rect,
-                            ui.scope_id().with(("thumb_card", page.id)),
-                            Sense::click_and_drag(),
-                        );
-
-                        if page_count > 1 && card_resp.drag_started_by(egui::PointerButton::Primary)
+                        if page_count > 1
+                            && !check_resp.hovered()
+                            && card_resp.drag_started_by(egui::PointerButton::Primary)
                         {
                             if let Some(pos) = ui.ctx().input(|i| i.pointer.interact_pos()) {
                                 thumb_cache.drag = Some(ThumbDragState {
