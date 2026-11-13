@@ -405,22 +405,26 @@ pub fn compile_latex_to_svg(source: &str, opts: &CompileOptions) -> Result<Strin
     }
 }
 
-/// Rasterize chuỗi SVG thành buffer RGBA sắc nét theo hệ số `scale` (ví dụ `3.0` cho zoom 300%).
-pub fn render_svg_to_rgba(svg: &str, scale: f32) -> Result<RenderedSvg, LatexError> {
-    let opt = resvg::usvg::Options::default();
-    let tree = resvg::usvg::Tree::from_str(svg, &opt)
-        .map_err(|e| LatexError::SvgParseFailed(e.to_string()))?;
+/// Giới hạn kích thước bitmap tối đa mỗi chiều để tránh tốn RAM quá mức khi phóng đại cực lớn.
+pub const MAX_SVG_BITMAP_DIM: f32 = 4096.0;
 
+/// Tính hệ số scale rasterize sao cho sắc nét theo kích thước hiển thị trên màn hình và giới hạn bitmap.
+pub fn compute_clamped_svg_scale(
+    logical_width: f32,
+    logical_height: f32,
+    desired_scale: f32,
+) -> f32 {
+    let clamped = desired_scale.clamp(0.25, 64.0);
+    (MAX_SVG_BITMAP_DIM / logical_width.max(1.0))
+        .min(MAX_SVG_BITMAP_DIM / logical_height.max(1.0))
+        .min(clamped)
+}
+
+fn render_tree_to_rgba(tree: &resvg::usvg::Tree, scale: f32) -> Result<RenderedSvg, LatexError> {
     let size = tree.size();
     let logical_width = size.width().max(1.0);
     let logical_height = size.height().max(1.0);
-
-    let clamped_scale = scale.clamp(0.25, 16.0);
-    // Giới hạn kích thước bitmap tối đa 4096px mỗi chiều để tránh tốn RAM quá mức khi zoom cực đại
-    let max_dim = 4096.0_f32;
-    let fit_scale = (max_dim / logical_width)
-        .min(max_dim / logical_height)
-        .min(clamped_scale);
+    let fit_scale = compute_clamped_svg_scale(logical_width, logical_height, scale);
 
     let width_px = (logical_width * fit_scale).ceil().max(1.0) as u32;
     let height_px = (logical_height * fit_scale).ceil().max(1.0) as u32;
@@ -431,7 +435,7 @@ pub fn render_svg_to_rgba(svg: &str, scale: f32) -> Result<RenderedSvg, LatexErr
     let sx = width_px as f32 / logical_width;
     let sy = height_px as f32 / logical_height;
     let transform = resvg::tiny_skia::Transform::from_scale(sx, sy);
-    resvg::render(&tree, transform, &mut pixmap.as_mut());
+    resvg::render(tree, transform, &mut pixmap.as_mut());
 
     // resvg/tiny-skia dùng premultiplied RGBA; chuyển sang unmultiplied RGBA cho egui::ColorImage
     let mut rgba = pixmap.take();
@@ -452,6 +456,32 @@ pub fn render_svg_to_rgba(svg: &str, scale: f32) -> Result<RenderedSvg, LatexErr
         logical_width,
         logical_height,
     })
+}
+
+/// Rasterize chuỗi SVG thành buffer RGBA sắc nét theo hệ số `scale` (ví dụ `3.0` cho zoom 300%).
+pub fn render_svg_to_rgba(svg: &str, scale: f32) -> Result<RenderedSvg, LatexError> {
+    let opt = resvg::usvg::Options::default();
+    let tree = resvg::usvg::Tree::from_str(svg, &opt)
+        .map_err(|e| LatexError::SvgParseFailed(e.to_string()))?;
+    render_tree_to_rgba(&tree, scale)
+}
+
+/// Rasterize chuỗi SVG vừa khít với kích thước hiển thị thực tế `(display_width, display_height)` * `oversample`.
+pub fn render_svg_for_display_size(
+    svg: &str,
+    display_width: f32,
+    display_height: f32,
+    oversample: f32,
+) -> Result<RenderedSvg, LatexError> {
+    let opt = resvg::usvg::Options::default();
+    let tree = resvg::usvg::Tree::from_str(svg, &opt)
+        .map_err(|e| LatexError::SvgParseFailed(e.to_string()))?;
+    let size = tree.size();
+    let logical_w = size.width().max(1.0);
+    let logical_h = size.height().max(1.0);
+    let scale = (display_width.max(1.0) / logical_w).max(display_height.max(1.0) / logical_h)
+        * oversample.max(1.0);
+    render_tree_to_rgba(&tree, scale)
 }
 
 #[cfg(test)]

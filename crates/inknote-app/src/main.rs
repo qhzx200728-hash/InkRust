@@ -2149,40 +2149,43 @@ impl InkNoteApp {
                         let Some(svg) = obj.svg_cache.as_deref() else {
                             continue;
                         };
-                        if let Ok((tex_id, _)) =
-                            self.svg_cache.get_or_render(&ctx, obj.id, svg, view.zoom)
+                        let (mut p_x, mut p_y, mut w_p, mut h_p) = (
+                            obj.pos[0] as f32,
+                            obj.pos[1] as f32,
+                            obj.size[0] as f32,
+                            obj.size[1] as f32,
+                        );
+                        if let (Some(sel), Some(interaction)) =
+                            (&self.lasso_state.selection, &self.lasso_state.interaction)
                         {
-                            let (mut p_x, mut p_y, mut w_p, mut h_p) = (
-                                obj.pos[0] as f32,
-                                obj.pos[1] as f32,
-                                obj.size[0] as f32,
-                                obj.size[1] as f32,
-                            );
-                            if let (Some(sel), Some(interaction)) =
-                                (&self.lasso_state.selection, &self.lasso_state.interaction)
-                            {
-                                if sel.page_index == page_idx && sel.latex_ids.contains(&obj.id) {
-                                    match interaction {
-                                        LassoInteraction::Moving { delta, .. } => {
-                                            p_x += delta.x;
-                                            p_y += delta.y;
-                                        }
-                                        LassoInteraction::Resizing { anchor, scale, .. } => {
-                                            let ax = anchor[0] as f32;
-                                            let ay = anchor[1] as f32;
-                                            let sx = scale[0] as f32;
-                                            let sy = scale[1] as f32;
-                                            p_x = ax + (p_x - ax) * sx;
-                                            p_y = ay + (p_y - ay) * sy;
-                                            w_p *= sx.abs();
-                                            h_p *= sy.abs();
-                                        }
-                                        _ => {}
+                            if sel.page_index == page_idx && sel.latex_ids.contains(&obj.id) {
+                                match interaction {
+                                    LassoInteraction::Moving { delta, .. } => {
+                                        p_x += delta.x;
+                                        p_y += delta.y;
                                     }
+                                    LassoInteraction::Resizing { anchor, scale, .. } => {
+                                        let ax = anchor[0] as f32;
+                                        let ay = anchor[1] as f32;
+                                        let sx = scale[0] as f32;
+                                        let sy = scale[1] as f32;
+                                        p_x = ax + (p_x - ax) * sx;
+                                        p_y = ay + (p_y - ay) * sy;
+                                        w_p *= sx.abs();
+                                        h_p *= sy.abs();
+                                    }
+                                    _ => {}
                                 }
                             }
-                            let top_left = origin + egui::vec2(p_x * view.zoom, p_y * view.zoom);
-                            let display_size = egui::vec2(w_p * view.zoom, h_p * view.zoom);
+                        }
+                        let top_left = origin + egui::vec2(p_x * view.zoom, p_y * view.zoom);
+                        let display_size = egui::vec2(w_p * view.zoom, h_p * view.zoom);
+                        if let Ok((tex_id, _)) = self.svg_cache.get_or_render_for_display_size(
+                            &ctx,
+                            obj.id,
+                            svg,
+                            display_size,
+                        ) {
                             let rect = egui::Rect::from_min_size(top_left, display_size);
                             page_painter.image(
                                 tex_id,
