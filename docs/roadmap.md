@@ -78,7 +78,7 @@
 | Bước | Việc | Trạng thái | Test thủ công | Rollback |
 |---|---|---|---|---|
 | 6.1 | **Chèn ảnh từ file & Nút dán ảnh (Paste)**: thanh tuỳ chọn Chèn ảnh có nút chọn file và **nút riêng Dán ảnh từ clipboard** (`Ctrl+V` / `PasteImage`); kéo di chuyển/đổi cỡ ảnh giữ đúng tỷ lệ (1 bước undo) | ✅ Xong (`step-6.1-ok`) | Copy một ảnh vào clipboard, bấm nút Dán ảnh hoặc nhấn `Ctrl+V` → ảnh hiện lên trang; thử chèn thêm 1 ảnh từ file | `git revert 73ccdd3 2b93911` |
-| 6.2 | **Giữ ảnh sắc nét theo mức zoom & Kiểm tra tổng hợp với Tẩy**: lưu byte ảnh gốc, vẽ lại theo mức zoom; kiểm tra Tẩy không xoá ảnh | ⏳ Chưa làm | 1) Chèn ảnh có chữ nhỏ, zoom 300% ảnh vẫn sắc nét, không mờ.<br>2) Đặt nét bút + LaTeX + Ảnh, dùng tẩy quẹt qua cả ba: chỉ nét bút mất | `git revert <commit 6.2>` |
+| 6.2 | **Giữ ảnh sắc nét theo mức zoom & Kiểm tra tổng hợp với Tẩy**: lưu byte ảnh gốc, nâng giới hạn GPU texture tới 8192px (`Lanczos3` + mipmap), vẽ ảnh trong thumbnail Pages; kiểm tra tổng hợp Tẩy thường/Tẩy nét ở zoom 300% | ✅ Xong (`step-6.2-ok`) | 1) Chèn ảnh có chữ nhỏ, zoom 50%→300% & thumbnail đều sắc nét, lưu/mở `.inknote` giữ nguyên.<br>2) Đặt nét bút + LaTeX + Hình + Text + Ảnh, dùng Tẩy thường/Tẩy nét ở 300%: chỉ nét bút mất, `Ctrl+Z` hoàn tác | `git revert 64246ad` |
 
 ---
 

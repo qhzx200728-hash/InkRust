@@ -1,8 +1,8 @@
 # memory.md – Bộ nhớ trạng thái dự án InkNote
 
 ## Mục tiêu hiện tại
-- Vừa hoàn thành và gắn tag **`step-6.1-ok`** (**Bước 6.1: Chèn ảnh từ file & Nút dán ảnh từ clipboard / `Ctrl+V`**).
-- Chờ người dùng xác nhận chuyển sang **Bước 6.2** (kiểm tra zoom sắc nét + tổng hợp với Tẩy) theo `docs/roadmap.md`.
+- Vừa hoàn thành và gắn tag **`step-6.2-ok`** (**Bước 6.2: Giữ ảnh sắc nét theo mức zoom & Kiểm tra tổng hợp với Tẩy**).
+- Đang chuyển sang **Bước 7.1 – Giao diện Library (P3)** theo `docs/roadmap.md`.
 
 ## Đã hoàn thành (kèm tên file đã tạo/sửa)
 - **Bước 0 – Spike (Thử nghiệm kỹ thuật)** (`commit fb30599`):
@@ -69,8 +69,12 @@
   - `crates/inknote-app/src/image_box.rs`: Đọc file PNG/JPEG/BMP/WebP giữ nguyên byte gốc, đọc ảnh clipboard (`arboard`) + mã hoá `ColorImage` (`encode_color_image_to_png`) thành PNG không mất nét, cache texture độ phân giải gốc (`MAX_GPU_TEXTURE_SIDE = 4096`), `TextureOptions::LINEAR`.
   - `crates/inknote-app/src/toolbar.rs`, `lasso.rs`, `main.rs`: Thanh tuỳ chọn có **Open File...**, **Paste Image**, **Delete**, thông báo tự ẩn 3s; vẽ ảnh **bên dưới nét bút**; chọn/di chuyển/kéo 4 góc giữ tỷ lệ; xử lý `egui::Event::PasteImage` và `egui::Event::Paste` cho phím tắt `Ctrl+V`; bảo vệ hoàn toàn trước Tẩy thường/Tẩy nét và hỗ trợ công tắc lọc Lasso.
 
+- **Bước 6.2 – Giữ ảnh sắc nét theo mức zoom & Kiểm tra tổng hợp với Tẩy** (`commit 64246ad`, tag `step-6.2-ok` — người dùng xác nhận test OK):
+  - `crates/inknote-app/src/image_box.rs`: Lưu nguyên `ImageObject.bytes`, đọc động giới hạn GPU `max_texture_side` (`clamp(512, 8192)`), bật mipmap `TextureOptions::LINEAR.with_mipmap_mode(Some(TextureFilter::Linear))`, dùng `FilterType::Lanczos3` cho ảnh quá cỡ và tự nâng cấp texture nếu giới hạn GPU tăng.
+  - `crates/inknote-app/src/thumbnails.rs` & `main.rs`: Hiển thị ảnh trang trong thanh thumbnail Pages (bên dưới nét bút) và kiểm thử tích hợp ở zoom 300% xác nhận cả `Standard` và `Stroke` Eraser chỉ xoá nét bút, giữ nguyên LaTeX/Hình/Text/Ảnh.
+
 ## Đang làm dở
-- Không có task nào dở dang. Bước 6.1 đã gắn tag `step-6.1-ok` và đẩy lên GitHub `origin/main`. Sẵn sàng sang **Bước 6.2**.
+- Chuẩn bị thực hiện **Bước 7.1 – Giao diện Library (P3)**. Đã gắn tag `step-6.2-ok` và đẩy lên GitHub `origin/main`.
 
 ## Quyết định đã chốt và lý do (không bàn lại)
 - **Bỏ hoàn toàn bản cũ (Electron/Flutter/web)**: viết mới 100% bằng Rust cho Windows.
@@ -103,8 +107,7 @@
 - Nút bấm phụ trên thân bút / đầu tẩy phía sau bút Wacom: chưa kiểm tra `egui` có nhận riêng được không (để sau).
 
 ## Việc tiếp theo (xếp theo thứ tự ưu tiên)
-1. **Bước 6.2**: Kiểm tra ảnh sắc nét khi zoom cao (300%) & kiểm tra tổng hợp Tẩy với Nét bút + LaTeX + Hình + Văn bản + Ảnh.
-2. **Bước 7 (7.1 → 7.4)**: Màn hình Library (P3), Trash, xuất PDF/Ảnh, `README.md`.
+1. **Bước 7 (7.1 → 7.4)**: Màn hình Library (P3), Trash, xuất PDF/Ảnh, `README.md`.
 
 ## Cập nhật lần cuối
 - **Ngày**: 2026-11-13
