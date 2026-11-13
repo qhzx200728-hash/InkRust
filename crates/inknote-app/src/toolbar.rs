@@ -83,11 +83,20 @@ impl Default for ToolbarLayoutMetrics {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EraserMode {
+    Standard,
+    Stroke,
+}
+
 pub struct ToolbarState {
     pub active_tool: ActiveTool,
     pub read_only: bool,
     pub show_thumbnails: bool,
     pub marker_alpha: f64,
+    pub eraser_mode: EraserMode,
+    pub eraser_size: f32,
+    pub eraser_auto_deselect: bool,
     pub last_metrics: ToolbarLayoutMetrics,
 }
 
@@ -98,6 +107,9 @@ impl Default for ToolbarState {
             read_only: false,
             show_thumbnails: false,
             marker_alpha: 0.42,
+            eraser_mode: EraserMode::Standard,
+            eraser_size: 20.0,
+            eraser_auto_deselect: false,
             last_metrics: ToolbarLayoutMetrics::default(),
         }
     }
@@ -988,6 +1000,9 @@ pub fn show_toolbars(
                             ActiveTool::Pen => {
                                 show_pen_contextual_options(ui, theme, state, brush_config);
                             }
+                            ActiveTool::Eraser => {
+                                show_eraser_contextual_options(ui, theme, state, &mut actions);
+                            }
                             other => {
                                 ui.label(
                                     RichText::new(format!(
@@ -1280,6 +1295,213 @@ fn show_pen_contextual_options(
                         brush_config.marker_options.stroke_color = Some(c);
                     }
                 }
+            }
+        });
+}
+
+fn eraser_mode_chip(
+    ui: &mut Ui,
+    theme: &Theme,
+    label: &str,
+    selected: bool,
+    tooltip: &str,
+) -> egui::Response {
+    let row_h = theme.tool_row_height;
+    let font_id = egui::FontId::proportional(theme.font_size_body);
+    let text_color = if selected {
+        Color32::WHITE
+    } else {
+        theme.tool_text_fg
+    };
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_string(), font_id, text_color);
+    let desired = vec2((galley.size().x + 20.0).max(58.0), row_h);
+    let (rect, resp) = ui.allocate_exact_size(desired, Sense::click());
+
+    if ui.is_rect_visible(rect) {
+        let p = ui.painter();
+        if selected {
+            p.rect_filled(
+                rect,
+                CornerRadius::same(theme.tool_item_rounding),
+                theme.tool_selected_bg,
+            );
+        } else if resp.hovered() {
+            p.rect_filled(
+                rect,
+                CornerRadius::same(theme.tool_item_rounding),
+                theme.tool_hover_bg,
+            );
+        }
+        p.galley(
+            pos2(
+                rect.center().x - galley.size().x * 0.5,
+                rect.center().y - galley.size().y * 0.5,
+            ),
+            galley,
+            text_color,
+        );
+    }
+    resp.on_hover_text(tooltip)
+}
+
+fn eraser_size_slot_button(
+    ui: &mut Ui,
+    theme: &Theme,
+    size: f32,
+    selected: bool,
+) -> egui::Response {
+    let row_h = theme.tool_row_height;
+    let (rect, resp) = ui.allocate_exact_size(vec2(row_h, row_h), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let p = ui.painter();
+        if selected {
+            p.rect_filled(
+                rect,
+                CornerRadius::same(theme.tool_item_rounding),
+                theme.tool_selected_bg,
+            );
+        } else if resp.hovered() {
+            p.rect_filled(
+                rect,
+                CornerRadius::same(theme.tool_item_rounding),
+                theme.tool_hover_bg,
+            );
+        }
+        let radius = ((size / 42.0) * 8.5).clamp(3.0, 9.5);
+        p.circle_filled(rect.center(), radius, theme.tool_text_fg);
+    }
+    resp.on_hover_text(format!("Eraser size: {size:.0} px"))
+}
+
+/// Nội dung Thanh tuỳ chọn khi đang chọn công cụ Tẩy (Eraser)
+fn show_eraser_contextual_options(
+    ui: &mut Ui,
+    theme: &Theme,
+    state: &mut ToolbarState,
+    actions: &mut ToolbarActions,
+) {
+    let row_h = theme.tool_row_height;
+
+    if eraser_mode_chip(
+        ui,
+        theme,
+        "Standard",
+        state.eraser_mode == EraserMode::Standard,
+        "Standard Eraser — Erases touched segments of brush strokes",
+    )
+    .clicked()
+    {
+        state.eraser_mode = EraserMode::Standard;
+    }
+
+    if eraser_mode_chip(
+        ui,
+        theme,
+        "Stroke",
+        state.eraser_mode == EraserMode::Stroke,
+        "Stroke Eraser — Erases entire touched brush strokes",
+    )
+    .clicked()
+    {
+        state.eraser_mode = EraserMode::Stroke;
+    }
+
+    draw_vertical_divider(ui, row_h, theme.tool_bar_pill_stroke);
+
+    for preset in [10.0_f32, 18.0, 28.0, 42.0] {
+        let is_sel = (state.eraser_size - preset).abs() < 1.5;
+        if eraser_size_slot_button(ui, theme, preset, is_sel).clicked() {
+            state.eraser_size = preset;
+        }
+    }
+
+    let size_btn = stroke_width_value_button(ui, theme, state.eraser_size as f64);
+    egui::Popup::from_toggle_button_response(&size_btn)
+        .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+        .frame(theme.dark_popup_frame(ui.style()))
+        .show(|ui| {
+            ui.set_min_width(210.0);
+            ui.label(
+                RichText::new("Eraser Size")
+                    .size(theme.font_size_title)
+                    .strong()
+                    .color(theme.popup_header_fg),
+            );
+            ui.add_space(6.0);
+            ui.add(egui::Slider::new(&mut state.eraser_size, 6.0..=64.0).text("px"));
+        });
+
+    draw_vertical_divider(ui, row_h, theme.tool_bar_pill_stroke);
+
+    let opts_btn = eraser_mode_chip(
+        ui,
+        theme,
+        "Options ⌄",
+        false,
+        "Eraser Advanced Settings (Filter, Auto-deselect, Clear Page)",
+    );
+    egui::Popup::from_toggle_button_response(&opts_btn)
+        .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+        .frame(theme.dark_popup_frame(ui.style()))
+        .show(|ui| {
+            ui.set_min_width(250.0);
+            ui.label(
+                RichText::new("Eraser Settings")
+                    .size(theme.font_size_title)
+                    .strong()
+                    .color(theme.popup_header_fg),
+            );
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new("Erase Filter")
+                    .size(theme.font_size_small)
+                    .color(theme.tool_text_muted),
+            );
+            let mut strokes_on = true;
+            ui.add_enabled(
+                false,
+                egui::Checkbox::new(
+                    &mut strokes_on,
+                    RichText::new("Brush strokes (Pen & Marker)")
+                        .size(theme.font_size_body)
+                        .color(theme.tool_text_fg),
+                ),
+            );
+            let mut non_strokes_off = false;
+            ui.add_enabled(
+                false,
+                egui::Checkbox::new(
+                    &mut non_strokes_off,
+                    RichText::new("LaTeX, Shapes & Images (Protected)")
+                        .size(theme.font_size_body)
+                        .color(theme.tool_text_muted),
+                ),
+            )
+            .on_disabled_hover_text(
+                "InkNote rule: LaTeX formulas, shapes, and images are never erased by swiping. Use Lasso to delete them.",
+            );
+
+            ui.add_space(6.0);
+            ui.checkbox(
+                &mut state.eraser_auto_deselect,
+                RichText::new("Auto-deselect after erasing")
+                    .size(theme.font_size_body)
+                    .color(theme.tool_text_fg),
+            );
+
+            ui.add_space(8.0);
+            if ui
+                .button(
+                    RichText::new("Clear All Strokes on Page")
+                        .size(theme.font_size_body)
+                        .color(Color32::from_rgb(248, 113, 113)),
+                )
+                .clicked()
+            {
+                actions.clear_clicked = true;
+                ui.close();
             }
         });
 }

@@ -297,6 +297,12 @@ pub enum Command {
         new_size: [f64; 2],
         new_svg_cache: Option<String>,
     },
+    /// Áp dụng kết quả tẩy nét bút trên một trang (chỉ tác động lên `strokes`, 1 bước undo).
+    EraseStrokes {
+        page_index: usize,
+        removed: Vec<(usize, Stroke)>,
+        added: Vec<Stroke>,
+    },
 }
 
 /// Một trang trong bộ nhớ làm việc của `Document`.
@@ -349,6 +355,11 @@ enum Done {
         new_source: String,
         new_size: [f64; 2],
         new_svg_cache: Option<String>,
+    },
+    EraseStrokes {
+        page_index: usize,
+        removed: Vec<(usize, Stroke)>,
+        added: Vec<Stroke>,
     },
 }
 
@@ -688,6 +699,30 @@ impl Document {
                     new_svg_cache,
                 }
             }
+            Command::EraseStrokes {
+                page_index,
+                mut removed,
+                added,
+            } => {
+                let target_idx = page_index.min(self.pages.len().saturating_sub(1));
+                if removed.is_empty() && added.is_empty() {
+                    return;
+                }
+                removed.sort_by_key(|(idx, _)| *idx);
+                let strokes = &mut self.pages[target_idx].strokes;
+                for &(idx, _) in removed.iter().rev() {
+                    if idx < strokes.len() {
+                        strokes.remove(idx);
+                    }
+                }
+                strokes.extend(added.clone());
+                self.active_page_idx = target_idx;
+                Done::EraseStrokes {
+                    page_index: target_idx,
+                    removed,
+                    added,
+                }
+            }
         };
         self.undo_stack.push(done);
         self.redo_stack.clear();
@@ -766,6 +801,20 @@ impl Document {
                 }
                 self.active_page_idx = *page_index;
             }
+            Done::EraseStrokes {
+                page_index,
+                removed,
+                added,
+            } => {
+                let strokes = &mut self.pages[*page_index].strokes;
+                let keep = strokes.len().saturating_sub(added.len());
+                strokes.truncate(keep);
+                for (idx, stroke) in removed {
+                    let insert_at = (*idx).min(strokes.len());
+                    strokes.insert(insert_at, stroke.clone());
+                }
+                self.active_page_idx = *page_index;
+            }
         }
         self.redo_stack.push(done);
         self.rev += 1;
@@ -829,6 +878,20 @@ impl Document {
                     obj.size = *new_size;
                     obj.svg_cache = new_svg_cache.clone();
                 }
+                self.active_page_idx = *page_index;
+            }
+            Done::EraseStrokes {
+                page_index,
+                removed,
+                added,
+            } => {
+                let strokes = &mut self.pages[*page_index].strokes;
+                for &(idx, _) in removed.iter().rev() {
+                    if idx < strokes.len() {
+                        strokes.remove(idx);
+                    }
+                }
+                strokes.extend(added.clone());
                 self.active_page_idx = *page_index;
             }
         }
@@ -1347,5 +1410,53 @@ mod tests {
         assert!(next > id);
 
         let _ = std::fs::remove_file(&temp_file);
+    }
+
+    #[test]
+    fn erase_strokes_is_one_undo_step_and_never_touches_latex() {
+        let mut d = Document::new();
+        let s1 = stroke(&mut d);
+        let s2 = stroke(&mut d);
+        let s3 = stroke(&mut d);
+        d.execute(Command::AddStrokes(vec![
+            s1.clone(),
+            s2.clone(),
+            s3.clone(),
+        ]));
+
+        let latex_id = d.alloc_id();
+        d.execute(Command::AddLatex {
+            page_index: 0,
+            obj: LatexObject {
+                id: latex_id,
+                source: "E = mc^2".to_string(),
+                pos: [100.0, 100.0],
+                size: [80.0, 30.0],
+                svg_cache: None,
+            },
+        });
+
+        let split_piece = stroke(&mut d);
+        d.execute(Command::EraseStrokes {
+            page_index: 0,
+            removed: vec![(0, s1.clone()), (2, s3.clone())],
+            added: vec![split_piece.clone()],
+        });
+
+        assert_eq!(d.page_strokes(0).len(), 2);
+        assert_eq!(d.page_strokes(0)[0].id, s2.id);
+        assert_eq!(d.page_strokes(0)[1].id, split_piece.id);
+        assert_eq!(d.pages()[0].latex_objects.len(), 1);
+        assert_eq!(d.pages()[0].latex_objects[0].id, latex_id);
+
+        assert!(d.undo());
+        assert_eq!(d.page_strokes(0).len(), 3);
+        assert_eq!(d.page_strokes(0)[0].id, s1.id);
+        assert_eq!(d.page_strokes(0)[1].id, s2.id);
+        assert_eq!(d.page_strokes(0)[2].id, s3.id);
+
+        assert!(d.redo());
+        assert_eq!(d.page_strokes(0).len(), 2);
+        assert_eq!(d.pages()[0].latex_objects.len(), 1);
     }
 }

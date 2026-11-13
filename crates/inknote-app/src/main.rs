@@ -4,6 +4,7 @@
 // - Khu vực 3: Canvas chính với nền giấy chấm (Dotted Paper) và nét bút Rnote (`inknote-pen` + `inknote-render`)
 
 mod autosave;
+mod eraser;
 mod icons;
 mod latex_dialog;
 mod svg_cache;
@@ -35,6 +36,7 @@ use parry2d_f64::math::Vector2;
 
 use crate::{
     autosave::AutoSaveState,
+    eraser::{apply_eraser_sweep, finish_eraser_to_command, ActiveEraser},
     icons::{draw_paper, paper_sheet_rect},
     latex_dialog::{LatexDialogAction, LatexDialogState},
     svg_cache::{SvgTextureCache, LATEX_DISPLAY_SCALE},
@@ -195,6 +197,7 @@ struct InkNoteApp {
     fps: f32,
     last_frame: Instant,
     active: Option<ActiveStroke>,
+    active_eraser: Option<ActiveEraser>,
     drawing_page_index: Option<usize>,
     static_cache: Option<(StaticKey, Vec<(usize, std::sync::Arc<egui::epaint::Mesh>)>)>,
     render_cx: CairoRenderContext,
@@ -269,6 +272,7 @@ impl InkNoteApp {
             fps: 0.0,
             last_frame: Instant::now(),
             active: None,
+            active_eraser: None,
             drawing_page_index: None,
             static_cache: None,
             render_cx: CairoRenderContext::new(),
@@ -655,6 +659,7 @@ impl InkNoteApp {
                 self.pending_latex_target = None;
                 self.static_cache = None;
                 self.active = None;
+                self.active_eraser = None;
                 self.drawing_page_index = None;
                 self.pull_overscroll = 0.0;
                 self.rebuild_batch_cache();
@@ -698,9 +703,82 @@ impl InkNoteApp {
         self.pending_latex_target = None;
         self.static_cache = None;
         self.active = None;
+        self.active_eraser = None;
         self.drawing_page_index = None;
         self.pull_overscroll = 0.0;
         self.view.pan = egui::Vec2::ZERO;
+    }
+
+    fn eraser_radius_page(&self) -> f32 {
+        (self.toolbar_state.eraser_size * 0.5) / self.view.zoom.max(0.25)
+    }
+
+    fn page_local_for(&self, screen_pos: egui::Pos2, page_idx: usize) -> egui::Pos2 {
+        if let Some(paper) = self.paper_rect {
+            let origin = self.page_origin(paper, page_idx);
+            ((screen_pos - origin) / self.view.zoom).to_pos2()
+        } else {
+            screen_pos
+        }
+    }
+
+    fn eraser_down(&mut self, screen_pos: egui::Pos2, page_idx: usize) {
+        self.doc.set_active_page_index(page_idx);
+        let page_pos = self.page_local_for(screen_pos, page_idx);
+        let strokes = self.doc.pages()[page_idx].strokes.clone();
+        let mut eraser = ActiveEraser::new(page_idx, page_pos, strokes);
+        let r = self.eraser_radius_page();
+        apply_eraser_sweep(
+            &mut eraser,
+            page_pos,
+            page_pos,
+            r,
+            self.toolbar_state.eraser_mode,
+            &mut self.render_cx,
+        );
+        self.active_eraser = Some(eraser);
+    }
+
+    fn eraser_move(&mut self, screen_pos: egui::Pos2) {
+        let Some(mut eraser) = self.active_eraser.take() else {
+            return;
+        };
+        let page_pos = self.page_local_for(screen_pos, eraser.page_index);
+        let r = self.eraser_radius_page();
+        let from = eraser.last_page_pos;
+        apply_eraser_sweep(
+            &mut eraser,
+            from,
+            page_pos,
+            r,
+            self.toolbar_state.eraser_mode,
+            &mut self.render_cx,
+        );
+        self.active_eraser = Some(eraser);
+    }
+
+    fn eraser_up(&mut self, screen_pos: egui::Pos2) {
+        let Some(mut eraser) = self.active_eraser.take() else {
+            return;
+        };
+        let page_pos = self.page_local_for(screen_pos, eraser.page_index);
+        let r = self.eraser_radius_page();
+        let from = eraser.last_page_pos;
+        apply_eraser_sweep(
+            &mut eraser,
+            from,
+            page_pos,
+            r,
+            self.toolbar_state.eraser_mode,
+            &mut self.render_cx,
+        );
+        if let Some(cmd) = finish_eraser_to_command(eraser, &mut self.doc) {
+            self.doc.execute(cmd);
+            self.rebuild_batch_cache();
+        }
+        if self.toolbar_state.eraser_auto_deselect {
+            self.toolbar_state.active_tool = ActiveTool::Pen;
+        }
     }
 
     fn pen_down(&mut self, pos: egui::Pos2, pressure: f64, now: Instant) {
@@ -918,6 +996,13 @@ impl InkNoteApp {
                     self.stylus_mode = true;
                     match phase {
                         egui::TouchPhase::Start => {
+                            if self.toolbar_state.active_tool == ActiveTool::Eraser {
+                                if let Some(page_idx) = self.interactive_page_at(&ctx, pos) {
+                                    self.touch_active = true;
+                                    self.eraser_down(pos, page_idx);
+                                }
+                                continue;
+                            }
                             let Some(page_idx) = self.drawable_page_at(&ctx, pos) else {
                                 continue;
                             };
@@ -938,7 +1023,9 @@ impl InkNoteApp {
                             self.pen_down(pos, p, now);
                         }
                         egui::TouchPhase::Move => {
-                            if self.touch_active && self.active.is_some() {
+                            if self.touch_active && self.active_eraser.is_some() {
+                                self.eraser_move(pos);
+                            } else if self.touch_active && self.active.is_some() {
                                 if force.is_some() {
                                     self.stylus_has_force = true;
                                 }
@@ -954,7 +1041,9 @@ impl InkNoteApp {
                             }
                         }
                         egui::TouchPhase::End | egui::TouchPhase::Cancel => {
-                            if self.active.is_some() {
+                            if self.active_eraser.is_some() {
+                                self.eraser_up(pos);
+                            } else if self.active.is_some() {
                                 let p = match force {
                                     Some(f) => (f as f64).clamp(0.0, 1.0),
                                     None => 0.0,
@@ -976,17 +1065,27 @@ impl InkNoteApp {
                     self.last_source = "Mouse (p=0.5)";
                     let now = self.monotonic_instant(ev_secs);
                     if pressed {
-                        if let Some(page_idx) = self.drawable_page_at(&ctx, pos) {
+                        if self.toolbar_state.active_tool == ActiveTool::Eraser {
+                            if let Some(page_idx) = self.interactive_page_at(&ctx, pos) {
+                                self.eraser_down(pos, page_idx);
+                            }
+                        } else if let Some(page_idx) = self.drawable_page_at(&ctx, pos) {
                             self.doc.set_active_page_index(page_idx);
                             self.drawing_page_index = Some(page_idx);
                             self.pen_down(pos, Element::PRESSURE_DEFAULT, now);
                         }
-                    } else if !pressed && self.active.is_some() {
-                        self.pen_up(pos, Element::PRESSURE_DEFAULT, now);
+                    } else if !pressed {
+                        if self.active_eraser.is_some() {
+                            self.eraser_up(pos);
+                        } else if self.active.is_some() {
+                            self.pen_up(pos, Element::PRESSURE_DEFAULT, now);
+                        }
                     }
                 }
                 egui::Event::PointerMoved(pos) if !self.touch_active && !self.stylus_mode => {
-                    if self.active.is_some() {
+                    if self.active_eraser.is_some() {
+                        self.eraser_move(pos);
+                    } else if self.active.is_some() {
                         let now = self.monotonic_instant(ev_secs);
                         self.pen_down(pos, Element::PRESSURE_DEFAULT, now);
                     }
@@ -1627,7 +1726,11 @@ impl InkNoteApp {
                         meshes
                     }
                 };
+                let erasing_page = self.active_eraser.as_ref().map(|e| e.page_index);
                 for (page_idx, mesh) in static_meshes {
+                    if erasing_page == Some(page_idx) {
+                        continue;
+                    }
                     let clip = self
                         .page_screen_rect(paper_rect, page_idx)
                         .intersect(paper_rect);
@@ -1635,6 +1738,26 @@ impl InkNoteApp {
                         ui.painter()
                             .with_clip_rect(clip)
                             .add(egui::Shape::Mesh(mesh));
+                    }
+                }
+
+                // 3b. Vẽ tạm các nét đang còn lại trên trang đang tẩy (live preview khi kéo tẩy)
+                if let Some(eraser) = &self.active_eraser {
+                    let clip = self
+                        .page_screen_rect(paper_rect, eraser.page_index)
+                        .intersect(paper_rect);
+                    if clip.is_positive() {
+                        let origin = self.page_origin(paper_rect, eraser.page_index);
+                        let painter = ui.painter().with_clip_rect(clip);
+                        for s in &eraser.working_strokes {
+                            if let Some(c) = self
+                                .batch_cache
+                                .get(&s.id)
+                                .or_else(|| eraser.temp_batches.get(&s.id))
+                            {
+                                Self::paint_batches(&painter, &c.batches, origin, view.zoom);
+                            }
+                        }
                     }
                 }
 
@@ -1806,6 +1929,28 @@ impl InkNoteApp {
                     }
                 }
 
+                // 4f. Hiển thị vòng tròn con trỏ Tẩy khi đang chọn công cụ Eraser
+                if self.toolbar_state.active_tool == ActiveTool::Eraser
+                    && !self.toolbar_state.read_only
+                    && !self.latex_dialog.open
+                {
+                    if let Some(hp) = ctx.input(|i| i.pointer.hover_pos()) {
+                        if self.interactive_page_at(&ctx, hp).is_some() {
+                            let radius_screen = (self.toolbar_state.eraser_size * 0.5).max(3.0);
+                            ui.painter()
+                                .with_clip_rect(paper_rect)
+                                .circle_stroke(
+                                    hp,
+                                    radius_screen,
+                                    egui::Stroke::new(
+                                        1.25,
+                                        egui::Color32::from_rgba_unmultiplied(60, 70, 90, 210),
+                                    ),
+                                );
+                        }
+                    }
+                }
+
                 // 5. Chỉ báo kéo quá đáy trang cuối để tự động tạo trang mới (Paper mode)
                 if settings.mode == CanvasMode::Paper {
                     let last_sheet = self.page_screen_rect(paper_rect, page_count - 1);
@@ -1944,6 +2089,7 @@ mod tests {
             fps: 0.0,
             last_frame: Instant::now(),
             active: None,
+            active_eraser: None,
             drawing_page_index: None,
             static_cache: None,
             render_cx: CairoRenderContext::new(),
@@ -2552,5 +2698,64 @@ mod tests {
         assert_eq!(edited.size, [110.0, 34.0]);
 
         let _ = std::fs::remove_file(temp_file);
+    }
+
+    #[test]
+    fn test_eraser_standard_and_stroke_modes_never_erase_latex() {
+        let ctx = egui::Context::default();
+        let mut app = new_test_app(&ctx);
+        let paper = Rect::from_min_size(Pos2::new(20.0, 100.0), vec2(1160.0, 680.0));
+        app.paper_rect = Some(paper);
+
+        // Tạo 1 nét ngang từ x=100..300 tại y=200 (toạ độ trang)
+        let mut pts = Vec::new();
+        for i in 0..=20 {
+            pts.push(Element::new(
+                Vector2::new(100.0 + i as f64 * 10.0, 200.0),
+                0.5,
+            ));
+        }
+        let s1 = Stroke {
+            id: app.doc.alloc_id(),
+            path: PenPath::try_from_elements(pts).unwrap(),
+            style: app.brush_config.style_for_current_options(),
+        };
+        app.doc.execute(Command::AddStroke(s1));
+
+        // Đặt 1 công thức LaTeX ngay tại (180, 185) đè lên vùng tẩy
+        let latex_id = app.doc.alloc_id();
+        app.doc.execute(Command::AddLatex {
+            page_index: 0,
+            obj: LatexObject {
+                id: latex_id,
+                source: "a + b".to_string(),
+                pos: [180.0, 185.0],
+                size: [60.0, 30.0],
+                svg_cache: None,
+            },
+        });
+
+        // 1. Tẩy thường (Standard) chà qua giữa nét tại x=200 -> nét tách thành 2 đoạn, LaTeX nguyên vẹn
+        app.toolbar_state.active_tool = ActiveTool::Eraser;
+        app.toolbar_state.eraser_mode = toolbar::EraserMode::Standard;
+        app.toolbar_state.eraser_size = 24.0;
+        let mid_screen = app.view.to_screen(paper, Pos2::new(200.0, 200.0));
+        app.eraser_down(mid_screen, 0);
+        app.eraser_up(mid_screen);
+
+        assert_eq!(app.doc.strokes().len(), 2);
+        assert_eq!(app.doc.pages()[0].latex_objects.len(), 1);
+        assert_eq!(app.doc.pages()[0].latex_objects[0].id, latex_id);
+
+        // Undo 1 lần -> quay về đúng 1 nét gốc
+        assert!(app.doc.undo());
+        assert_eq!(app.doc.strokes().len(), 1);
+
+        // 2. Tẩy nét (Stroke) chạm vào nét -> xoá cả nét, LaTeX vẫn còn nguyên
+        app.toolbar_state.eraser_mode = toolbar::EraserMode::Stroke;
+        app.eraser_down(mid_screen, 0);
+        app.eraser_up(mid_screen);
+        assert_eq!(app.doc.strokes().len(), 0);
+        assert_eq!(app.doc.pages()[0].latex_objects.len(), 1);
     }
 }
