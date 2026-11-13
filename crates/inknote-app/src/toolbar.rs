@@ -56,27 +56,28 @@ pub struct ToolbarActions {
     pub new_clicked: bool,
     pub add_page_clicked: bool,
     pub delete_page_clicked: bool,
+    pub latex_clicked: bool,
 }
 
 /// Thông tin hình học thực tế của các khu vực trên thanh công cụ (dùng để kiểm chứng alignment)
 #[derive(Clone, Copy, Debug)]
 pub struct ToolbarLayoutMetrics {
+    pub nav_outer_rect: Rect,
     pub nav_bar_rect: Rect,
     pub nav_left_rect: Rect,
     pub nav_center_rect: Rect,
     pub nav_right_rect: Rect,
-    pub tool_strip_rect: Rect,
     pub tool_pill_rect: Rect,
 }
 
 impl Default for ToolbarLayoutMetrics {
     fn default() -> Self {
         Self {
+            nav_outer_rect: Rect::NOTHING,
             nav_bar_rect: Rect::NOTHING,
             nav_left_rect: Rect::NOTHING,
             nav_center_rect: Rect::NOTHING,
             nav_right_rect: Rect::NOTHING,
-            tool_strip_rect: Rect::NOTHING,
             tool_pill_rect: Rect::NOTHING,
         }
     }
@@ -499,12 +500,13 @@ pub fn show_toolbars(
         new_clicked: false,
         add_page_clicked: false,
         delete_page_clicked: false,
+        latex_clicked: false,
     };
 
     // =========================================================================
     // KHU VỰC 1: THANH CÔNG CỤ CHÍNH (Navigation Toolbar - nền xanh dương)
     // =========================================================================
-    egui::Panel::top("navigation_toolbar")
+    let nav_resp = egui::Panel::top("navigation_toolbar")
         .frame(theme.nav_frame())
         .show(ui, |ui| {
             let nav_row_h = theme.nav_button_size[1].max(theme.nav_bar_height - 10.0);
@@ -898,6 +900,9 @@ pub fn show_toolbars(
                         if nav_icon_button(ui, theme, icon, is_sel, tip).clicked() {
                             state.read_only = false;
                             state.active_tool = tool;
+                            if tool == ActiveTool::Latex {
+                                actions.latex_clicked = true;
+                            }
                         }
                     }
 
@@ -930,63 +935,83 @@ pub fn show_toolbars(
             state.last_metrics.nav_right_rect = right_rect;
         });
 
-    // =========================================================================
-    // KHU VỰC 2: THANH TUỲ CHỌN CÔNG CỤ (Contextual Tool Options Bar - nền tối bo tròn)
-    // =========================================================================
-    egui::Panel::top("contextual_tool_options_bar")
-        .frame(theme.tool_strip_frame())
-        .show(ui, |ui| {
-            let pill_outer_h = theme.tool_row_height + 10.0; // inner_margin.y = 5 * 2
-            let (strip_rect, _) = ui.allocate_exact_size(
-                vec2(ui.available_width(), pill_outer_h),
-                Sense::hover(),
-            );
-            let mut pill_rect = Rect::NOTHING;
+    let nav_outer_rect = nav_resp.response.rect;
+    state.last_metrics.nav_outer_rect = nav_outer_rect;
 
-            let _ = show_centered_in_bounds(
-                ui,
-                "contextual_options_pill_aligned",
-                strip_rect,
-                strip_rect.center(),
-                |ui| {
-                    let inner = theme.tool_pill_frame().show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.set_min_height(theme.tool_row_height);
-                            ui.spacing_mut().item_spacing.x = 6.0;
+    // =========================================================================
+    // KHU VỰC 2: THANH TUỲ CHỌN CÔNG CỤ NỔI DẠNG POP-UP (không có dải nền trắng)
+    // =========================================================================
+    let pill_id = ui.make_persistent_id("contextual_tool_options_pill");
+    let width_id = pill_id.with("measured_width");
+    let last_width: Option<f32> = ui.ctx().data(|d| d.get_temp(width_id));
 
-                            if state.read_only {
+    let left_margin = if state.show_thumbnails {
+        theme.thumb_panel_width + 12.0
+    } else {
+        12.0
+    };
+    let safe_left = nav_outer_rect.left() + left_margin;
+    let safe_right = (nav_outer_rect.right() - 12.0).max(safe_left + 120.0);
+    let ideal_center_x = nav_outer_rect.center().x;
+    let pill_top = nav_outer_rect.bottom() + 8.0;
+
+    let pill_left = if let Some(w) = last_width {
+        let ideal_left = ideal_center_x - w * 0.5;
+        let max_left = (safe_right - w).max(safe_left);
+        ideal_left.clamp(safe_left, max_left)
+    } else {
+        (ideal_center_x - 240.0).max(safe_left)
+    };
+
+    let area_resp = egui::Area::new(pill_id)
+        .order(egui::Order::Foreground)
+        .interactable(true)
+        .fixed_pos(pos2(pill_left, pill_top))
+        .show(ui.ctx(), |ui| {
+            theme
+                .tool_pill_frame()
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.set_min_height(theme.tool_row_height);
+                        ui.spacing_mut().item_spacing.x = 6.0;
+
+                        if state.read_only {
+                            ui.label(
+                                RichText::new("Read-Only Mode is active — click the eye icon or any tool to resume drawing")
+                                    .size(theme.font_size_body)
+                                    .color(theme.tool_text_fg),
+                            );
+                            return;
+                        }
+
+                        match state.active_tool {
+                            ActiveTool::Pen => {
+                                show_pen_contextual_options(ui, theme, state, brush_config);
+                            }
+                            other => {
                                 ui.label(
-                                    RichText::new("Read-Only Mode is active — click the eye icon or any tool to resume drawing")
-                                        .size(theme.font_size_body)
-                                        .color(theme.tool_text_fg),
+                                    RichText::new(format!(
+                                        "{} — Contextual options will be enabled in its Roadmap step",
+                                        other.label()
+                                    ))
+                                    .size(theme.font_size_body)
+                                    .color(theme.tool_text_fg),
                                 );
-                                return;
                             }
-
-                            match state.active_tool {
-                                ActiveTool::Pen => {
-                                    show_pen_contextual_options(ui, theme, state, brush_config);
-                                }
-                                other => {
-                                    ui.label(
-                                        RichText::new(format!(
-                                            "{} — Contextual options will be enabled in its Roadmap step",
-                                            other.label()
-                                        ))
-                                        .size(theme.font_size_body)
-                                        .color(theme.tool_text_fg),
-                                    );
-                                }
-                            }
-                        });
+                        }
                     });
-                    pill_rect = inner.response.rect;
-                },
-            );
-
-            state.last_metrics.tool_strip_rect = strip_rect;
-            state.last_metrics.tool_pill_rect = pill_rect;
+                })
+                .response
+                .rect
         });
+
+    let pill_rect = area_resp.inner;
+    if last_width != Some(pill_rect.width()) {
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(width_id, pill_rect.width()));
+        ui.ctx().request_discard("contextual pill width updated");
+    }
+    state.last_metrics.tool_pill_rect = pill_rect;
 
     actions
 }

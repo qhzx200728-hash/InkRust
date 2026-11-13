@@ -5,6 +5,7 @@
 
 mod autosave;
 mod icons;
+mod latex_dialog;
 mod svg_cache;
 mod theme;
 mod thumbnails;
@@ -33,6 +34,7 @@ use parry2d_f64::math::Vector2;
 use crate::{
     autosave::AutoSaveState,
     icons::{draw_paper, paper_sheet_rect},
+    latex_dialog::{LatexDialogAction, LatexDialogState},
     svg_cache::{LatexSmokeState, SvgTextureCache},
     theme::Theme,
     thumbnails::{append_batches_to_mesh, show_thumbnail_panel, ThumbCache, ThumbnailAction},
@@ -177,6 +179,7 @@ struct InkNoteApp {
     thumb_cache: ThumbCache,
     svg_cache: SvgTextureCache,
     latex_smoke: LatexSmokeState,
+    latex_dialog: LatexDialogState,
     view: View,
     confirm_clear: Option<Vec<usize>>,
     confirm_delete_page: Option<Vec<usize>>,
@@ -250,6 +253,7 @@ impl InkNoteApp {
             thumb_cache: ThumbCache::default(),
             svg_cache: SvgTextureCache::default(),
             latex_smoke: LatexSmokeState::default(),
+            latex_dialog: LatexDialogState::default(),
             view: View::default(),
             confirm_clear: None,
             confirm_delete_page: None,
@@ -341,6 +345,7 @@ impl InkNoteApp {
             || self.confirm_clear.is_some()
             || self.confirm_delete_page.is_some()
             || self.confirm_unsaved.is_some()
+            || self.latex_dialog.open
             || self.toolbar_state.last_metrics.tool_pill_rect.contains(pos)
         {
             return None;
@@ -1023,6 +1028,10 @@ impl eframe::App for InkNoteApp {
             if actions.delete_page_clicked && self.doc.page_count() > 1 {
                 self.confirm_delete_page = Some(vec![self.doc.active_page_index()]);
             }
+            if actions.latex_clicked {
+                self.latex_dialog
+                    .open_with(r"$x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}$", &ctx);
+            }
             if key_pgup && self.doc.active_page_index() > 0 {
                 let target = self.doc.active_page_index() - 1;
                 self.doc.set_active_page_index(target);
@@ -1134,6 +1143,19 @@ impl eframe::App for InkNoteApp {
             }
             if do_delete || cancel || !can_delete || modal.should_close() {
                 self.confirm_delete_page = None;
+            }
+        }
+
+        // Hộp thoại LaTeX & Live Preview (Bước 4.2)
+        match self
+            .latex_dialog
+            .show(&ctx, &self.theme, &mut self.svg_cache)
+        {
+            LatexDialogAction::None | LatexDialogAction::Cancel => {}
+            LatexDialogAction::Confirm { source: _, svg } => {
+                self.latex_smoke.sample_svg = Some(svg);
+                self.latex_smoke.sample_page_idx = self.doc.active_page_index();
+                self.svg_cache.invalidate(1);
             }
         }
 
@@ -1250,7 +1272,8 @@ impl eframe::App for InkNoteApp {
             let blocked = egui::Popup::is_any_open(&ctx)
                 || self.confirm_clear.is_some()
                 || self.confirm_delete_page.is_some()
-                || self.confirm_unsaved.is_some();
+                || self.confirm_unsaved.is_some()
+                || self.latex_dialog.open;
             let mut scrolled_or_panned = false;
             let mut dy_total = 0.0_f32;
             if !blocked {
@@ -1556,7 +1579,7 @@ impl eframe::App for InkNoteApp {
                     }
                 }
 
-                // 4d. Vẽ ảnh SVG xem trước của Bước 4.1 (nếu đã render) lên trang đang chọn
+                // 4d. Vẽ ảnh SVG xem trước trên trang đang chọn (tạm cho đến Bước 4.3 lưu đối tượng thật)
                 if self.latex_smoke.sample_svg.is_some() {
                     let p_idx = self
                         .latex_smoke
@@ -1574,65 +1597,6 @@ impl eframe::App for InkNoteApp {
                             &mut self.svg_cache,
                         );
                     }
-                }
-
-                // Thanh kiểm tra nhanh Bước 4.1 khi chọn công cụ LaTeX (trước khi làm hộp thoại Bước 4.2)
-                if self.toolbar_state.active_tool == ActiveTool::Latex {
-                    egui::Area::new(egui::Id::new("latex_step41_smoke_bar"))
-                        .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 96.0))
-                        .show(&ctx, |ui| {
-                            egui::Frame::new()
-                                .fill(self.theme.tool_bar_pill_bg)
-                                .corner_radius(egui::CornerRadius::same(12))
-                                .inner_margin(egui::Margin::symmetric(12, 8))
-                                .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        let busy = self.latex_smoke.compiling;
-                                        if ui
-                                            .add_enabled(
-                                                !busy,
-                                                egui::Button::new("Render Sample (Formula + VN)"),
-                                            )
-                                            .clicked()
-                                        {
-                                            self.latex_smoke.sample_page_idx =
-                                                self.doc.active_page_index();
-                                            self.latex_smoke.start_compile(
-                                                &ctx,
-                                                r"Công thức: $x=\dfrac{-b\pm\sqrt{b^2-4ac}}{2a}$ \quad Tiếng Việt".to_string(),
-                                                Duration::from_secs(8),
-                                            );
-                                        }
-                                        if ui
-                                            .add_enabled(
-                                                !busy,
-                                                egui::Button::new("Test Timeout (Loop)"),
-                                            )
-                                            .clicked()
-                                        {
-                                            self.latex_smoke.start_compile(
-                                                &ctx,
-                                                r"\def\loop{\loop}\loop".to_string(),
-                                                Duration::from_secs(1),
-                                            );
-                                        }
-                                        if self.latex_smoke.sample_svg.is_some()
-                                            && ui.button("Clear").clicked()
-                                        {
-                                            self.latex_smoke.sample_svg = None;
-                                            self.latex_smoke.status_msg = None;
-                                        }
-                                    });
-                                    if let Some(msg) = &self.latex_smoke.status_msg {
-                                        let col = if self.latex_smoke.is_error {
-                                            egui::Color32::from_rgb(255, 130, 120)
-                                        } else {
-                                            egui::Color32::from_rgb(210, 230, 255)
-                                        };
-                                        ui.label(egui::RichText::new(msg).color(col).size(12.0));
-                                    }
-                                });
-                        });
                 }
 
                 // 5. Chỉ báo kéo quá đáy trang cuối để tự động tạo trang mới (Paper mode)
@@ -1765,6 +1729,7 @@ mod tests {
             thumb_cache: ThumbCache::default(),
             svg_cache: SvgTextureCache::default(),
             latex_smoke: LatexSmokeState::default(),
+            latex_dialog: LatexDialogState::default(),
             view: View::default(),
             confirm_clear: None,
             confirm_delete_page: None,
