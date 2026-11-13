@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/inknote-pen", "crates/inknote-render", "crates/inknote-core", "crates/inknote-app"]
+members = ["crates/inknote-pen", "crates/inknote-render", "crates/inknote-core", "crates/inknote-latex", "crates/inknote-app"]
 exclude = ["spike", "reference"]
 resolver = "2"
 
