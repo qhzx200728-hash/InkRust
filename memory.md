@@ -1,7 +1,7 @@
 # memory.md – Bộ nhớ trạng thái dự án InkNote
 
 ## Mục tiêu hiện tại
-- Chuẩn bị thực hiện **Bước 3.1: Nhiều trang (P1)** – thêm trang mới (nút Add Page trên toolbar chính), chuyển trang qua lại, xoá trang (có Undo/Redo), và tương thích lưu/mở nhiều trang trong file `.inknote`.
+- Chuẩn bị thực hiện **Bước 3.2: Thanh thumbnail trang (P1)** – bật/tắt bằng nút **Danh sách trang** (icon hai trang) trên toolbar chính; hiện cột thumbnail các trang, bấm để nhảy trang, hỗ trợ thêm/xoá trang trực tiếp trên thanh thumbnail.
 
 ## Đã hoàn thành (kèm tên file đã tạo/sửa)
 - **Bước 0 – Spike (Thử nghiệm kỹ thuật)** (`commit fb30599`):
@@ -43,8 +43,14 @@
   - `crates/inknote-app/src/toolbar.rs` & `theme.rs`: Hiển thị cụm `Tên file + Chấm xanh/đỏ + Thông báo "Auto-saved" (chỉ hiện 3s sau mỗi lần tự lưu rồi tự ẩn)` ngay bên phải nút Read-Only Mode trên thanh công cụ chính.
   - `crates/inknote-app/src/main.rs`: Bật VSync (`PresentMode::Fifo`) để hãm FPS tối đa đúng theo tần số quét màn hình (144Hz / 60Hz) và bỏ `ctx.request_repaint()` liên tục (dùng reactive repaint + `request_repaint_after` cho bộ đếm auto-save) để không gây quá tải máy khi đứng yên.
 
+- **Bước 3.1 – Nhiều trang, cuộn dọc liền mạch & tự lưu bản nháp** (`commit 447d5c6`, `c37d070`, `c75c392`, `8c61230`, tag `step-3.1-ok` — người dùng xác nhận test OK):
+  - `crates/inknote-core/src/lib.rs`: Thêm `DocumentPage`, chuyển `Document` sang nhiều trang (`pages: Vec<DocumentPage>`, `active_page_idx`), thêm `Command::InsertPageAfter`, `Command::DeletePage` (kèm Undo/Redo và giữ ít nhất 1 trang cuối), cập nhật lưu/mở `.inknote` nhiều trang.
+  - `crates/inknote-app/src/main.rs`: Xếp trang cuộn dọc liền mạch (`PAGE_GAP`), tự cập nhật chỉ số trang khi cuộn, chuyển trang bằng `PageUp`/`PageDown`, kéo mạnh quá đáy trang cuối (`PULL_TO_ADD_THRESHOLD`) tự thêm trang mới sau trang đang viết (giữ nguyên `PaperSettings`), hộp thoại xác nhận xoá trang (`Delete Page X?`), và hộp thoại hỏi lưu khi tắt app (`Save before closing?`) nếu ghi chú có thay đổi chưa lưu thành file `.inknote`.
+  - `crates/inknote-app/src/autosave.rs`: Tự động lưu bản nháp tạm `%APPDATA%/InkNote/autosave_draft.inknote` sau 2,5s ngay cả khi chưa chọn file chính thức (chỉ khôi phục nếu app bị tắt ngang; xoá bản nháp khi người dùng chọn `Don't Save` hoặc lưu thành file `.inknote`).
+  - `crates/inknote-app/src/toolbar.rs` & `theme.rs`: Hiển thị `(trang-hiện-tại/tổng-số-trang)` giữa tên file và dấu chấm lưu trên Navbar, chữ `"Auto-saved"` màu trắng (`Color32::WHITE`), thêm nút Add Page và mục Pages trong menu More `...`.
+
 ## Đang làm dở
-- Không có task nào dở dang. Bước 2.3 đã hoàn thành và gắn tag `step-2.3-ok`. Sẵn sàng bắt tay ngay vào Bước 3.1 (Nhiều trang).
+- Không có task nào dở dang. Bước 3.1 đã hoàn thành và gắn tag `step-3.1-ok`. Sẵn sàng bắt tay ngay vào Bước 3.2 (Thanh thumbnail trang).
 
 ## Quyết định đã chốt và lý do (không bàn lại)
 - **Bỏ hoàn toàn bản cũ (Electron/Flutter/web)**: viết mới 100% bằng Rust cho Windows.
@@ -57,7 +63,7 @@
   - Quy tắc Tẩy (Eraser): trên thanh có 2 chế độ (Tẩy thường, Tẩy nét) + Pop-up cài đặt nâng cao; mặc định chỉ xoá **nét bút**, không bao giờ xoá LaTeX/hình/ảnh.
   - 2 chế độ Canvas: `Paper` (trang chuẩn A4/A5 có bóng đổ trên bàn xám) và `Whiteboard` (bảng trắng tràn màn hình, không có đường lề).
   - Tất cả pop-up của `egui` phải có `PopupCloseBehavior::CloseOnClickOutside` để giữ mở khi tương tác.
-  - Trạng thái lưu (`Tên file + chấm xanh/đỏ + chữ "Auto-saved" 3s`) hiển thị ngay bên phải nút Read-Only trên Navbar.
+  - Trạng thái lưu trên Navbar: `Tên file` `(trang/tổng)` + `chấm xanh/đỏ` + chữ `"Auto-saved"` màu trắng (3s) ngay bên phải nút Read-Only; tự lưu bản nháp tạm khi chưa chọn file và hỏi xác nhận lúc tắt app.
 - **Chuyển từ `AutoNoVsync` + `request_repaint()` liên tục sang VSync (`PresentMode::Fifo`) + reactive repaint**: Không ép render tối đa liên tục lúc đứng yên gây nóng máy/quá tải; tự động hãm FPS đúng bằng tần số quét màn hình (144Hz → max 144 FPS, 60Hz → max 60 FPS).
 - **Quy tắc Git & Rollback**: Mỗi bước nhỏ = 1 commit; chỉ dùng `git revert` (không dùng `git reset --hard`); gắn tag `step-X.Y-ok` sau khi người dùng báo OK.
 
