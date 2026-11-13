@@ -1,7 +1,8 @@
 # memory.md – Bộ nhớ trạng thái dự án InkNote
 
 ## Mục tiêu hiện tại
-- Chuẩn bị thực hiện **Bước 4.1: Crate `inknote-latex` (P2)** – gọi `latex -no-shell-escape -halt-on-error -interaction=nonstopmode` → DVI → `dvisvgm --no-fonts` kèm timeout, vẽ SVG sắc nét lên canvas (tạm dừng chờ người dùng đẩy Git xong).
+- Vừa hoàn thành và gắn tag **`step-6.1-ok`** (**Bước 6.1: Chèn ảnh từ file & Nút dán ảnh từ clipboard / `Ctrl+V`**).
+- Chờ người dùng xác nhận chuyển sang **Bước 6.2** (kiểm tra zoom sắc nét + tổng hợp với Tẩy) theo `docs/roadmap.md`.
 
 ## Đã hoàn thành (kèm tên file đã tạo/sửa)
 - **Bước 0 – Spike (Thử nghiệm kỹ thuật)** (`commit fb30599`):
@@ -54,8 +55,22 @@
   - `crates/inknote-core/src/lib.rs`: Thêm `Command::InsertPageBefore`, `Command::DuplicatePage`, `Command::ClearPageAt` hỗ trợ đầy đủ Undo/Redo.
   - `crates/inknote-app/src/toolbar.rs`, `theme.rs`, `main.rs`: Đổi `show_thumbnails_hint` → `show_thumbnails`, dùng `egui::Panel::left(...).show_separator_line(false)`, cập nhật `confirm_clear` & `confirm_delete_page` thành `Option<usize>` theo từng trang cụ thể.
 
+- **Bước 4.1 – 4.5 – Công thức LaTeX kiểu Xournal++** (`commit 308eee7`, `d49a24b`, `73c2655`, `bd3cb96`, `ee6399a`, các tag `step-4.1-ok` → `step-4.5-ok` — người dùng xác nhận test OK):
+  - `crates/inknote-latex/`, `latex_dialog.rs`, `svg_cache.rs`: Biên dịch `latex -no-shell-escape` → `.dvi` → `dvisvgm --no-fonts` có timeout, hộp thoại Live Preview ~0,5s, chèn/double-click giữ vị trí với 1 bước Undo, re-rasterize sắc nét theo display size khi zoom/kéo to, lưu `source` + `svg_cache` vào `.inknote`.
+
+- **Bước 5.1 – 5.4 – Tẩy, Lasso, 18 Hình học, Văn bản tiếng Việt** (`commit f0ba7fd..2a67ecf`, `c553341`, các tag `step-5.1-ok` → `step-5.4-ok` — người dùng xác nhận test OK):
+  - `eraser.rs`: 2 chế độ Standard & Stroke, mặc định chỉ tẩy nét bút (không bao giờ tẩy LaTeX/hình/văn bản/ảnh).
+  - `lasso.rs`: Freehand & Rectangle, bộ lọc từng loại đối tượng, di chuyển, kéo 4 góc đồng tỷ lệ, xoá 1 bước Undo.
+  - `shapes.rs`: 18 loại hình học + giữ `Ctrl` căn góc đặc biệt (`0°/30°/45°/60°/90°`) & hình đều.
+  - `text_box.rs`: Hộp văn bản tiếng Việt đủ dấu (`segoeui.ttf`), font/cỡ/đậm/nghiêng/căn lề/danh sách/màu sắc, Undo/Redo & lưu `.inknote`.
+
+- **Bước 6.1 – Chèn ảnh từ file & Dán ảnh (`Ctrl+V` / nút Paste Image)** (`commit 2b93911`, `73ccdd3`, tag `step-6.1-ok` — người dùng xác nhận test OK):
+  - `crates/inknote-core/src/lib.rs`: `ImageObject` (lưu byte ảnh gốc qua base64), `PageObject::Image`, `Command::AddImage`, tích hợp `TransformSelection`/`DeleteSelection`/`DuplicatePage`/Undo/Redo.
+  - `crates/inknote-app/src/image_box.rs`: Đọc file PNG/JPEG/BMP/WebP giữ nguyên byte gốc, đọc ảnh clipboard (`arboard`) + mã hoá `ColorImage` (`encode_color_image_to_png`) thành PNG không mất nét, cache texture độ phân giải gốc (`MAX_GPU_TEXTURE_SIDE = 4096`), `TextureOptions::LINEAR`.
+  - `crates/inknote-app/src/toolbar.rs`, `lasso.rs`, `main.rs`: Thanh tuỳ chọn có **Open File...**, **Paste Image**, **Delete**, thông báo tự ẩn 3s; vẽ ảnh **bên dưới nét bút**; chọn/di chuyển/kéo 4 góc giữ tỷ lệ; xử lý `egui::Event::PasteImage` và `egui::Event::Paste` cho phím tắt `Ctrl+V`; bảo vệ hoàn toàn trước Tẩy thường/Tẩy nét và hỗ trợ công tắc lọc Lasso.
+
 ## Đang làm dở
-- Không có task nào dở dang. Bước 3.2 đã hoàn thành và gắn tag `step-3.2-ok`. Đang chuẩn bị đẩy mã nguồn lên GitHub trước khi sang Bước 4.1 (`inknote-latex`).
+- Không có task nào dở dang. Bước 6.1 đã gắn tag `step-6.1-ok` và đẩy lên GitHub `origin/main`. Sẵn sàng sang **Bước 6.2**.
 
 ## Quyết định đã chốt và lý do (không bàn lại)
 - **Bỏ hoàn toàn bản cũ (Electron/Flutter/web)**: viết mới 100% bằng Rust cho Windows.
@@ -88,11 +103,8 @@
 - Nút bấm phụ trên thân bút / đầu tẩy phía sau bút Wacom: chưa kiểm tra `egui` có nhận riêng được không (để sau).
 
 ## Việc tiếp theo (xếp theo thứ tự ưu tiên)
-1. **Bước 3 (3.1 → 3.2)**: Nhiều trang & Thanh thumbnail trang (P1).
-2. **Bước 4 (4.1 → 4.5)**: Công thức LaTeX kiểu Xournal++ (`inknote-latex`, Live Preview, chèn/double-click sửa, lưu file).
-3. **Bước 5 (5.1 → 5.4)**: Tẩy (2 chế độ + Pop-up nâng cao, chỉ xoá nét bút), Lasso, Hình học, Văn bản.
-4. **Bước 6 (6.1 → 6.2)**: Chèn ảnh + nút dán ảnh từ clipboard, giữ ảnh sắc nét theo zoom.
-5. **Bước 7 (7.1 → 7.4)**: Màn hình Library (P3), Trash, xuất PDF/Ảnh, `README.md`.
+1. **Bước 6.2**: Kiểm tra ảnh sắc nét khi zoom cao (300%) & kiểm tra tổng hợp Tẩy với Nét bút + LaTeX + Hình + Văn bản + Ảnh.
+2. **Bước 7 (7.1 → 7.4)**: Màn hình Library (P3), Trash, xuất PDF/Ảnh, `README.md`.
 
 ## Cập nhật lần cuối
 - **Ngày**: 2026-11-13
