@@ -64,6 +64,19 @@ pub fn encode_rgba_to_png(
     })
 }
 
+/// Encodes an `egui::ColorImage` (delivered by `egui::Event::PasteImage` on `Ctrl+V`) into PNG bytes.
+pub fn encode_color_image_to_png(color_img: &ColorImage) -> Result<LoadedImageData, String> {
+    let width = u32::try_from(color_img.width())
+        .map_err(|_| "Pasted image width is too large".to_string())?;
+    let height = u32::try_from(color_img.height())
+        .map_err(|_| "Pasted image height is too large".to_string())?;
+    let mut rgba = Vec::with_capacity(color_img.pixels.len() * 4);
+    for px in &color_img.pixels {
+        rgba.extend_from_slice(&px.to_srgba_unmultiplied());
+    }
+    encode_rgba_to_png(width, height, rgba)
+}
+
 /// Reads an image from the Windows system clipboard and encodes it as lossless PNG bytes.
 pub fn read_image_from_clipboard() -> Result<LoadedImageData, String> {
     let mut clipboard =
@@ -283,5 +296,22 @@ mod tests {
         assert!((transformed.min.y - 120.0).abs() < 1e-4);
         assert!((transformed.width() - 400.0).abs() < 1e-4);
         assert!((transformed.height() - 200.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn encode_color_image_to_png_roundtrips_pixels() {
+        let color_img = ColorImage::from_rgba_unmultiplied(
+            [3, 2],
+            &[
+                255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 10, 20, 30, 128, 40, 50, 60, 255,
+                255, 255, 255, 255,
+            ],
+        );
+        let encoded = encode_color_image_to_png(&color_img).expect("encode ColorImage");
+        assert_eq!(encoded.pixel_size, [3, 2]);
+        assert!(encoded.bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+        let decoded = image::load_from_memory(&encoded.bytes).expect("decode PNG");
+        assert_eq!(decoded.width(), 3);
+        assert_eq!(decoded.height(), 2);
     }
 }

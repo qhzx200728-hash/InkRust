@@ -44,9 +44,9 @@ use crate::{
     eraser::{ActiveEraser, apply_eraser_sweep, finish_eraser_to_command},
     icons::{draw_paper, paper_sheet_rect},
     image_box::{
-        ImageTextureCache, LoadedImageData, compute_default_image_page_size, image_page_bbox,
-        load_image_from_path, paint_image_object, read_image_from_clipboard,
-        transformed_image_page_rect,
+        ImageTextureCache, LoadedImageData, compute_default_image_page_size,
+        encode_color_image_to_png, image_page_bbox, load_image_from_path, paint_image_object,
+        read_image_from_clipboard, transformed_image_page_rect,
     },
     lasso::{
         LassoInteraction, LassoState, ResizeCorner, corner_pos, hit_resize_corner, opposite_anchor,
@@ -1279,11 +1279,24 @@ impl InkNoteApp {
                 self.toolbar_state.active_tool = ActiveTool::Image;
             }
             Err(err) => {
-                if switch_tool_on_error
-                    || self.toolbar_state.active_tool == ActiveTool::Image
-                {
+                if switch_tool_on_error || self.toolbar_state.active_tool == ActiveTool::Image {
                     self.toolbar_state.image_notice = Some((err, Instant::now(), true));
                 }
+            }
+        }
+    }
+
+    fn handle_paste_egui_image(&mut self, color_img: &egui::ColorImage) {
+        if self.toolbar_state.read_only {
+            return;
+        }
+        match encode_color_image_to_png(color_img) {
+            Ok(loaded) => {
+                self.insert_loaded_image(loaded);
+                self.toolbar_state.active_tool = ActiveTool::Image;
+            }
+            Err(err) => {
+                self.toolbar_state.image_notice = Some((err, Instant::now(), true));
             }
         }
     }
@@ -1865,39 +1878,56 @@ impl InkNoteApp {
             save_default_paper_settings(&paper_settings);
         }
         // Phím tắt: Ctrl+Z = Undo; Ctrl+Y hoặc Ctrl+Shift+Z = Redo
-        // Phím tắt tệp: Ctrl+S = Save, Ctrl+Shift+S = Save As, Ctrl+O = Open, Ctrl+N = New, Ctrl+V = Paste Image
+        // Phím tắt tệp: Ctrl+S = Save, Ctrl+Shift+S = Save As, Ctrl+O = Open, Ctrl+N = New
         let allow_shortcuts = !self.latex_dialog.open && !ctx.egui_wants_keyboard_input();
-        let (
-            key_undo,
-            key_redo,
-            key_save,
-            key_save_as,
-            key_open,
-            key_new,
-            key_paste,
-            key_pgup,
-            key_pgdn,
-        ) = if allow_shortcuts {
+        let (key_undo, key_redo, key_save, key_save_as, key_open, key_new, key_pgup, key_pgdn) =
+            if allow_shortcuts {
+                ctx.input(|i| {
+                    let cmd = i.modifiers.command;
+                    let shift = i.modifiers.shift;
+                    let z = i.key_pressed(egui::Key::Z);
+                    (
+                        cmd && !shift && z,
+                        cmd && ((shift && z) || i.key_pressed(egui::Key::Y)),
+                        cmd && !shift && i.key_pressed(egui::Key::S),
+                        cmd && shift && i.key_pressed(egui::Key::S),
+                        cmd && !shift && i.key_pressed(egui::Key::O),
+                        cmd && !shift && i.key_pressed(egui::Key::N),
+                        i.key_pressed(egui::Key::PageUp),
+                        i.key_pressed(egui::Key::PageDown),
+                    )
+                })
+            } else {
+                (false, false, false, false, false, false, false, false)
+            };
+        // Ctrl+V trên canvas: egui-winit nuốt phím V thành Event::PasteImage / Event::Paste
+        let allow_canvas_paste = !self.latex_dialog.open
+            && self.confirm_clear.is_none()
+            && self.confirm_delete_page.is_none()
+            && self.confirm_unsaved.is_none()
+            && self.active_text_edit.is_none()
+            && !ctx.text_edit_focused();
+        let (paste_image_event, paste_text_event, key_paste_v) = if allow_canvas_paste {
             ctx.input(|i| {
-                let cmd = i.modifiers.command;
-                let shift = i.modifiers.shift;
-                let z = i.key_pressed(egui::Key::Z);
-                (
-                    cmd && !shift && z,
-                    cmd && ((shift && z) || i.key_pressed(egui::Key::Y)),
-                    cmd && !shift && i.key_pressed(egui::Key::S),
-                    cmd && shift && i.key_pressed(egui::Key::S),
-                    cmd && !shift && i.key_pressed(egui::Key::O),
-                    cmd && !shift && i.key_pressed(egui::Key::N),
-                    cmd && !shift && i.key_pressed(egui::Key::V),
-                    i.key_pressed(egui::Key::PageUp),
-                    i.key_pressed(egui::Key::PageDown),
-                )
+                let mut pasted_img = None;
+                let mut pasted_text = false;
+                for ev in &i.events {
+                    match ev {
+                        egui::Event::PasteImage(img) => {
+                            pasted_img = Some(std::sync::Arc::clone(img));
+                        }
+                        egui::Event::Paste(_) => {
+                            pasted_text = true;
+                        }
+                        _ => {}
+                    }
+                }
+                let cmd_v =
+                    i.modifiers.command && !i.modifiers.shift && i.key_pressed(egui::Key::V);
+                (pasted_img, pasted_text, cmd_v)
             })
         } else {
-            (
-                false, false, false, false, false, false, false, false, false,
-            )
+            (None, false, false)
         };
         // Không hoàn tác / thao tác file / thêm trang khi đang kéo nét / kéo hình dở
         if self.active.is_none()
@@ -1943,9 +1973,15 @@ impl InkNoteApp {
                 self.commit_active_text_edit(&ctx);
                 self.handle_open_image_file();
             }
-            if actions.paste_image_clipboard_clicked || key_paste {
+            if actions.paste_image_clipboard_clicked {
                 self.commit_active_text_edit(&ctx);
-                self.handle_paste_image_clipboard(actions.paste_image_clipboard_clicked);
+                self.handle_paste_image_clipboard(true);
+            } else if let Some(color_img) = paste_image_event {
+                self.commit_active_text_edit(&ctx);
+                self.handle_paste_egui_image(&color_img);
+            } else if paste_text_event || key_paste_v {
+                self.commit_active_text_edit(&ctx);
+                self.handle_paste_image_clipboard(false);
             }
             if key_pgup && self.doc.active_page_index() > 0 {
                 let target = self.doc.active_page_index() - 1;
@@ -5109,5 +5145,56 @@ mod tests {
         assert!((m.tool_pill_rect.center().x - 600.0).abs() <= 2.0);
         assert!(m.tool_pill_rect.width() <= 1160.0);
         assert!(m.tool_pill_rect.top() > m.nav_outer_rect.bottom());
+    }
+
+    #[test]
+    fn test_ctrl_v_paste_image_event_inserts_and_selects_image() {
+        let ctx = egui::Context::default();
+        theme::setup_fonts(&ctx);
+        let mut app = new_test_app(&ctx);
+        app.toolbar_state.active_tool = ActiveTool::Pen;
+
+        let base_raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 720.0))),
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(base_raw, |ui| app.run_app_ui(ui));
+        assert_eq!(app.doc.pages()[0].images.len(), 0);
+
+        let pasted_img = std::sync::Arc::new(egui::ColorImage::from_rgba_unmultiplied(
+            [160, 80],
+            &vec![180u8; 160 * 80 * 4],
+        ));
+        let paste_raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 720.0))),
+            events: vec![egui::Event::PasteImage(pasted_img.clone())],
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(paste_raw, |ui| app.run_app_ui(ui));
+
+        assert_eq!(app.doc.pages()[0].images.len(), 1);
+        assert_eq!(app.doc.pages()[0].images[0].pixel_size, [160, 80]);
+        assert_eq!(app.toolbar_state.active_tool, ActiveTool::Image);
+        assert!(
+            app.lasso_state
+                .selection
+                .as_ref()
+                .is_some_and(|s| s.image_ids == vec![app.doc.pages()[0].images[0].id])
+        );
+
+        // 1 bước Undo gỡ ảnh vừa dán
+        assert!(app.doc.undo());
+        assert_eq!(app.doc.pages()[0].images.len(), 0);
+
+        // Khi hộp văn bản đang mở, PasteImage không tự ý chèn ảnh đè lên lúc đang soạn chữ
+        app.toolbar_state.active_tool = ActiveTool::Text;
+        app.open_new_text_edit(0, Pos2::new(100.0, 100.0), 200.0);
+        let blocked_raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 720.0))),
+            events: vec![egui::Event::PasteImage(pasted_img)],
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(blocked_raw, |ui| app.run_app_ui(ui));
+        assert_eq!(app.doc.pages()[0].images.len(), 0);
     }
 }
