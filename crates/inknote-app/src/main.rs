@@ -651,6 +651,8 @@ impl InkNoteApp {
                 self.current_path = Some(path);
                 self.autosave.reset(self.doc.revision());
                 self.thumb_cache.clear();
+                self.svg_cache.clear();
+                self.pending_latex_target = None;
                 self.static_cache = None;
                 self.active = None;
                 self.drawing_page_index = None;
@@ -692,6 +694,8 @@ impl InkNoteApp {
         self.autosave.reset(self.doc.revision());
         self.batch_cache.clear();
         self.thumb_cache.clear();
+        self.svg_cache.clear();
+        self.pending_latex_target = None;
         self.static_cache = None;
         self.active = None;
         self.drawing_page_index = None;
@@ -2495,5 +2499,58 @@ mod tests {
             "preview_svg should be generated; err={:?}",
             app.latex_dialog.error_msg
         );
+    }
+
+    #[test]
+    fn test_latex_save_and_load_preserves_source_and_can_reedit() {
+        let ctx = egui::Context::default();
+        let mut app = new_test_app(&ctx);
+        let paper = Rect::from_min_size(Pos2::new(20.0, 100.0), vec2(1160.0, 680.0));
+        app.paper_rect = Some(paper);
+
+        let id = app.doc.alloc_id();
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="30" viewBox="0 0 80 30"><rect width="80" height="30" fill="black"/></svg>"#.to_string();
+        app.doc.execute(Command::AddLatex {
+            page_index: 0,
+            obj: LatexObject {
+                id,
+                source: r"\frac{a}{b}".to_string(),
+                pos: [120.0, 200.0],
+                size: [80.0, 30.0],
+                svg_cache: Some(svg.clone()),
+            },
+        });
+
+        let temp_file = std::env::temp_dir().join("test_app_latex_roundtrip.inknote");
+        let _ = std::fs::remove_file(&temp_file);
+        app.doc.to_file().save_to_path(&temp_file).unwrap();
+
+        let mut app2 = new_test_app(&ctx);
+        app2.paper_rect = Some(paper);
+        app2.load_document_from(temp_file.clone());
+        assert_eq!(app2.doc.pages()[0].latex_objects.len(), 1);
+        let loaded = &app2.doc.pages()[0].latex_objects[0];
+        assert_eq!(loaded.source, r"\frac{a}{b}");
+        assert_eq!(loaded.svg_cache.as_deref(), Some(svg.as_str()));
+
+        // Kiểm tra hit-test trên file vừa mở lại để mở hộp thoại sửa đúng mã nguồn cũ
+        let center_screen = app2.view.to_screen(paper, Pos2::new(160.0, 215.0));
+        let hit = app2.latex_object_at(paper, center_screen);
+        assert_eq!(hit, Some((0, id, r"\frac{a}{b}".to_string())));
+
+        // Sửa công thức sau khi mở file vẫn hoạt động và giữ nguyên vị trí
+        app2.doc.execute(Command::UpdateLatex {
+            page_index: 0,
+            obj_id: id,
+            new_source: r"\sqrt{a^2 + b^2}".to_string(),
+            new_size: [110.0, 34.0],
+            new_svg_cache: Some(svg.clone()),
+        });
+        let edited = &app2.doc.pages()[0].latex_objects[0];
+        assert_eq!(edited.source, r"\sqrt{a^2 + b^2}");
+        assert_eq!(edited.pos, [120.0, 200.0]);
+        assert_eq!(edited.size, [110.0, 34.0]);
+
+        let _ = std::fs::remove_file(temp_file);
     }
 }

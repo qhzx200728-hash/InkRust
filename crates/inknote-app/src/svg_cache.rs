@@ -75,4 +75,8 @@ impl SvgTextureCache {
     pub fn invalidate(&mut self, id: u64) {
         self.entries.remove(&id);
     }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
 }

@@ -1312,4 +1312,40 @@ mod tests {
         assert_eq!(redone.source, "a^2 + b^2 + c^2");
         assert_eq!(redone.size, [180.0, 36.0]);
     }
+
+    #[test]
+    fn latex_save_and_load_roundtrip() {
+        let temp_file = std::env::temp_dir().join("test_latex_roundtrip.inknote");
+        let _ = std::fs::remove_file(&temp_file);
+
+        let mut d = Document::new();
+        let id = d.alloc_id();
+        let obj = LatexObject {
+            id,
+            source: r"\int_0^1 x^2 \, dx = \frac{1}{3}".to_string(),
+            pos: [210.0, 340.0],
+            size: [195.0, 48.0],
+            svg_cache: Some(r#"<svg width="100" height="30"></svg>"#.to_string()),
+        };
+        d.execute(Command::AddLatex {
+            page_index: 0,
+            obj: obj.clone(),
+        });
+
+        d.to_file().save_to_path(&temp_file).unwrap();
+        let mut loaded = Document::from_file(DocumentFile::load_from_path(&temp_file).unwrap());
+        assert_eq!(loaded.pages()[0].latex_objects.len(), 1);
+        let loaded_obj = &loaded.pages()[0].latex_objects[0];
+        assert_eq!(loaded_obj.id, id);
+        assert_eq!(loaded_obj.source, obj.source);
+        assert_eq!(loaded_obj.pos, obj.pos);
+        assert_eq!(loaded_obj.size, obj.size);
+        assert_eq!(loaded_obj.svg_cache, obj.svg_cache);
+
+        // ID mới cấp sau khi nạp không được trùng với id của LatexObject đã lưu
+        let next = loaded.alloc_id();
+        assert!(next > id);
+
+        let _ = std::fs::remove_file(&temp_file);
+    }
 }
