@@ -47,6 +47,7 @@ pub struct AutoSaveState {
 }
 
 impl AutoSaveState {
+    #[cfg(test)]
     pub fn new(initial_rev: u64) -> Self {
         Self::new_inner(initial_rev, None)
     }

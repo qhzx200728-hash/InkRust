@@ -863,6 +863,7 @@ impl LatexDialogState {
 
         // Lớp phủ mờ nhẹ phía sau hộp thoại
         let screen_rect = ctx.content_rect();
+        #[allow(deprecated)]
         egui::Area::new(egui::Id::new("latex_dialog_backdrop"))
             .order(egui::Order::Middle)
             .fixed_pos(screen_rect.min)

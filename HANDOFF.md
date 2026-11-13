@@ -1,27 +1,24 @@
 # HANDOFF – InkNote
 
 ## 1. Task & tiến độ
-Đang làm InkNote theo `docs/roadmap.md`: vừa xong **Bước 7.3** (xuất PNG 3x/4x, PDF nhiều trang vector, Read-Only Mode), pass test, tag `step-7.3-ok`. Dừng trước **Bước 7.4** để bàn giao.
+Đã hoàn thành toàn bộ các bước của `docs/roadmap.md` từ **Bước 0** đến **Bước 7.4** (dọn cảnh báo biên dịch `inknote-app`, viết `README.md` tiếng Việt cho GitHub, rà soát `LICENSE`/`NOTICE`, pass `cargo check --offline` và `cargo test --offline`). Hiện đang chờ người dùng kiểm tra thủ công và xác nhận OK để gắn tag `step-7.4-ok`.
 
-## 2. File đã sửa (Bước 7.3; Bước 7.1–7.2 đã ghi trong `memory.md`)
-- `Cargo.lock`: khóa thêm `resvg` và `flate2` (offline).
-- `crates/inknote-app/Cargo.toml`: thêm `resvg = "0.45"`, `flate2 = "1.1"`.
-- `crates/inknote-render/src/lib.rs`: thêm `VectorOp`, `CairoRenderContext::new_vector_recorder()`.
-- `crates/inknote-app/src/export.rs`: tạo mới renderer PNG (`tiny_skia`, `Lanczos3`) và PDF 1.4 vector (`FlateDecode`, `usvg` outline font).
-- `crates/inknote-app/src/shapes.rs`: mở công khai `pub fn shape_arrow_heads`.
-- `crates/inknote-app/src/toolbar.rs`: gắn pop-up `ToolIcon::Export`, khóa nút sửa và ẩn thanh nổi khi `read_only`.
-- `crates/inknote-app/src/main.rs`: thêm `handle_export_request`, toast, pan/zoom Read-Only, `test_step_7_3_export_pdf_png_and_read_only_mode`.
-- `docs/roadmap.md`: đánh dấu xong Bước 7.3.
-- `memory.md`: cập nhật trạng thái tới `step-7.3-ok`.
-- `HANDOFF.md`: tạo mới tài liệu bàn giao.
+## 2. File đã sửa (Bước 7.4)
+- `README.md`: tạo mới tài liệu hướng dẫn tiếng Việt đầy đủ cho GitHub.
+- `crates/inknote-app/src/latex_dialog.rs`: thêm `#[allow(deprecated)]` cho `egui::Id::new("latex_dialog_backdrop")`.
+- `crates/inknote-app/src/autosave.rs`: gắn `#[cfg(test)]` cho `AutoSaveState::new`.
+- `crates/inknote-app/src/view.rs`: gắn `#[cfg(test)]` cho `to_page`, `to_screen`, `rect_to_screen`.
+- `crates/inknote-app/src/theme.rs`: thêm `#[allow(dead_code)]` cho `paper_dot_spacing` và `thumb_panel_stroke`.
+- `docs/roadmap.md`: đánh dấu xong Bước 7.4 (chờ xác nhận `step-7.4-ok`).
+- `memory.md`: cập nhật trạng thái hoàn thành Bước 7.4.
+- `HANDOFF.md`: cập nhật trạng thái bàn giao mới nhất.
 
 ## 3. Quyết định & lý do
-- Dùng thuần Rust (`resvg`/`usvg` + `flate2`) xuất PDF vector (outline text qua font Windows) và PNG 3x/4x để cực nét, không phụ thuộc tool ngoài.
-- Ẩn hoàn toàn thanh nổi tuỳ chọn khi bật Read-Only Mode để đọc thoáng mắt.
+- Dọn cảnh báo bằng `#[cfg(test)]` cho các helper chỉ dùng trong unit test và `#[allow(deprecated)]` / `#[allow(dead_code)]` cho các cấu trúc giữ nguyên hành vi để bảo đảm 0 warning ở `inknote-app` mà không làm thay đổi logic ứng dụng.
+- Giữ nguyên hoàn toàn `crates/inknote-pen` (21 warning `missing_docs` của Rnote) và `reference/` theo quy tắc dự án.
 
 ## 4. Việc đang dở & bước tiếp theo
-- Còn **Bước 7.4 – Hoàn thiện & `README.md` cho GitHub** (`docs/roadmap.md`).
-- Làm ngay: thêm `%USERPROFILE%\.cargo\bin` vào `PATH`, chạy `cargo test --offline -p inknote-app`, dọn cảnh báo ở `inknote-app`, viết `README.md` tiếng Việt (cài Rust, TeX Live, cách chạy, GPL-3.0), rà `LICENSE`/`NOTICE`.
+- Chờ người dùng kiểm tra `README.md`, `LICENSE`, `NOTICE` và xác nhận OK để gắn tag `step-7.4-ok` (và đẩy lên GitHub nếu muốn).
 
 ## 5. Cảnh báo
 - Máy không có `rg` (dùng `Select-String`); Cargo luôn truyền `--offline`.

@@ -1,8 +1,7 @@
 # memory.md – Bộ nhớ trạng thái dự án InkNote
 
 ## Mục tiêu hiện tại
-- Vừa hoàn thành và gắn tag **`step-7.3-ok`** (**Bước 7.3: Xuất PNG chất lượng cao / PDF nhiều trang vector cực nét & Chế độ chỉ đọc (P3)**).
-- Đã dừng trước **Bước 7.4 – Hoàn thiện & `README.md` cho GitHub** theo yêu cầu bàn giao sang model mới.
+- Đã hoàn thành **Bước 7.4: Hoàn thiện & `README.md` cho GitHub** (đang chờ người dùng kiểm tra và xác nhận OK để gắn tag `step-7.4-ok`).
 
 ## Đã hoàn thành (kèm tên file đã tạo/sửa)
 - **Bước 0 – Spike (Thử nghiệm kỹ thuật)** (`commit fb30599`):
@@ -85,9 +84,13 @@
   - `crates/inknote-render/src/lib.rs`: Thêm `VectorOp` và `CairoRenderContext::new_vector_recorder()` ghi lại đường cong Bezier của nét bút Rnote.
   - `crates/inknote-app/src/export.rs`: Cài đặt render PNG (`tiny_skia` + `Lanczos3`, 3x/4x) và xuất PDF 1.4 nhiều trang vector (`FlateDecode`, `/ExtGState`, `/SMask`, `usvg` outline font Windows cho tiếng Việt + LaTeX SVG).
   - `crates/inknote-app/src/shapes.rs`, `toolbar.rs`, `main.rs`: Nối menu Export trên `ToolIcon::Export`, toast trạng thái, Read-Only Mode (khóa nút sửa, chặn thao tác sửa, pan/zoom mượt, ẩn thanh công cụ nổi giữa dưới) và thêm `test_step_7_3_export_pdf_png_and_read_only_mode`.
+- **Bước 7.4 – Hoàn thiện & `README.md` cho GitHub** *(đã xong, chờ người dùng xác nhận test OK)*:
+  - Dọn sạch toàn bộ cảnh báo biên dịch trong `crates/inknote-app` (`latex_dialog.rs`, `autosave.rs`, `view.rs`, `theme.rs`) và định dạng `cargo fmt -p inknote-app`; giữ nguyên `crates/inknote-pen` và `reference/`.
+  - Tạo mới `README.md` tiếng Việt cho GitHub (giới thiệu, tính năng, hướng dẫn cài đặt môi trường Windows: Visual Studio C++ Build Tools, Rust, TeX Live, cách chạy/test/đóng gói, phím tắt, cấu trúc thư mục, giấy phép GPL-3.0 & ghi công).
+  - Rà soát `LICENSE` và `NOTICE`, chạy `cargo check --offline` (0 warning ở `inknote-render`, `inknote-core`, `inknote-latex`, `inknote-app`) và `cargo test --offline` toàn bộ đều đạt (`48` pass / `2` benchmark ignored ở `inknote-app`, `25` pass ở `inknote-core`, `4` pass ở `inknote-latex`).
 
 ## Đang làm dở
-- Đã hoàn thành **Bước 7.3**, gắn tag `step-7.3-ok` và đẩy lên GitHub `origin/main`. Chưa bắt đầu **Bước 7.4** theo yêu cầu dừng để bàn giao sang model mới.
+- Đã xong **Bước 7.4**, chờ người dùng đọc kiểm tra `README.md`, `LICENSE`, `NOTICE` và xác nhận OK trước khi gắn tag `step-7.4-ok`.
 
 ## Quyết định đã chốt và lý do (không bàn lại)
 - **Bỏ hoàn toàn bản cũ (Electron/Flutter/web)**: viết mới 100% bằng Rust cho Windows.
@@ -116,12 +119,12 @@
 - **Vẽ đường lề ở chế độ Whiteboard**: Làm mất tính chất bảng trắng vô tận; đã sửa để Whiteboard hoàn toàn không có đường lề và tràn phẳng viền.
 
 ## Lỗi/vấn đề đang tồn tại
-- 21 cảnh báo `missing_docs` trong `crates/inknote-pen` (do giữ nguyên code gốc Rnote).
+- Đã dọn sạch cảnh báo biên dịch trong `crates/inknote-app` (0 warning ở `inknote-app`, `inknote-core`, `inknote-latex`, `inknote-render`); chỉ giữ lại 21 cảnh báo `missing_docs` trong `crates/inknote-pen` (do giữ nguyên code gốc Rnote).
 - Nút bấm phụ trên thân bút / đầu tẩy phía sau bút Wacom: chưa kiểm tra `egui` có nhận riêng được không (để sau).
 
 ## Việc tiếp theo (xếp theo thứ tự ưu tiên)
-1. **Bước 7.4**: Dọn cảnh báo/lỗi, viết `README.md` tiếng Việt (cài đặt Rust, TeX Live, cách chạy, giấy phép GPL-3.0) và kiểm tra `LICENSE`/`NOTICE` trước khi hoàn tất.
+1. Chờ người dùng kiểm tra `README.md`, `LICENSE`, `NOTICE` và xác nhận **Bước 7.4 OK** để gắn tag `step-7.4-ok` (hoàn tất toàn bộ lộ trình `docs/roadmap.md`).
 
 ## Cập nhật lần cuối
 - **Ngày**: 2026-11-14
-- **Model đã dùng**: Gemini (Antigravity IDE) -> đang bàn giao (`HANDOFF.md`)
+- **Model đã dùng**: Cập nhật hoàn tất Bước 7.4 (chờ xác nhận `step-7.4-ok`)

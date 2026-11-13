@@ -29,14 +29,17 @@ impl View {
         paper.min + self.pan
     }
 
+    #[cfg(test)]
     pub fn to_page(&self, paper: Rect, screen: Pos2) -> Pos2 {
         ((screen - self.origin(paper)) / self.zoom).to_pos2()
     }
 
+    #[cfg(test)]
     pub fn to_screen(&self, paper: Rect, page: Pos2) -> Pos2 {
         self.origin(paper) + page.to_vec2() * self.zoom
     }
 
+    #[cfg(test)]
     pub fn rect_to_screen(&self, paper: Rect, page: Rect) -> Rect {
         Rect::from_min_max(
             self.to_screen(paper, page.min),
