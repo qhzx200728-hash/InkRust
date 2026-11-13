@@ -190,12 +190,17 @@ fn nav_icon_button(
 }
 
 /// Vẽ cụm trạng thái file ngay bên phải nút Read-Only:
-/// `Tên File` - `Dấu chấm xanh/đỏ` - `Thông báo đã lưu (3s rồi ẩn)`.
-fn draw_nav_file_status(ui: &mut Ui, theme: &Theme, status: &FileStatusInfo<'_>) {
+/// `Tên File` `(trang/tổng)` - `Dấu chấm xanh/đỏ` - `Thông báo đã lưu (3s rồi ẩn)`.
+fn draw_nav_file_status(
+    ui: &mut Ui,
+    theme: &Theme,
+    status: &FileStatusInfo<'_>,
+    page_info: (usize, usize),
+) {
     ui.add_space(4.0);
-    // Tên file co gọn theo độ dài thật, chỉ rút gọn (...) nếu dài quá 130px
+    // Tên file co gọn theo độ dài thật, chỉ rút gọn (...) nếu dài quá 110px
     ui.scope(|ui| {
-        ui.set_max_width(130.0);
+        ui.set_max_width(110.0);
         ui.add(
             egui::Label::new(
                 RichText::new(status.file_name)
@@ -205,6 +210,13 @@ fn draw_nav_file_status(ui: &mut Ui, theme: &Theme, status: &FileStatusInfo<'_>)
             .truncate(),
         );
     });
+
+    // Số trang dạng (trang-hien-tai/tong-so-trang) nằm giữa tên file và dấu chấm lưu
+    ui.label(
+        RichText::new(format!("({}/{})", page_info.0, page_info.1))
+            .size(theme.font_size_small)
+            .color(theme.nav_icon_fg),
+    );
 
     // Dấu chấm xanh (đã lưu) hoặc đỏ (chưa lưu)
     let (dot_rect, dot_resp) = ui.allocate_exact_size(vec2(12.0, 18.0), Sense::hover());
@@ -538,7 +550,7 @@ pub fn show_toolbars(
             {
                 state.read_only = !state.read_only;
             }
-            draw_nav_file_status(&mut left_ui, theme, file_status);
+            draw_nav_file_status(&mut left_ui, theme, file_status, page_info);
             let left_rect = left_ui.min_rect();
 
             // 2. Nhóm Phải: luôn căn phải trong `bar_rect`
@@ -613,6 +625,7 @@ pub fn show_toolbars(
                                     .clicked()
                                 {
                                     actions.delete_page_clicked = true;
+                                    ui.close();
                                 }
                             });
                         });

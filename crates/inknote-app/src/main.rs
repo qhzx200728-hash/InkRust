@@ -160,6 +160,7 @@ struct InkNoteApp {
     batch_cache: HashMap<u64, CachedStroke>,
     view: View,
     confirm_clear: bool,
+    confirm_delete_page: bool,
     paint_ms: f32,
     fps: f32,
     last_frame: Instant,
@@ -209,6 +210,7 @@ impl InkNoteApp {
             batch_cache: HashMap::new(),
             view: View::default(),
             confirm_clear: false,
+            confirm_delete_page: false,
             paint_ms: 0.0,
             fps: 0.0,
             last_frame: Instant::now(),
@@ -289,7 +291,11 @@ impl InkNoteApp {
         if self.toolbar_state.read_only || self.toolbar_state.active_tool != ActiveTool::Pen {
             return None;
         }
-        if egui::Popup::is_any_open(ctx) || self.confirm_clear || self.confirm_unsaved.is_some() {
+        if egui::Popup::is_any_open(ctx)
+            || self.confirm_clear
+            || self.confirm_delete_page
+            || self.confirm_unsaved.is_some()
+        {
             return None;
         }
         // Giữ Space để kéo trang bằng chuột/bút thay vì vẽ
@@ -956,8 +962,8 @@ impl eframe::App for InkNoteApp {
             if actions.add_page_clicked {
                 self.add_page_after_current();
             }
-            if actions.delete_page_clicked {
-                self.delete_current_page();
+            if actions.delete_page_clicked && self.doc.page_count() > 1 {
+                self.confirm_delete_page = true;
             }
             if key_pgup && self.doc.active_page_index() > 0 {
                 let target = self.doc.active_page_index() - 1;
@@ -983,7 +989,7 @@ impl eframe::App for InkNoteApp {
             }
         }
 
-        // Hộp xác nhận xoá trang (xoá xong vẫn Undo được)
+        // Hộp xác nhận xoá sạch nét trên trang (xoá xong vẫn Undo được)
         if self.confirm_clear {
             let mut do_clear = false;
             let mut cancel = false;
@@ -1010,6 +1016,41 @@ impl eframe::App for InkNoteApp {
             }
             if do_clear || cancel || modal.should_close() {
                 self.confirm_clear = false;
+            }
+        }
+
+        // Hộp xác nhận xoá trang hiện tại (xoá xong vẫn Undo được)
+        if self.confirm_delete_page {
+            let page_num = self.doc.active_page_index() + 1;
+            let can_delete = self.doc.page_count() > 1;
+            let mut do_delete = false;
+            let mut cancel = false;
+            #[allow(deprecated)]
+            let modal = egui::Modal::new(egui::Id::new("confirm_delete_page")).show(&ctx, |ui| {
+                ui.set_width(300.0);
+                ui.heading(format!("Delete Page {}?", page_num));
+                ui.add_space(4.0);
+                ui.label(
+                    "This page and all of its strokes will be removed. You can undo this with Ctrl+Z.",
+                );
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(can_delete, egui::Button::new("Delete page"))
+                        .clicked()
+                    {
+                        do_delete = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+            if do_delete && can_delete {
+                self.delete_current_page();
+            }
+            if do_delete || cancel || !can_delete || modal.should_close() {
+                self.confirm_delete_page = false;
             }
         }
 
@@ -1104,6 +1145,7 @@ impl eframe::App for InkNoteApp {
             });
             let blocked = egui::Popup::is_any_open(&ctx)
                 || self.confirm_clear
+                || self.confirm_delete_page
                 || self.confirm_unsaved.is_some();
             let mut scrolled_or_panned = false;
             let mut dy_total = 0.0_f32;
@@ -1375,7 +1417,7 @@ impl eframe::App for InkNoteApp {
                     }
                 }
 
-                // 6. Thông số góc dưới-trái: Trang, Mode, zoom, thời gian dựng khung, FPS
+                // 6. Thông số góc dưới-trái: Mode, zoom, thời gian dựng khung, FPS
                 self.paint_ms =
                     self.paint_ms * 0.9 + paint_start.elapsed().as_secs_f32() * 1000.0 * 0.1;
                 let mode_str = match settings.mode {
@@ -1386,9 +1428,7 @@ impl eframe::App for InkNoteApp {
                     paper_rect.left_bottom() + egui::vec2(10.0, -8.0),
                     egui::Align2::LEFT_BOTTOM,
                     format!(
-                        "Page {}/{}  |  Mode: {}  |  Zoom {:.0}%  |  build {:.1} ms  |  {:.0} fps  |  F9: +2000 strokes",
-                        self.doc.active_page_index() + 1,
-                        page_count,
+                        "Mode: {}  |  Zoom {:.0}%  |  build {:.1} ms  |  {:.0} fps  |  F9: +2000 strokes",
                         mode_str,
                         view.zoom_percent(),
                         self.paint_ms,
@@ -1455,6 +1495,7 @@ mod tests {
             batch_cache: HashMap::new(),
             view: View::default(),
             confirm_clear: false,
+            confirm_delete_page: false,
             paint_ms: 0.0,
             fps: 0.0,
             last_frame: Instant::now(),
