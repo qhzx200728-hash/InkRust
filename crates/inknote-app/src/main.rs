@@ -285,8 +285,14 @@ impl InkNoteApp {
             autosave.mark_restored_draft(doc.revision());
         }
 
+        let start_screen = if restored_draft {
+            AppScreen::Editor
+        } else {
+            AppScreen::Library
+        };
+
         let mut app = Self {
-            screen: AppScreen::Editor,
+            screen: start_screen,
             library: LibraryState::new(LibraryStore::open_default()),
             theme: Theme::default(),
             toolbar_state: ToolbarState::default(),
