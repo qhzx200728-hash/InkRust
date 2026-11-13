@@ -7,7 +7,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use crate::{Document, DocumentFile, DocumentPage, PaperSettings, page_from_file};
+use crate::{Document, DocumentFile, DocumentPage, PaperSettings, page_from_file, unix_secs_now};
+use serde::{Deserialize, Serialize};
 
 /// Khu vực hiển thị trên Sidebar trái của màn hình Library.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -199,7 +200,7 @@ impl LibraryStore {
         }
 
         let query = search_query.trim().to_lowercase();
-        let recursive = !query.is_empty();
+        let recursive = section == LibrarySection::Documents && !query.is_empty();
         let mut items = Vec::new();
         collect_dir_items(
             &start_dir, rel_folder, recursive, &query, note_cache, &mut items,
@@ -212,13 +213,272 @@ impl LibraryStore {
             (LibraryItem::Folder(_), LibraryItem::Note(_)) => std::cmp::Ordering::Less,
             (LibraryItem::Note(_), LibraryItem::Folder(_)) => std::cmp::Ordering::Greater,
             (LibraryItem::Note(na), LibraryItem::Note(nb)) => nb
-                .modified_at
-                .cmp(&na.modified_at)
+                .is_favorite
+                .cmp(&na.is_favorite)
+                .then_with(|| nb.modified_at.cmp(&na.modified_at))
                 .then_with(|| na.title.to_lowercase().cmp(&nb.title.to_lowercase())),
         });
 
         Ok(items)
     }
+
+    pub fn trash_item_count(&self) -> usize {
+        count_visible_children(&self.trash_dir())
+    }
+
+    /// Đổi tên ghi chú (cập nhật tiêu đề bên trong `.inknote` và tên file tương ứng).
+    pub fn rename_note(&self, path: &Path, raw_title: &str) -> io::Result<PathBuf> {
+        let mut file = DocumentFile::load_from_path(path)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let new_title = clean_display_title(raw_title, "Untitled Note");
+        file.metadata.title = new_title.clone();
+        file.metadata.modified_at = unix_secs_now();
+
+        let parent = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.documents_dir());
+        let file_base = sanitize_fs_name(&new_title, "Untitled Note");
+        let target_same = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .is_some_and(|s| s == file_base);
+        let dest = if target_same {
+            path.to_path_buf()
+        } else {
+            unique_note_path(&parent, &file_base)
+        };
+
+        file.save_to_path(&dest)?;
+        if dest != path {
+            let _ = fs::remove_file(path);
+        }
+        Ok(dest)
+    }
+
+    /// Đổi tên thư mục (giữ nguyên nội dung bên trong).
+    pub fn rename_folder(&self, path: &Path, raw_name: &str) -> io::Result<PathBuf> {
+        let new_name = sanitize_fs_name(raw_name, "Folder");
+        if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n == new_name)
+        {
+            return Ok(path.to_path_buf());
+        }
+        let parent = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.documents_dir());
+        let dest = unique_folder_path(&parent, &new_name);
+        move_path_cleanly(path, &dest)?;
+        Ok(dest)
+    }
+
+    /// Nhân bản một ghi chú thành bản sao mới cùng thư mục (không đánh dấu yêu thích sẵn).
+    pub fn duplicate_note(&self, path: &Path) -> io::Result<PathBuf> {
+        let mut file = DocumentFile::load_from_path(path)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let base_title = clean_display_title(&file.metadata.title, "Untitled Note");
+        let copy_title = format!("{base_title} Copy");
+        let now = unix_secs_now();
+        file.metadata.title = copy_title.clone();
+        file.metadata.is_favorite = false;
+        file.metadata.created_at = now;
+        file.metadata.modified_at = now;
+
+        let parent = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.documents_dir());
+        let file_base = sanitize_fs_name(&copy_title, "Untitled Note Copy");
+        let dest = unique_note_path(&parent, &file_base);
+        file.save_to_path(&dest)?;
+        Ok(dest)
+    }
+
+    /// Bật/tắt đánh dấu Yêu thích (ngôi sao) trên ghi chú.
+    pub fn toggle_favorite_note(&self, path: &Path) -> io::Result<bool> {
+        let mut file = DocumentFile::load_from_path(path)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let next = !file.metadata.is_favorite;
+        file.metadata.is_favorite = next;
+        file.save_to_path(path)?;
+        Ok(next)
+    }
+
+    /// Chuyển ghi chú hoặc thư mục vào `Trash/` kèm sidecar lưu thư mục gốc để Khôi phục về đúng chỗ.
+    pub fn move_to_trash(
+        &self,
+        path: &Path,
+        original_rel_folder: &[String],
+    ) -> io::Result<PathBuf> {
+        self.ensure_dirs()?;
+        if !path.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "Item does not exist",
+            ));
+        }
+        let trash_dir = self.trash_dir();
+        let is_dir = path.is_dir();
+        let original_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("Item")
+            .to_string();
+
+        let dest = if is_dir {
+            let base = sanitize_fs_name(&original_name, "Folder");
+            unique_folder_path(&trash_dir, &base)
+        } else {
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("Untitled Note");
+            let base = sanitize_fs_name(stem, "Untitled Note");
+            unique_note_path(&trash_dir, &base)
+        };
+
+        move_path_cleanly(path, &dest)?;
+
+        let sidecar = TrashSidecar {
+            original_rel_folder: original_rel_folder.to_vec(),
+            original_name,
+            trashed_at: unix_secs_now(),
+        };
+        if let Ok(json) = serde_json::to_string(&sidecar) {
+            let _ = fs::write(trash_sidecar_path(&dest), json);
+        }
+        Ok(dest)
+    }
+
+    /// Khôi phục ghi chú hoặc thư mục từ `Trash/` về đúng thư mục gốc trong `Documents/`.
+    pub fn restore_from_trash(&self, trash_path: &Path) -> io::Result<PathBuf> {
+        self.ensure_dirs()?;
+        if !trash_path.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "Item in Trash no longer exists",
+            ));
+        }
+
+        let sidecar_path = trash_sidecar_path(trash_path);
+        let sidecar = fs::read_to_string(&sidecar_path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<TrashSidecar>(&s).ok());
+
+        let target_parent = match &sidecar {
+            Some(meta) => self.resolve_folder(LibrarySection::Documents, &meta.original_rel_folder),
+            None => self.documents_dir(),
+        };
+        fs::create_dir_all(&target_parent)?;
+
+        let is_dir = trash_path.is_dir();
+        let dest = if is_dir {
+            let preferred = sidecar
+                .as_ref()
+                .map(|m| m.original_name.as_str())
+                .or_else(|| trash_path.file_name().and_then(|n| n.to_str()))
+                .unwrap_or("Folder");
+            let base = sanitize_fs_name(preferred, "Folder");
+            unique_folder_path(&target_parent, &base)
+        } else {
+            let preferred_name = sidecar
+                .as_ref()
+                .map(|m| m.original_name.as_str())
+                .or_else(|| trash_path.file_name().and_then(|n| n.to_str()))
+                .unwrap_or("Untitled Note.inknote");
+            let stem = Path::new(preferred_name)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("Untitled Note");
+            let base = sanitize_fs_name(stem, "Untitled Note");
+            unique_note_path(&target_parent, &base)
+        };
+
+        move_path_cleanly(trash_path, &dest)?;
+        let _ = fs::remove_file(sidecar_path);
+        Ok(dest)
+    }
+
+    /// Xoá vĩnh viễn một ghi chú hoặc thư mục đang nằm trong `Trash/`.
+    pub fn delete_permanently(&self, trash_path: &Path) -> io::Result<()> {
+        if trash_path.is_dir() {
+            fs::remove_dir_all(trash_path)?;
+        } else if trash_path.exists() {
+            fs::remove_file(trash_path)?;
+        }
+        let sidecar_path = trash_sidecar_path(trash_path);
+        if sidecar_path.exists() {
+            let _ = fs::remove_file(sidecar_path);
+        }
+        Ok(())
+    }
+
+    /// Dọn sạch toàn bộ mục trong `Trash/`.
+    pub fn empty_trash(&self) -> io::Result<()> {
+        let trash_dir = self.trash_dir();
+        if !trash_dir.exists() {
+            return Ok(());
+        }
+        for entry in fs::read_dir(&trash_dir)?.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                fs::remove_dir_all(&p)?;
+            } else {
+                fs::remove_file(&p)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct TrashSidecar {
+    original_rel_folder: Vec<String>,
+    original_name: String,
+    trashed_at: u64,
+}
+
+fn trash_sidecar_path(trash_item_path: &Path) -> PathBuf {
+    let parent = trash_item_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    let name = trash_item_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("item");
+    parent.join(format!(".{name}.trashmeta.json"))
+}
+
+fn move_path_cleanly(src: &Path, dest: &Path) -> io::Result<()> {
+    if fs::rename(src, dest).is_ok() {
+        return Ok(());
+    }
+    if src.is_dir() {
+        copy_dir_recursive(src, dest)?;
+        fs::remove_dir_all(src)?;
+    } else {
+        fs::copy(src, dest)?;
+        fs::remove_file(src)?;
+    }
+    Ok(())
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)?.flatten() {
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if from.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else {
+            fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
 }
 
 fn collect_dir_items(
@@ -548,5 +808,85 @@ mod tests {
             .scan_items(LibrarySection::Trash, &[], "", &mut cache)
             .unwrap();
         assert!(trash_items.is_empty());
+    }
+
+    #[test]
+    fn card_actions_and_trash_restore_delete_empty_roundtrip() {
+        let guard = TempDirGuard::new("inknote_lib_step72");
+        let store = LibraryStore::new(guard.0.clone());
+        store.ensure_dirs().unwrap();
+        let paper = PaperSettings::default();
+
+        let sub = store.create_folder(&[], "Học tập").unwrap();
+        let (note_path, _doc) = store
+            .create_note_file(&[sub.clone()], "Đại số tuyến tính", &paper)
+            .unwrap();
+
+        // Rename note (title & file stem update, Vietnamese kept)
+        let renamed_path = store.rename_note(&note_path, "Giải tích nâng cao").unwrap();
+        assert!(!note_path.exists());
+        assert!(renamed_path.exists());
+        let loaded = DocumentFile::load_from_path(&renamed_path).unwrap();
+        assert_eq!(loaded.metadata.title, "Giải tích nâng cao");
+
+        // Duplicate note
+        let dup_path = store.duplicate_note(&renamed_path).unwrap();
+        assert!(dup_path.exists());
+        assert_ne!(dup_path, renamed_path);
+        let dup_loaded = DocumentFile::load_from_path(&dup_path).unwrap();
+        assert_eq!(dup_loaded.metadata.title, "Giải tích nâng cao Copy");
+
+        // Toggle favorite
+        assert!(store.toggle_favorite_note(&renamed_path).unwrap());
+        assert!(!store.toggle_favorite_note(&renamed_path).unwrap());
+        assert!(store.toggle_favorite_note(&renamed_path).unwrap());
+
+        // Move note in subfolder -> Trash -> check Trash -> Restore back to subfolder
+        let trashed_note = store
+            .move_to_trash(&renamed_path, std::slice::from_ref(&sub))
+            .unwrap();
+        assert!(!renamed_path.exists());
+        assert!(trashed_note.exists());
+        assert_eq!(store.trash_item_count(), 1);
+
+        let mut cache = HashMap::new();
+        let trash_list = store
+            .scan_items(LibrarySection::Trash, &[], "", &mut cache)
+            .unwrap();
+        assert_eq!(trash_list.len(), 1);
+        assert_eq!(trash_list[0].name(), "Giải tích nâng cao");
+
+        let restored_path = store.restore_from_trash(&trashed_note).unwrap();
+        assert!(!trashed_note.exists());
+        assert!(restored_path.exists());
+        assert_eq!(
+            restored_path.parent().unwrap(),
+            store.resolve_folder(LibrarySection::Documents, std::slice::from_ref(&sub))
+        );
+        assert_eq!(store.trash_item_count(), 0);
+
+        // Move folder + note -> Trash -> Delete Permanently & Empty Trash
+        let folder_path =
+            store.resolve_folder(LibrarySection::Documents, std::slice::from_ref(&sub));
+        let renamed_folder = store.rename_folder(&folder_path, "Toán 12").unwrap();
+        assert!(renamed_folder.ends_with("Toán 12"));
+
+        let trashed_folder = store.move_to_trash(&renamed_folder, &[]).unwrap();
+        assert!(!renamed_folder.exists());
+        assert_eq!(store.trash_item_count(), 1);
+
+        store.delete_permanently(&trashed_folder).unwrap();
+        assert!(!trashed_folder.exists());
+        assert_eq!(store.trash_item_count(), 0);
+
+        // Create two more notes, trash them, and Empty Trash
+        let (a_path, _) = store.create_note_file(&[], "Temp A", &paper).unwrap();
+        let (b_path, _) = store.create_note_file(&[], "Temp B", &paper).unwrap();
+        store.move_to_trash(&a_path, &[]).unwrap();
+        store.move_to_trash(&b_path, &[]).unwrap();
+        assert_eq!(store.trash_item_count(), 2);
+
+        store.empty_trash().unwrap();
+        assert_eq!(store.trash_item_count(), 0);
     }
 }

@@ -1696,6 +1696,9 @@ impl InkNoteApp {
             &mut self.default_paper_settings,
             &mut self.render_cx,
         );
+        if self.current_path.as_ref().is_some_and(|p| !p.exists()) {
+            self.current_path = None;
+        }
         match act {
             LibraryAction::None => {}
             LibraryAction::OpenNote(path) => {
@@ -5637,5 +5640,112 @@ mod tests {
         app.screen = AppScreen::Editor;
         assert_eq!(app.doc.metadata().title, "Tích phân bội");
         assert_eq!(app.doc.pages()[0].strokes.len(), 1);
+    }
+
+    #[test]
+    fn test_step_7_2_card_menu_rename_duplicate_favorite_and_trash() {
+        use inknote_core::library::{LibraryItem, LibrarySection};
+
+        let ctx = egui::Context::default();
+        let mut app = new_test_app(&ctx);
+        let uniq = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let root_dir = std::env::temp_dir().join(format!("inknote_app_step72_{uniq}"));
+        app.library = LibraryState::new(inknote_core::library::LibraryStore::new(root_dir.clone()));
+
+        struct CleanDir(std::path::PathBuf);
+        impl Drop for CleanDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _guard = CleanDir(root_dir);
+
+        let folder = app.library.store.create_folder(&[], "Hóa học").unwrap();
+        let (note_a, _) = app
+            .library
+            .store
+            .create_note_file(&[folder.clone()], "Hóa hữu cơ", &app.default_paper_settings)
+            .unwrap();
+        let (note_root, _) = app
+            .library
+            .store
+            .create_note_file(&[], "Ghi chú nhanh", &app.default_paper_settings)
+            .unwrap();
+
+        app.screen = AppScreen::Library;
+        app.library.request_refresh();
+
+        // Render Documents với thẻ thường & thẻ có Favorite (sao vàng)
+        assert!(app.library.store.toggle_favorite_note(&note_root).unwrap());
+        let mut out = ctx.run_ui(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 800.0))),
+                ..Default::default()
+            },
+            |ui| app.run_app_ui(ui),
+        );
+        out.textures_delta.clear();
+        assert_eq!(app.library.items().len(), 2);
+        assert!(matches!(
+            &app.library.items()[1],
+            LibraryItem::Note(n) if n.title == "Ghi chú nhanh" && n.is_favorite
+        ));
+
+        // Đổi tên, nhân bản và chuyển ghi chú trong thư mục con vào Trash -> Khôi phục -> Xoá vĩnh viễn -> Dọn thùng rác
+        let note_renamed = app
+            .library
+            .store
+            .rename_note(&note_a, "Hóa đại cương")
+            .unwrap();
+        let note_dup = app.library.store.duplicate_note(&note_renamed).unwrap();
+        assert!(note_dup.exists());
+
+        let trashed = app
+            .library
+            .store
+            .move_to_trash(&note_renamed, std::slice::from_ref(&folder))
+            .unwrap();
+        assert!(!note_renamed.exists());
+        assert_eq!(app.library.store.trash_item_count(), 1);
+
+        // Chuyển giao diện sang Trash và render kiểm tra
+        app.library.section = LibrarySection::Trash;
+        app.library.request_refresh();
+        let mut out_trash = ctx.run_ui(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 800.0))),
+                ..Default::default()
+            },
+            |ui| app.run_app_ui(ui),
+        );
+        out_trash.textures_delta.clear();
+        assert_eq!(app.library.items().len(), 1);
+        assert_eq!(app.library.items()[0].name(), "Hóa đại cương");
+
+        // Khôi phục về lại thư mục con "Hóa học"
+        let restored = app.library.store.restore_from_trash(&trashed).unwrap();
+        assert_eq!(
+            restored.parent().unwrap(),
+            app.library
+                .store
+                .resolve_folder(LibrarySection::Documents, std::slice::from_ref(&folder))
+        );
+        assert_eq!(app.library.store.trash_item_count(), 0);
+
+        // Chuyển lại vào Trash rồi Dọn sạch thùng rác
+        app.library
+            .store
+            .move_to_trash(&restored, std::slice::from_ref(&folder))
+            .unwrap();
+        app.library
+            .store
+            .move_to_trash(&note_dup, std::slice::from_ref(&folder))
+            .unwrap();
+        assert_eq!(app.library.store.trash_item_count(), 2);
+        app.library.store.empty_trash().unwrap();
+        assert_eq!(app.library.store.trash_item_count(), 0);
     }
 }

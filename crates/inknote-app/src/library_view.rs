@@ -42,18 +42,50 @@ pub enum LibraryAction {
     DefaultPaperChanged,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CreateDialogKind {
     Folder,
     Note,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NameDialogMode {
+    CreateFolder,
+    CreateNote,
+    RenameFolder { path: PathBuf },
+    RenameNote { path: PathBuf },
+}
+
 #[derive(Clone, Debug)]
 pub struct CreateModalState {
-    pub kind: CreateDialogKind,
+    pub mode: NameDialogMode,
     pub name: String,
     pub needs_focus: bool,
     pub error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct CardMenuState {
+    path: PathBuf,
+    display_name: String,
+    rel_folder: Vec<String>,
+    is_folder: bool,
+    is_favorite: bool,
+    in_trash: bool,
+    anchor: Pos2,
+    opened_this_frame: bool,
+}
+
+#[derive(Clone, Debug)]
+enum TrashConfirmModal {
+    DeleteForever {
+        path: PathBuf,
+        name: String,
+        is_folder: bool,
+    },
+    EmptyTrash {
+        count: usize,
+    },
 }
 
 /// Kết quả tính toán bố cục lưới thẻ Library (`(cols, card_w, col_gap)`).
@@ -80,6 +112,8 @@ pub struct LibraryState {
     needs_refresh: bool,
     pub last_error: Option<String>,
     pub create_dialog: Option<CreateModalState>,
+    card_menu: Option<CardMenuState>,
+    confirm_trash: Option<TrashConfirmModal>,
     focus_search_requested: bool,
     pub sidebar_width_last: f32,
     pub grid_cols_last: usize,
@@ -101,6 +135,8 @@ impl LibraryState {
             needs_refresh: true,
             last_error: None,
             create_dialog: None,
+            card_menu: None,
+            confirm_trash: None,
             focus_search_requested: false,
             sidebar_width_last: 216.0,
             grid_cols_last: 5,
@@ -123,13 +159,32 @@ impl LibraryState {
     }
 
     pub fn open_create_dialog(&mut self, kind: CreateDialogKind) {
-        let default_name = match kind {
-            CreateDialogKind::Folder => self.next_suggested_folder_name(),
-            CreateDialogKind::Note => self.next_suggested_note_name(),
+        let (mode, default_name) = match kind {
+            CreateDialogKind::Folder => (
+                NameDialogMode::CreateFolder,
+                self.next_suggested_folder_name(),
+            ),
+            CreateDialogKind::Note => (NameDialogMode::CreateNote, self.next_suggested_note_name()),
         };
+        self.card_menu = None;
         self.create_dialog = Some(CreateModalState {
-            kind,
+            mode,
             name: default_name,
+            needs_focus: true,
+            error: None,
+        });
+    }
+
+    pub fn open_rename_dialog(&mut self, path: PathBuf, current_name: &str, is_folder: bool) {
+        let mode = if is_folder {
+            NameDialogMode::RenameFolder { path }
+        } else {
+            NameDialogMode::RenameNote { path }
+        };
+        self.card_menu = None;
+        self.create_dialog = Some(CreateModalState {
+            mode,
+            name: current_name.to_string(),
             needs_focus: true,
             error: None,
         });
@@ -190,7 +245,7 @@ impl LibraryState {
         }
 
         // Phím tắt tiện dụng trong Library: Ctrl+F focus ô tìm kiếm; Alt+Left / Backspace quay lại thư mục cha
-        if self.create_dialog.is_none() {
+        if self.create_dialog.is_none() && self.confirm_trash.is_none() {
             let text_focused = ctx.text_edit_focused();
             let (focus_search, go_up) = ctx.input(|i| {
                 let focus_f =
@@ -206,6 +261,7 @@ impl LibraryState {
             if go_up && self.section == LibrarySection::Documents && !self.rel_folder.is_empty() {
                 self.rel_folder.pop();
                 self.search_query.clear();
+                self.card_menu = None;
                 self.needs_refresh = true;
             }
         }
@@ -253,9 +309,19 @@ impl LibraryState {
                 self.show_grid(ui, theme, render_cx, &mut action);
             });
 
-        // 3. Hộp thoại tạo thư mục mới / ghi chú mới (hỗ trợ tiếng Việt đủ dấu & Enter để tạo nhanh)
+        // 3. Menu ngữ cảnh / dropdown trên thẻ (Đổi tên, Nhân bản, Yêu thích, Xoá / Khôi phục)
+        self.show_card_menu(ctx, theme);
+
+        // 4. Hộp thoại tạo / đổi tên thư mục & ghi chú (hỗ trợ tiếng Việt đủ dấu & Enter)
         if let Some(dialog_action) = self.show_create_dialog(ctx, theme) {
             action = dialog_action;
+        }
+
+        // 5. Hộp thoại xác nhận trước khi xoá vĩnh viễn / dọn sạch Thùng rác
+        self.show_trash_confirm_dialog(ctx, theme);
+
+        if self.needs_refresh {
+            self.refresh_now();
         }
 
         action
@@ -290,17 +356,24 @@ impl LibraryState {
             if self.section != LibrarySection::Documents {
                 self.section = LibrarySection::Documents;
                 self.search_query.clear();
+                self.card_menu = None;
                 self.needs_refresh = true;
             }
         }
 
         ui.add_space(6.0);
 
+        let trash_count = self.store.trash_item_count();
+        let trash_label = if trash_count > 0 {
+            format!("Trash ({trash_count})")
+        } else {
+            "Trash".to_string()
+        };
         if sidebar_nav_row(
             ui,
             theme,
             ToolIcon::Trash,
-            "Trash",
+            &trash_label,
             self.section == LibrarySection::Trash,
         )
         .clicked()
@@ -308,6 +381,7 @@ impl LibraryState {
             if self.section != LibrarySection::Trash {
                 self.section = LibrarySection::Trash;
                 self.search_query.clear();
+                self.card_menu = None;
                 self.needs_refresh = true;
             }
         }
@@ -614,7 +688,7 @@ impl LibraryState {
                 }
             }
 
-            // 3. Các nút tạo Ghi chú mới & Thư mục mới (chỉ hiện trong Documents)
+            // 3. Các nút tạo Ghi chú mới & Thư mục mới (Documents) hoặc nút Empty Trash (Trash)
             if self.section == LibrarySection::Documents {
                 let new_note_btn = pill_action_button(
                     &mut right_ui,
@@ -638,6 +712,13 @@ impl LibraryState {
                 );
                 if new_folder_btn.clicked() {
                     self.open_create_dialog(CreateDialogKind::Folder);
+                }
+            } else {
+                let trash_count = self.store.trash_item_count();
+                let empty_btn = empty_trash_pill_button(&mut right_ui, theme, trash_count);
+                if empty_btn.clicked() && trash_count > 0 {
+                    self.card_menu = None;
+                    self.confirm_trash = Some(TrashConfirmModal::EmptyTrash { count: trash_count });
                 }
             }
         });
@@ -735,6 +816,7 @@ impl LibraryState {
         let is_documents = self.section == LibrarySection::Documents;
         let mut clicked_folder: Option<LibraryFolderEntry> = None;
         let mut clicked_note: Option<LibraryNoteEntry> = None;
+        let mut open_menu_req: Option<CardMenuState> = None;
 
         ScrollArea::vertical()
             .id_salt("library_grid_scroll")
@@ -764,8 +846,7 @@ impl LibraryState {
                             }
                             let item = &items[idx];
                             let card_total_h = slot_h + 8.0 + label_h;
-                            let card_rect =
-                                ui.allocate_space(vec2(card_w, card_total_h)).1;
+                            let card_rect = ui.allocate_space(vec2(card_w, card_total_h)).1;
                             let card_id = match item {
                                 LibraryItem::Folder(f) => {
                                     ui.scope_id().with(("lib_folder", &f.path))
@@ -774,8 +855,19 @@ impl LibraryState {
                             };
                             let resp = ui.interact(card_rect, card_id, Sense::click());
 
+                            let mut menu_clicked = false;
+                            let mut chevron_rect_opt: Option<Rect> = None;
+
                             if ui.is_rect_visible(card_rect) {
-                                if resp.hovered() {
+                                let menu_active_for_card =
+                                    self.card_menu.as_ref().is_some_and(|m| {
+                                        m.path
+                                            == match item {
+                                                LibraryItem::Folder(f) => f.path.as_path(),
+                                                LibraryItem::Note(n) => n.path.as_path(),
+                                            }
+                                    });
+                                if resp.hovered() || menu_active_for_card {
                                     ui.painter().rect_filled(
                                         card_rect.expand(6.0),
                                         CornerRadius::same(theme.lib_card_rounding),
@@ -783,11 +875,9 @@ impl LibraryState {
                                     );
                                 }
 
-                                let slot_rect = Rect::from_min_size(
-                                    card_rect.min,
-                                    vec2(card_w, slot_h),
-                                );
-                                match item {
+                                let slot_rect =
+                                    Rect::from_min_size(card_rect.min, vec2(card_w, slot_h));
+                                let chevron_rect = match item {
                                     LibraryItem::Folder(folder) => {
                                         draw_library_folder_art(ui.painter(), slot_rect, theme);
                                         let sub = if in_search && !folder.rel_folder.is_empty() {
@@ -799,22 +889,18 @@ impl LibraryState {
                                         } else {
                                             format_item_count(folder.item_count)
                                         };
-                                        paint_card_caption(
+                                        paint_card_caption_with_menu(
                                             ui.painter(),
                                             slot_rect,
                                             card_w,
                                             &folder.name,
                                             &sub,
                                             theme,
-                                        );
+                                        )
                                     }
                                     LibraryItem::Note(note) => {
                                         self.paint_note_card_thumbnail(
-                                            ui,
-                                            slot_rect,
-                                            note,
-                                            theme,
-                                            render_cx,
+                                            ui, slot_rect, note, theme, render_cx,
                                         );
                                         let mut meta_parts =
                                             vec![format_relative_time(note.modified_at)];
@@ -824,19 +910,87 @@ impl LibraryState {
                                         if in_search && !note.rel_folder.is_empty() {
                                             meta_parts.push(note.rel_folder.join("/"));
                                         }
-                                        paint_card_caption(
+                                        paint_card_caption_with_menu(
                                             ui.painter(),
                                             slot_rect,
                                             card_w,
                                             &note.title,
                                             &meta_parts.join(" · "),
                                             theme,
-                                        );
+                                        )
                                     }
+                                };
+
+                                chevron_rect_opt = Some(chevron_rect);
+                                let menu_resp = ui.interact(
+                                    chevron_rect,
+                                    card_id.with("menu_btn"),
+                                    Sense::click(),
+                                );
+                                if menu_resp.hovered() || menu_active_for_card {
+                                    ui.painter().rect_filled(
+                                        chevron_rect,
+                                        CornerRadius::same(5),
+                                        Color32::from_rgba_unmultiplied(24, 90, 188, 28),
+                                    );
+                                }
+                                draw_icon(
+                                    ui.painter(),
+                                    chevron_rect.shrink(3.5),
+                                    ToolIcon::ChevronDown,
+                                    if menu_resp.hovered() || menu_active_for_card {
+                                        theme.lib_sidebar_active_fg
+                                    } else {
+                                        theme.lib_muted_fg
+                                    },
+                                );
+                                if menu_resp
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                    .on_hover_text("More actions")
+                                    .clicked()
+                                {
+                                    menu_clicked = true;
                                 }
                             }
 
-                            if resp.clicked() && is_documents {
+                            let right_clicked = resp.secondary_clicked();
+                            let card_body_clicked = resp.clicked() && !menu_clicked;
+
+                            if menu_clicked || right_clicked || (card_body_clicked && !is_documents)
+                            {
+                                let default_anchor = chevron_rect_opt
+                                    .map(|r| pos2(r.left() - 60.0, r.bottom() + 4.0))
+                                    .unwrap_or_else(|| {
+                                        pos2(card_rect.center().x - 75.0, card_rect.bottom())
+                                    });
+                                let anchor = if right_clicked {
+                                    resp.interact_pointer_pos().unwrap_or(default_anchor)
+                                } else {
+                                    default_anchor
+                                };
+                                open_menu_req = Some(match item {
+                                    LibraryItem::Folder(f) => CardMenuState {
+                                        path: f.path.clone(),
+                                        display_name: f.name.clone(),
+                                        rel_folder: f.rel_folder.clone(),
+                                        is_folder: true,
+                                        is_favorite: false,
+                                        in_trash: !is_documents,
+                                        anchor,
+                                        opened_this_frame: true,
+                                    },
+                                    LibraryItem::Note(n) => CardMenuState {
+                                        path: n.path.clone(),
+                                        display_name: n.title.clone(),
+                                        rel_folder: n.rel_folder.clone(),
+                                        is_folder: false,
+                                        is_favorite: n.is_favorite,
+                                        in_trash: !is_documents,
+                                        anchor,
+                                        opened_this_frame: true,
+                                    },
+                                });
+                            } else if card_body_clicked && is_documents {
                                 match item {
                                     LibraryItem::Folder(folder) => {
                                         clicked_folder = Some(folder.clone());
@@ -845,10 +999,6 @@ impl LibraryState {
                                         clicked_note = Some(note.clone());
                                     }
                                 }
-                            } else if resp.hovered() && !is_documents {
-                                resp.on_hover_text(
-                                    "Trash actions (Restore / Delete Permanently) arrive in Step 7.2",
-                                );
                             }
                         }
                     });
@@ -857,13 +1007,17 @@ impl LibraryState {
                 ui.add_space(18.0);
             });
 
-        if let Some(folder) = clicked_folder {
+        if let Some(menu) = open_menu_req {
+            self.card_menu = Some(menu);
+        } else if let Some(folder) = clicked_folder {
             let mut next = folder.rel_folder;
             next.push(folder.name);
             self.rel_folder = next;
             self.search_query.clear();
+            self.card_menu = None;
             self.refresh_now();
         } else if let Some(note) = clicked_note {
+            self.card_menu = None;
             *action = LibraryAction::OpenNote(note.path);
         }
     }
@@ -929,6 +1083,26 @@ impl LibraryState {
             Stroke::new(0.85, theme.thumb_card_border),
             StrokeKind::Outside,
         );
+
+        if note.is_favorite {
+            let badge_center = pos2(paper_card_rect.right() - 13.0, paper_card_rect.top() + 13.0);
+            ui.painter().circle_filled(
+                badge_center,
+                9.5,
+                Color32::from_rgba_unmultiplied(255, 255, 255, 232),
+            );
+            ui.painter().circle_stroke(
+                badge_center,
+                9.5,
+                Stroke::new(0.75, Color32::from_rgba_unmultiplied(217, 119, 6, 90)),
+            );
+            draw_icon(
+                ui.painter(),
+                Rect::from_center_size(badge_center, vec2(12.0, 12.0)),
+                ToolIcon::StarFilled,
+                theme.lib_star_gold,
+            );
+        }
     }
 
     fn build_or_get_note_stroke_mesh(
@@ -967,18 +1141,298 @@ impl LibraryState {
         Some(arc)
     }
 
+    fn show_card_menu(&mut self, ctx: &egui::Context, theme: &Theme) {
+        let Some(menu) = self.card_menu.clone() else {
+            return;
+        };
+
+        let mut close_menu = false;
+        let mut clicked_outside = false;
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            close_menu = true;
+        }
+
+        let menu_w = 178.0;
+        let est_h = if menu.in_trash {
+            86.0
+        } else if menu.is_folder {
+            86.0
+        } else {
+            154.0
+        };
+        let screen = ctx.content_rect();
+        let clamped_x = menu.anchor.x.clamp(
+            screen.left() + 8.0,
+            (screen.right() - menu_w - 10.0).max(8.0),
+        );
+        let clamped_y = menu.anchor.y.clamp(
+            screen.top() + 8.0,
+            (screen.bottom() - est_h - 10.0).max(8.0),
+        );
+
+        #[allow(deprecated)]
+        let area_resp = egui::Area::new(egui::Id::new("library_card_context_menu"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(pos2(clamped_x, clamped_y))
+            .show(ctx, |ui| {
+                theme.dark_popup_frame(ui.style()).show(ui, |ui| {
+                    ui.set_min_width(menu_w - 20.0);
+                    ui.spacing_mut().item_spacing.y = 3.0;
+
+                    if menu.in_trash {
+                        if popup_menu_item(
+                            ui,
+                            theme,
+                            ToolIcon::Restore,
+                            "Restore",
+                            Color32::from_rgb(125, 185, 255),
+                        )
+                        .clicked()
+                        {
+                            match self.store.restore_from_trash(&menu.path) {
+                                Ok(_) => {
+                                    self.note_cache.remove(&menu.path);
+                                    self.thumb_meshes.retain(|(p, _, _), _| p != &menu.path);
+                                    self.last_error = None;
+                                    self.needs_refresh = true;
+                                }
+                                Err(e) => {
+                                    self.last_error = Some(format!("Restore failed: {e}"));
+                                }
+                            }
+                            close_menu = true;
+                        }
+                        if popup_menu_item(
+                            ui,
+                            theme,
+                            ToolIcon::Trash,
+                            "Delete Permanently",
+                            Color32::from_rgb(248, 113, 113),
+                        )
+                        .clicked()
+                        {
+                            self.confirm_trash = Some(TrashConfirmModal::DeleteForever {
+                                path: menu.path.clone(),
+                                name: menu.display_name.clone(),
+                                is_folder: menu.is_folder,
+                            });
+                            close_menu = true;
+                        }
+                    } else {
+                        if popup_menu_item(ui, theme, ToolIcon::Text, "Rename", theme.tool_text_fg)
+                            .clicked()
+                        {
+                            self.open_rename_dialog(
+                                menu.path.clone(),
+                                &menu.display_name,
+                                menu.is_folder,
+                            );
+                            close_menu = true;
+                        }
+
+                        if !menu.is_folder {
+                            if popup_menu_item(
+                                ui,
+                                theme,
+                                ToolIcon::Pages,
+                                "Duplicate",
+                                theme.tool_text_fg,
+                            )
+                            .clicked()
+                            {
+                                match self.store.duplicate_note(&menu.path) {
+                                    Ok(_) => {
+                                        self.last_error = None;
+                                        self.needs_refresh = true;
+                                    }
+                                    Err(e) => {
+                                        self.last_error =
+                                            Some(format!("Could not duplicate note: {e}"));
+                                    }
+                                }
+                                close_menu = true;
+                            }
+
+                            let (fav_icon, fav_label, fav_color) = if menu.is_favorite {
+                                (ToolIcon::StarFilled, "Remove Favorite", theme.lib_star_gold)
+                            } else {
+                                (ToolIcon::Star, "Favorite", theme.tool_text_fg)
+                            };
+                            if popup_menu_item(ui, theme, fav_icon, fav_label, fav_color).clicked()
+                            {
+                                match self.store.toggle_favorite_note(&menu.path) {
+                                    Ok(_) => {
+                                        self.note_cache.remove(&menu.path);
+                                        self.last_error = None;
+                                        self.needs_refresh = true;
+                                    }
+                                    Err(e) => {
+                                        self.last_error =
+                                            Some(format!("Could not update favorite: {e}"));
+                                    }
+                                }
+                                close_menu = true;
+                            }
+                        }
+
+                        ui.add_space(2.0);
+                        ui.separator();
+                        ui.add_space(2.0);
+
+                        if popup_menu_item(
+                            ui,
+                            theme,
+                            ToolIcon::Trash,
+                            "Move to Trash",
+                            Color32::from_rgb(248, 113, 113),
+                        )
+                        .clicked()
+                        {
+                            match self.store.move_to_trash(&menu.path, &menu.rel_folder) {
+                                Ok(_) => {
+                                    self.note_cache.remove(&menu.path);
+                                    if menu.is_folder {
+                                        self.thumb_meshes.clear();
+                                        self.note_cache.clear();
+                                    } else {
+                                        self.thumb_meshes.retain(|(p, _, _), _| p != &menu.path);
+                                    }
+                                    self.last_error = None;
+                                    self.needs_refresh = true;
+                                }
+                                Err(e) => {
+                                    self.last_error = Some(format!("Move to Trash failed: {e}"));
+                                }
+                            }
+                            close_menu = true;
+                        }
+                    }
+                });
+            })
+            .response;
+
+        if !menu.opened_this_frame {
+            let popup_rect = area_resp.rect;
+            let press_outside = ctx.input(|i| {
+                (i.pointer.primary_pressed() || i.pointer.secondary_pressed())
+                    && i.pointer
+                        .interact_pos()
+                        .is_some_and(|p| !popup_rect.contains(p))
+            });
+            if press_outside {
+                clicked_outside = true;
+            }
+        }
+
+        if close_menu || clicked_outside {
+            self.card_menu = None;
+        } else if let Some(m) = self.card_menu.as_mut() {
+            m.opened_this_frame = false;
+        }
+    }
+
+    fn show_trash_confirm_dialog(&mut self, ctx: &egui::Context, theme: &Theme) {
+        let Some(confirm) = self.confirm_trash.clone() else {
+            return;
+        };
+        let mut proceed = false;
+        let mut cancel = false;
+
+        let (heading, message, btn_label) = match &confirm {
+            TrashConfirmModal::DeleteForever {
+                name, is_folder, ..
+            } => {
+                let kind = if *is_folder { "folder" } else { "note" };
+                (
+                    "Delete Permanently?",
+                    format!("Permanently delete {kind} \"{name}\"? This action cannot be undone."),
+                    "Delete Permanently",
+                )
+            }
+            TrashConfirmModal::EmptyTrash { count } => (
+                "Empty Trash?",
+                format!(
+                    "Permanently delete all {count} item(s) in Trash? This action cannot be undone."
+                ),
+                "Empty Trash",
+            ),
+        };
+
+        #[allow(deprecated)]
+        let modal =
+            egui::Modal::new(egui::Id::new("library_trash_confirm_modal")).show(ctx, |ui| {
+                ui.set_width(350.0);
+                ui.heading(heading);
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(message)
+                        .size(theme.font_size_body)
+                        .color(theme.lib_sidebar_fg),
+                );
+                if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    cancel = true;
+                }
+                ui.add_space(14.0);
+                ui.horizontal(|ui| {
+                    let del_btn = egui::Button::new(RichText::new(btn_label).color(Color32::WHITE))
+                        .fill(theme.lib_danger_fg);
+                    if ui.add(del_btn).clicked() {
+                        proceed = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+
+        if cancel || modal.should_close() {
+            self.confirm_trash = None;
+            return;
+        }
+
+        if proceed {
+            self.confirm_trash = None;
+            match confirm {
+                TrashConfirmModal::DeleteForever { path, .. } => {
+                    match self.store.delete_permanently(&path) {
+                        Ok(()) => {
+                            self.note_cache.remove(&path);
+                            self.thumb_meshes.retain(|(p, _, _), _| p != &path);
+                            self.last_error = None;
+                            self.needs_refresh = true;
+                        }
+                        Err(e) => {
+                            self.last_error = Some(format!("Delete failed: {e}"));
+                        }
+                    }
+                }
+                TrashConfirmModal::EmptyTrash { .. } => match self.store.empty_trash() {
+                    Ok(()) => {
+                        self.note_cache.clear();
+                        self.thumb_meshes.clear();
+                        self.last_error = None;
+                        self.needs_refresh = true;
+                    }
+                    Err(e) => {
+                        self.last_error = Some(format!("Empty Trash failed: {e}"));
+                    }
+                },
+            }
+        }
+    }
+
     fn show_create_dialog(&mut self, ctx: &egui::Context, theme: &Theme) -> Option<LibraryAction> {
         let state = self.create_dialog.as_mut()?;
         let mut submit = false;
         let mut cancel = false;
 
-        let title = match state.kind {
-            CreateDialogKind::Folder => "New Folder",
-            CreateDialogKind::Note => "New Note",
-        };
-        let hint = match state.kind {
-            CreateDialogKind::Folder => "Enter folder name...",
-            CreateDialogKind::Note => "Enter note title...",
+        let (title, hint, ok_label) = match &state.mode {
+            NameDialogMode::CreateFolder => ("New Folder", "Enter folder name...", "Create"),
+            NameDialogMode::CreateNote => ("New Note", "Enter note title...", "Create"),
+            NameDialogMode::RenameFolder { .. } => {
+                ("Rename Folder", "Enter new folder name...", "Save")
+            }
+            NameDialogMode::RenameNote { .. } => ("Rename Note", "Enter new note title...", "Save"),
         };
 
         #[allow(deprecated)]
@@ -1014,7 +1468,7 @@ impl LibraryState {
             }
             ui.add_space(12.0);
             ui.horizontal(|ui| {
-                if ui.button("Create").clicked() {
+                if ui.button(ok_label).clicked() {
                     submit = true;
                 }
                 if ui.button("Cancel").clicked() {
@@ -1035,19 +1489,49 @@ impl LibraryState {
                 state.needs_focus = true;
                 return None;
             }
-            let kind = state.kind;
+            let mode = state.mode.clone();
             let rel_folder = self.rel_folder.clone();
             self.create_dialog = None;
-            return Some(match kind {
-                CreateDialogKind::Folder => LibraryAction::CreateFolder {
-                    name: trimmed,
-                    rel_folder,
-                },
-                CreateDialogKind::Note => LibraryAction::CreateNote {
-                    title: trimmed,
-                    rel_folder,
-                },
-            });
+            match mode {
+                NameDialogMode::CreateFolder => {
+                    return Some(LibraryAction::CreateFolder {
+                        name: trimmed,
+                        rel_folder,
+                    });
+                }
+                NameDialogMode::CreateNote => {
+                    return Some(LibraryAction::CreateNote {
+                        title: trimmed,
+                        rel_folder,
+                    });
+                }
+                NameDialogMode::RenameFolder { path } => {
+                    match self.store.rename_folder(&path, &trimmed) {
+                        Ok(_) => {
+                            self.note_cache.clear();
+                            self.thumb_meshes.clear();
+                            self.last_error = None;
+                            self.needs_refresh = true;
+                        }
+                        Err(e) => {
+                            self.last_error = Some(format!("Rename folder failed: {e}"));
+                        }
+                    }
+                    return None;
+                }
+                NameDialogMode::RenameNote { path } => {
+                    match self.store.rename_note(&path, &trimmed) {
+                        Ok(_) => {
+                            self.invalidate_note_path(&path);
+                            self.last_error = None;
+                        }
+                        Err(e) => {
+                            self.last_error = Some(format!("Rename note failed: {e}"));
+                        }
+                    }
+                    return None;
+                }
+            }
         }
         None
     }
@@ -1149,26 +1633,127 @@ fn pill_action_button(
     resp
 }
 
-fn paint_card_caption(
+fn empty_trash_pill_button(ui: &mut Ui, theme: &Theme, count: usize) -> egui::Response {
+    let label = "Empty Trash";
+    let label_galley = ui.painter().layout_no_wrap(
+        label.to_string(),
+        FontId::proportional(theme.font_size_body),
+        Color32::WHITE,
+    );
+    let w = 12.0 + 16.0 + 6.0 + label_galley.size().x + 12.0;
+    let enabled = count > 0;
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, 32.0), sense);
+    let resp = if enabled {
+        resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        resp.on_hover_text("Trash is already empty")
+    };
+    let (bg, stroke_col, fg) = if !enabled {
+        (
+            theme.lib_search_bg,
+            theme.lib_search_stroke,
+            theme.lib_muted_fg,
+        )
+    } else if resp.hovered() {
+        (
+            Color32::from_rgb(254, 226, 226),
+            theme.lib_danger_fg,
+            theme.lib_danger_fg,
+        )
+    } else {
+        (
+            theme.lib_danger_bg,
+            Color32::from_rgb(252, 165, 165),
+            theme.lib_danger_fg,
+        )
+    };
+    ui.painter().rect_filled(rect, CornerRadius::same(16), bg);
+    ui.painter().rect_stroke(
+        rect,
+        CornerRadius::same(16),
+        Stroke::new(1.0, stroke_col),
+        StrokeKind::Inside,
+    );
+    let icon_rect = Rect::from_min_size(
+        pos2(rect.left() + 11.0, rect.center().y - 8.0),
+        vec2(16.0, 16.0),
+    );
+    draw_icon(ui.painter(), icon_rect, ToolIcon::Trash, fg);
+    ui.painter().text(
+        pos2(icon_rect.right() + 6.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(theme.font_size_body),
+        fg,
+    );
+    resp
+}
+
+fn popup_menu_item(
+    ui: &mut Ui,
+    theme: &Theme,
+    icon: ToolIcon,
+    label: &str,
+    fg: Color32,
+) -> egui::Response {
+    let row_w = ui.available_width().max(150.0);
+    let (rect, resp) = ui.allocate_exact_size(vec2(row_w, 28.0), Sense::click());
+    if resp.hovered() {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(6), theme.tool_hover_bg);
+    }
+    let icon_rect = Rect::from_min_size(
+        pos2(rect.left() + 8.0, rect.center().y - 7.5),
+        vec2(15.0, 15.0),
+    );
+    draw_icon(ui.painter(), icon_rect, icon, fg);
+    ui.painter().text(
+        pos2(icon_rect.right() + 8.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(theme.font_size_body),
+        fg,
+    );
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+fn paint_card_caption_with_menu(
     painter: &egui::Painter,
     slot_rect: Rect,
     card_w: f32,
     title: &str,
     meta: &str,
     theme: &Theme,
-) {
+) -> Rect {
     let title_y = slot_rect.bottom() + 9.0;
-    let max_text_w = (card_w - 6.0).max(40.0);
-    let truncated_title = truncate_with_ellipsis(painter, title, 13.5, max_text_w);
-    painter.text(
-        pos2(slot_rect.center().x, title_y),
-        Align2::CENTER_TOP,
-        truncated_title,
+    let btn_size = 20.0;
+    let gap = 2.0;
+    let max_title_w = (card_w - btn_size - gap - 4.0).max(40.0);
+    let truncated_title = truncate_with_ellipsis(painter, title, 13.5, max_title_w);
+    let title_galley = painter.layout_no_wrap(
+        truncated_title.clone(),
         FontId::proportional(13.5),
         theme.lib_title_fg,
     );
+    let total_w = title_galley.size().x + gap + btn_size;
+    let start_x = (slot_rect.center().x - total_w * 0.5).max(slot_rect.left() + 2.0);
+    painter.galley(pos2(start_x, title_y), title_galley, theme.lib_title_fg);
 
-    let truncated_meta = truncate_with_ellipsis(painter, meta, 11.5, max_text_w);
+    let chevron_rect = Rect::from_min_size(
+        pos2(
+            (start_x + (total_w - btn_size)).min(slot_rect.right() - btn_size),
+            title_y - 1.5,
+        ),
+        vec2(btn_size, btn_size),
+    );
+
+    let max_meta_w = (card_w - 6.0).max(40.0);
+    let truncated_meta = truncate_with_ellipsis(painter, meta, 11.5, max_meta_w);
     painter.text(
         pos2(slot_rect.center().x, title_y + 20.0),
         Align2::CENTER_TOP,
@@ -1176,6 +1761,7 @@ fn paint_card_caption(
         FontId::proportional(11.5),
         theme.lib_muted_fg,
     );
+    chevron_rect
 }
 
 fn truncate_with_ellipsis(

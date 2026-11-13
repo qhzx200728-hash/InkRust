@@ -80,6 +80,9 @@ pub struct Theme {
     pub lib_folder_back: Color32,
     pub lib_card_hover_bg: Color32,
     pub lib_card_rounding: u8,
+    pub lib_star_gold: Color32,
+    pub lib_danger_fg: Color32,
+    pub lib_danger_bg: Color32,
 
     // 7. Cỡ chữ
     pub font_size_title: f32,
@@ -161,6 +164,9 @@ impl Default for Theme {
             lib_folder_back: Color32::from_rgb(37, 99, 235),
             lib_card_hover_bg: Color32::from_rgba_unmultiplied(24, 90, 188, 12),
             lib_card_rounding: 10,
+            lib_star_gold: Color32::from_rgb(245, 158, 11),
+            lib_danger_fg: Color32::from_rgb(220, 38, 38),
+            lib_danger_bg: Color32::from_rgb(254, 242, 242),
 
             // Cỡ chữ
             font_size_title: 14.5,

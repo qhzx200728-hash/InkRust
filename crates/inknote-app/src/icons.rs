@@ -30,13 +30,17 @@ pub enum ToolIcon {
     Undo,
     Redo,
     Trash,
-    // Biểu tượng cho màn hình Library (Bước 7.1)
+    // Biểu tượng cho màn hình Library (Bước 7.1 & 7.2)
     Documents,
     BackArrow,
     Search,
     Settings,
     FolderPlus,
     NotePlus,
+    Star,
+    StarFilled,
+    Restore,
+    ChevronDown,
 }
 
 pub fn draw_icon(painter: &Painter, rect: Rect, icon: ToolIcon, color: Color32) {
@@ -405,6 +409,71 @@ pub fn draw_icon(painter: &Painter, rect: Rect, icon: ToolIcon, color: Color32) 
             let arm = s * 0.3;
             painter.line_segment([pos2(c.x - arm, c.y), pos2(c.x + arm, c.y)], stroke);
             painter.line_segment([pos2(c.x, c.y - arm), pos2(c.x, c.y + arm)], stroke);
+        }
+        ToolIcon::Star | ToolIcon::StarFilled => {
+            let mut pts = Vec::with_capacity(10);
+            let outer = s * 0.92;
+            let inner = s * 0.42;
+            for k in 0..10 {
+                let angle = -std::f32::consts::FRAC_PI_2 + (k as f32) * std::f32::consts::PI / 5.0;
+                let r = if k % 2 == 0 { outer } else { inner };
+                pts.push(pos2(c.x + r * angle.cos(), c.y + r * angle.sin()));
+            }
+            if matches!(icon, ToolIcon::StarFilled) {
+                let mut tris = egui::epaint::Mesh::default();
+                let center_idx = tris.vertices.len() as u32;
+                tris.vertices.push(egui::epaint::Vertex {
+                    pos: c,
+                    uv: egui::epaint::WHITE_UV,
+                    color,
+                });
+                for p in &pts {
+                    tris.vertices.push(egui::epaint::Vertex {
+                        pos: *p,
+                        uv: egui::epaint::WHITE_UV,
+                        color,
+                    });
+                }
+                for i in 0..10u32 {
+                    let next = (i + 1) % 10;
+                    tris.indices.extend_from_slice(&[
+                        center_idx,
+                        center_idx + 1 + i,
+                        center_idx + 1 + next,
+                    ]);
+                }
+                painter.add(egui::Shape::mesh(tris));
+            } else {
+                painter.add(egui::Shape::closed_line(pts, stroke));
+            }
+        }
+        ToolIcon::Restore => {
+            // Mũi tên vòng quay ngược chiều kim đồng hồ (Khôi phục từ Trash)
+            let r = s * 0.78;
+            let segs = 16;
+            let a_start = -std::f32::consts::PI * 0.72;
+            let a_end = std::f32::consts::PI * 0.85;
+            let mut pts = Vec::with_capacity(segs + 1);
+            for i in 0..=segs {
+                let t = i as f32 / segs as f32;
+                let a = a_start + (a_end - a_start) * t;
+                pts.push(pos2(c.x + r * a.cos(), c.y + r * a.sin()));
+            }
+            for w in pts.windows(2) {
+                painter.line_segment([w[0], w[1]], stroke);
+            }
+            let head = pts[0];
+            painter.line_segment([head, pos2(head.x - s * 0.1, head.y - s * 0.45)], stroke);
+            painter.line_segment([head, pos2(head.x + s * 0.42, head.y - s * 0.05)], stroke);
+        }
+        ToolIcon::ChevronDown => {
+            let y_top = c.y - s * 0.25;
+            let y_bot = c.y + s * 0.32;
+            let p_l = pos2(c.x - s * 0.56, y_top);
+            let p_m = pos2(c.x, y_bot);
+            let p_r = pos2(c.x + s * 0.56, y_top);
+            painter.line_segment([p_l, p_m], stroke);
+            painter.line_segment([p_m, p_r], stroke);
         }
     }
 }
