@@ -9,6 +9,7 @@ description = "Loi du lieu InkNote: trang, net but, he thong lenh (Command) va U
 inknote-pen = { path = "../inknote-pen" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+base64 = "0.22"
 
 [dev-dependencies]
 parry2d-f64 = "0.31.1"

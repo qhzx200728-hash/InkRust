@@ -6,6 +6,7 @@
 mod autosave;
 mod eraser;
 mod icons;
+mod image_box;
 mod lasso;
 mod latex_dialog;
 mod shapes;
@@ -22,7 +23,8 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use inknote_core::{
-    CanvasMode, Command, Document, DocumentFile, LatexObject, PaperSettings, Stroke, TextObject,
+    CanvasMode, Command, Document, DocumentFile, ImageObject, LatexObject, PaperSettings, Stroke,
+    TextObject,
 };
 use inknote_pen::{
     Constraints, PenEvent, PenPath, Style,
@@ -41,6 +43,11 @@ use crate::{
     autosave::AutoSaveState,
     eraser::{ActiveEraser, apply_eraser_sweep, finish_eraser_to_command},
     icons::{draw_paper, paper_sheet_rect},
+    image_box::{
+        ImageTextureCache, LoadedImageData, compute_default_image_page_size, image_page_bbox,
+        load_image_from_path, paint_image_object, read_image_from_clipboard,
+        transformed_image_page_rect,
+    },
     lasso::{
         LassoInteraction, LassoState, ResizeCorner, corner_pos, hit_resize_corner, opposite_anchor,
         refresh_selection_bbox, select_in_freehand, select_in_rect, transformed_bbox,
@@ -201,6 +208,7 @@ struct InkNoteApp {
     batch_cache: HashMap<u64, CachedStroke>,
     thumb_cache: ThumbCache,
     svg_cache: SvgTextureCache,
+    image_cache: ImageTextureCache,
     pending_latex_target: Option<LatexTarget>,
     latex_dialog: LatexDialogState,
     view: View,
@@ -280,6 +288,7 @@ impl InkNoteApp {
             batch_cache: HashMap::new(),
             thumb_cache: ThumbCache::default(),
             svg_cache: SvgTextureCache::default(),
+            image_cache: ImageTextureCache::default(),
             pending_latex_target: None,
             latex_dialog: LatexDialogState::default(),
             view: View::default(),
@@ -542,6 +551,7 @@ impl InkNoteApp {
                         latex_ids: vec![],
                         shape_ids: vec![],
                         text_ids: vec![old_obj.id],
+                        image_ids: vec![],
                     });
                 } else if edit.draft != old_obj {
                     self.doc.execute(Command::UpdateText {
@@ -792,6 +802,7 @@ impl InkNoteApp {
                 self.autosave.reset(self.doc.revision());
                 self.thumb_cache.clear();
                 self.svg_cache.clear();
+                self.image_cache.clear();
                 self.pending_latex_target = None;
                 self.static_cache = None;
                 self.active = None;
@@ -840,6 +851,7 @@ impl InkNoteApp {
         self.batch_cache.clear();
         self.thumb_cache.clear();
         self.svg_cache.clear();
+        self.image_cache.clear();
         self.pending_latex_target = None;
         self.static_cache = None;
         self.active = None;
@@ -1075,6 +1087,7 @@ impl InkNoteApp {
                             latex_ids: sel.latex_ids.clone(),
                             shape_ids: sel.shape_ids.clone(),
                             text_ids: sel.text_ids.clone(),
+                            image_ids: sel.image_ids.clone(),
                             anchor: [0.0, 0.0],
                             scale: [1.0, 1.0],
                             delta: [delta.x as f64, delta.y as f64],
@@ -1097,6 +1110,7 @@ impl InkNoteApp {
                             latex_ids: sel.latex_ids.clone(),
                             shape_ids: sel.shape_ids.clone(),
                             text_ids: sel.text_ids.clone(),
+                            image_ids: sel.image_ids.clone(),
                             anchor,
                             scale,
                             delta: [0.0, 0.0],
@@ -1124,7 +1138,218 @@ impl InkNoteApp {
             latex_ids: sel.latex_ids,
             shape_ids: sel.shape_ids,
             text_ids: sel.text_ids,
+            image_ids: sel.image_ids,
         });
+    }
+
+    fn image_object_at(
+        &self,
+        paper_rect: egui::Rect,
+        screen_pos: egui::Pos2,
+    ) -> Option<(usize, ImageObject)> {
+        if !paper_rect.contains(screen_pos) {
+            return None;
+        }
+        for page_idx in 0..self.doc.page_count() {
+            let page = &self.doc.pages()[page_idx];
+            if page.images.is_empty() {
+                continue;
+            }
+            let sheet = self.page_screen_rect(paper_rect, page_idx);
+            if !sheet.intersects(paper_rect) {
+                continue;
+            }
+            let origin = self.page_origin(paper_rect, page_idx);
+            for obj in page.images.iter().rev() {
+                let b = image_page_bbox(obj);
+                let rect = egui::Rect::from_min_max(
+                    origin + b.min.to_vec2() * self.view.zoom,
+                    origin + b.max.to_vec2() * self.view.zoom,
+                )
+                .expand(2.0);
+                if rect.contains(screen_pos) {
+                    return Some((page_idx, obj.clone()));
+                }
+            }
+        }
+        None
+    }
+
+    fn visible_page_center_for_insert(&self, paper_rect: egui::Rect, page_idx: usize) -> [f64; 2] {
+        let sheet = self.page_screen_rect(paper_rect, page_idx);
+        let vis = sheet.intersect(paper_rect);
+        let screen_center = if vis.is_positive() {
+            vis.center()
+        } else {
+            sheet.center()
+        };
+        let p = self.page_local_for(screen_center, page_idx);
+        [p.x as f64, p.y as f64]
+    }
+
+    fn insert_loaded_image(&mut self, loaded: LoadedImageData) {
+        if self.toolbar_state.read_only {
+            return;
+        }
+        let page_idx = self
+            .doc
+            .active_page_index()
+            .min(self.doc.page_count().saturating_sub(1));
+        let settings = self.doc.paper_settings().clone();
+        let page_w = settings.page_width.max(120.0) as f64;
+        let page_h = settings.page_height.max(120.0) as f64;
+        let size = compute_default_image_page_size(loaded.pixel_size, page_w, page_h);
+        let center = if let Some(paper) = self.paper_rect {
+            self.visible_page_center_for_insert(paper, page_idx)
+        } else {
+            [page_w * 0.5, page_h * 0.5]
+        };
+        let margin = 12.0;
+        let pos = if settings.mode == CanvasMode::Paper {
+            [
+                (center[0] - size[0] * 0.5)
+                    .clamp(margin, (page_w - size[0] - margin).max(margin)),
+                (center[1] - size[1] * 0.5)
+                    .clamp(margin, (page_h - size[1] - margin).max(margin)),
+            ]
+        } else {
+            [center[0] - size[0] * 0.5, center[1] - size[1] * 0.5]
+        };
+        let id = self.doc.alloc_id();
+        let obj = ImageObject {
+            id,
+            pos,
+            size,
+            pixel_size: loaded.pixel_size,
+            bytes: loaded.bytes,
+        };
+        let bbox = image_page_bbox(&obj).expand(4.0);
+        self.doc.execute(Command::AddImage {
+            page_index: page_idx,
+            obj,
+        });
+        self.lasso_state.interaction = None;
+        self.lasso_state.selection = Some(lasso::LassoSelection {
+            page_index: page_idx,
+            stroke_ids: Vec::new(),
+            latex_ids: Vec::new(),
+            shape_ids: Vec::new(),
+            text_ids: Vec::new(),
+            image_ids: vec![id],
+            bbox,
+        });
+        self.toolbar_state.image_notice = Some((
+            format!(
+                "Inserted {}x{} px image",
+                loaded.pixel_size[0], loaded.pixel_size[1]
+            ),
+            Instant::now(),
+            false,
+        ));
+    }
+
+    fn handle_open_image_file(&mut self) {
+        if self.toolbar_state.read_only {
+            return;
+        }
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter(
+                "Images (PNG, JPEG, BMP, WebP)",
+                &["png", "jpg", "jpeg", "bmp", "webp"],
+            )
+            .pick_file()
+        else {
+            return;
+        };
+        match load_image_from_path(&path) {
+            Ok(loaded) => self.insert_loaded_image(loaded),
+            Err(err) => {
+                self.toolbar_state.image_notice = Some((err, Instant::now(), true));
+            }
+        }
+    }
+
+    fn handle_paste_image_clipboard(&mut self, switch_tool_on_error: bool) {
+        if self.toolbar_state.read_only {
+            return;
+        }
+        match read_image_from_clipboard() {
+            Ok(loaded) => {
+                self.insert_loaded_image(loaded);
+                self.toolbar_state.active_tool = ActiveTool::Image;
+            }
+            Err(err) => {
+                if switch_tool_on_error
+                    || self.toolbar_state.active_tool == ActiveTool::Image
+                {
+                    self.toolbar_state.image_notice = Some((err, Instant::now(), true));
+                }
+            }
+        }
+    }
+
+    fn image_down(&mut self, ctx: &egui::Context, screen_pos: egui::Pos2) {
+        let can_interact_handles = !self.toolbar_state.read_only
+            && !egui::Popup::is_any_open(ctx)
+            && !self
+                .toolbar_state
+                .last_metrics
+                .tool_pill_rect
+                .contains(screen_pos);
+        if can_interact_handles {
+            if let (Some(paper), Some(sel)) = (self.paper_rect, &self.lasso_state.selection) {
+                let origin = self.page_origin(paper, sel.page_index);
+                let sel_screen = egui::Rect::from_min_max(
+                    origin + sel.bbox.min.to_vec2() * self.view.zoom,
+                    origin + sel.bbox.max.to_vec2() * self.view.zoom,
+                );
+                if let Some(corner) = hit_resize_corner(sel_screen, screen_pos) {
+                    let anchor = opposite_anchor(sel.bbox, corner);
+                    self.lasso_state.interaction = Some(LassoInteraction::Resizing {
+                        corner,
+                        anchor,
+                        orig_bbox: sel.bbox,
+                        scale: [1.0, 1.0],
+                    });
+                    return;
+                }
+                if sel_screen.contains(screen_pos) {
+                    let page_pos = self.page_local_for(screen_pos, sel.page_index);
+                    self.lasso_state.interaction = Some(LassoInteraction::Moving {
+                        start_page_pos: page_pos,
+                        delta: egui::Vec2::ZERO,
+                    });
+                    return;
+                }
+            }
+        }
+        let Some(page_idx) = self.interactive_page_at(ctx, screen_pos) else {
+            return;
+        };
+        let Some(paper) = self.paper_rect else {
+            return;
+        };
+        if let Some((hit_page, obj)) = self.image_object_at(paper, screen_pos) {
+            self.doc.set_active_page_index(hit_page);
+            let page_pos = self.page_local_for(screen_pos, hit_page);
+            let bbox = image_page_bbox(&obj).expand(4.0);
+            self.lasso_state.selection = Some(lasso::LassoSelection {
+                page_index: hit_page,
+                stroke_ids: Vec::new(),
+                latex_ids: Vec::new(),
+                shape_ids: Vec::new(),
+                text_ids: Vec::new(),
+                image_ids: vec![obj.id],
+                bbox,
+            });
+            self.lasso_state.interaction = Some(LassoInteraction::Moving {
+                start_page_pos: page_pos,
+                delta: egui::Vec2::ZERO,
+            });
+        } else {
+            self.lasso_state.clear();
+            self.doc.set_active_page_index(page_idx);
+        }
     }
 
     fn shape_down(&mut self, ctx: &egui::Context, screen_pos: egui::Pos2) {
@@ -1393,6 +1618,11 @@ impl InkNoteApp {
                                 self.lasso_down(&ctx, pos);
                                 continue;
                             }
+                            if self.toolbar_state.active_tool == ActiveTool::Image {
+                                self.touch_active = true;
+                                self.image_down(&ctx, pos);
+                                continue;
+                            }
                             if self.toolbar_state.active_tool == ActiveTool::Eraser {
                                 if let Some(page_idx) = self.interactive_page_at(&ctx, pos) {
                                     self.touch_active = true;
@@ -1479,6 +1709,8 @@ impl InkNoteApp {
                     if pressed {
                         if self.toolbar_state.active_tool == ActiveTool::Lasso {
                             self.lasso_down(&ctx, pos);
+                        } else if self.toolbar_state.active_tool == ActiveTool::Image {
+                            self.image_down(&ctx, pos);
                         } else if self.toolbar_state.active_tool == ActiveTool::Eraser {
                             if let Some(page_idx) = self.interactive_page_at(&ctx, pos) {
                                 self.eraser_down(pos, page_idx);
@@ -1570,8 +1802,22 @@ impl InkNoteApp {
             self.last_up_pressure,
             self.doc.strokes().len()
         );
-        if self.toolbar_state.active_tool != ActiveTool::Lasso {
+        if !matches!(
+            self.toolbar_state.active_tool,
+            ActiveTool::Lasso | ActiveTool::Image
+        ) {
             self.lasso_state.clear();
+        } else if self.toolbar_state.active_tool == ActiveTool::Image {
+            let image_only = self.lasso_state.selection.as_ref().is_some_and(|sel| {
+                sel.stroke_ids.is_empty()
+                    && sel.latex_ids.is_empty()
+                    && sel.shape_ids.is_empty()
+                    && sel.text_ids.is_empty()
+                    && !sel.image_ids.is_empty()
+            });
+            if !image_only {
+                self.lasso_state.clear();
+            }
         }
         if self.toolbar_state.active_tool != ActiveTool::Shapes {
             self.active_shape = None;
@@ -1619,28 +1865,40 @@ impl InkNoteApp {
             save_default_paper_settings(&paper_settings);
         }
         // Phím tắt: Ctrl+Z = Undo; Ctrl+Y hoặc Ctrl+Shift+Z = Redo
-        // Phím tắt tệp: Ctrl+S = Save, Ctrl+Shift+S = Save As, Ctrl+O = Open, Ctrl+N = New
+        // Phím tắt tệp: Ctrl+S = Save, Ctrl+Shift+S = Save As, Ctrl+O = Open, Ctrl+N = New, Ctrl+V = Paste Image
         let allow_shortcuts = !self.latex_dialog.open && !ctx.egui_wants_keyboard_input();
-        let (key_undo, key_redo, key_save, key_save_as, key_open, key_new, key_pgup, key_pgdn) =
-            if allow_shortcuts {
-                ctx.input(|i| {
-                    let cmd = i.modifiers.command;
-                    let shift = i.modifiers.shift;
-                    let z = i.key_pressed(egui::Key::Z);
-                    (
-                        cmd && !shift && z,
-                        cmd && ((shift && z) || i.key_pressed(egui::Key::Y)),
-                        cmd && !shift && i.key_pressed(egui::Key::S),
-                        cmd && shift && i.key_pressed(egui::Key::S),
-                        cmd && !shift && i.key_pressed(egui::Key::O),
-                        cmd && !shift && i.key_pressed(egui::Key::N),
-                        i.key_pressed(egui::Key::PageUp),
-                        i.key_pressed(egui::Key::PageDown),
-                    )
-                })
-            } else {
-                (false, false, false, false, false, false, false, false)
-            };
+        let (
+            key_undo,
+            key_redo,
+            key_save,
+            key_save_as,
+            key_open,
+            key_new,
+            key_paste,
+            key_pgup,
+            key_pgdn,
+        ) = if allow_shortcuts {
+            ctx.input(|i| {
+                let cmd = i.modifiers.command;
+                let shift = i.modifiers.shift;
+                let z = i.key_pressed(egui::Key::Z);
+                (
+                    cmd && !shift && z,
+                    cmd && ((shift && z) || i.key_pressed(egui::Key::Y)),
+                    cmd && !shift && i.key_pressed(egui::Key::S),
+                    cmd && shift && i.key_pressed(egui::Key::S),
+                    cmd && !shift && i.key_pressed(egui::Key::O),
+                    cmd && !shift && i.key_pressed(egui::Key::N),
+                    cmd && !shift && i.key_pressed(egui::Key::V),
+                    i.key_pressed(egui::Key::PageUp),
+                    i.key_pressed(egui::Key::PageDown),
+                )
+            })
+        } else {
+            (
+                false, false, false, false, false, false, false, false, false,
+            )
+        };
         // Không hoàn tác / thao tác file / thêm trang khi đang kéo nét / kéo hình dở
         if self.active.is_none()
             && self.active_eraser.is_none()
@@ -1681,6 +1939,14 @@ impl InkNoteApp {
                 self.confirm_delete_page = Some(vec![self.doc.active_page_index()]);
             }
             let _ = actions.latex_clicked;
+            if actions.insert_image_file_clicked {
+                self.commit_active_text_edit(&ctx);
+                self.handle_open_image_file();
+            }
+            if actions.paste_image_clipboard_clicked || key_paste {
+                self.commit_active_text_edit(&ctx);
+                self.handle_paste_image_clipboard(actions.paste_image_clipboard_clicked);
+            }
             if key_pgup && self.doc.active_page_index() > 0 {
                 let target = self.doc.active_page_index() - 1;
                 self.doc.set_active_page_index(target);
@@ -2203,6 +2469,84 @@ impl InkNoteApp {
                 }
 
                 let paint_start = Instant::now();
+
+                // 2b. Vẽ ảnh (ImageObject) nằm BÊN DƯỚI nét bút để có thể viết/ghi chú đè lên ảnh
+                let hovered_image = if self.toolbar_state.active_tool == ActiveTool::Image
+                    && !self.toolbar_state.read_only
+                    && !self.lasso_state.is_active()
+                    && !self.latex_dialog.open
+                    && !egui::Popup::is_any_open(&ctx)
+                {
+                    ctx.input(|i| i.pointer.hover_pos())
+                        .and_then(|hp| self.image_object_at(paper_rect, hp))
+                } else {
+                    None
+                };
+                for page_idx in 0..self.doc.page_count() {
+                    if self.doc.pages()[page_idx].images.is_empty() {
+                        continue;
+                    }
+                    let sheet = self.page_screen_rect(paper_rect, page_idx);
+                    if !sheet.intersects(paper_rect) {
+                        continue;
+                    }
+                    let clip = sheet.intersect(paper_rect);
+                    let page_painter = ui.painter().with_clip_rect(clip);
+                    let origin = self.page_origin(paper_rect, page_idx);
+                    let sel_snapshot = self.lasso_state.selection.clone();
+                    let inter_snapshot = self.lasso_state.interaction.clone();
+                    let images = self.doc.pages()[page_idx].images.clone();
+                    for img in &images {
+                        let override_rect = match (&sel_snapshot, &inter_snapshot) {
+                            (
+                                Some(sel),
+                                Some(
+                                    inter @ (LassoInteraction::Moving { .. }
+                                    | LassoInteraction::Resizing { .. }),
+                                ),
+                            ) if sel.page_index == page_idx && sel.image_ids.contains(&img.id) => {
+                                Some(transformed_image_page_rect(
+                                    img,
+                                    sel.bbox,
+                                    transformed_bbox(sel.bbox, Some(inter)),
+                                ))
+                            }
+                            _ => None,
+                        };
+                        paint_image_object(
+                            &ctx,
+                            &page_painter,
+                            &mut self.image_cache,
+                            img,
+                            origin,
+                            view.zoom,
+                            override_rect,
+                        );
+                        if override_rect.is_none()
+                            && hovered_image
+                                .as_ref()
+                                .is_some_and(|(hp_idx, ho)| *hp_idx == page_idx && ho.id == img.id)
+                            && !sel_snapshot
+                                .as_ref()
+                                .is_some_and(|s| s.page_index == page_idx && s.image_ids.contains(&img.id))
+                        {
+                            let b = image_page_bbox(img);
+                            let r = egui::Rect::from_min_max(
+                                origin + b.min.to_vec2() * view.zoom,
+                                origin + b.max.to_vec2() * view.zoom,
+                            );
+                            page_painter.rect_stroke(
+                                r,
+                                egui::CornerRadius::same(2),
+                                egui::Stroke::new(
+                                    1.5,
+                                    egui::Color32::from_rgba_unmultiplied(10, 132, 255, 190),
+                                ),
+                                egui::StrokeKind::Outside,
+                            );
+                        }
+                    }
+                }
 
                 // 3. Vẽ các nét bút đã hoàn thành theo từng trang (cắt gọn trong tờ giấy của trang đó)
                 let static_key = StaticKey::new(
@@ -2917,8 +3261,10 @@ impl InkNoteApp {
                 }
 
                 // 4g. Vẽ đường khoanh Lasso & khung chọn + 4 tay cầm góc
-                if self.toolbar_state.active_tool == ActiveTool::Lasso
-                    && !self.toolbar_state.read_only
+                if matches!(
+                    self.toolbar_state.active_tool,
+                    ActiveTool::Lasso | ActiveTool::Image
+                ) && !self.toolbar_state.read_only
                 {
                     let lasso_color = self.theme.nav_bar_bg;
                     let fill_tint = egui::Color32::from_rgba_unmultiplied(
@@ -3128,6 +3474,7 @@ mod tests {
             batch_cache: HashMap::new(),
             thumb_cache: ThumbCache::default(),
             svg_cache: SvgTextureCache::default(),
+            image_cache: ImageTextureCache::default(),
             pending_latex_target: None,
             latex_dialog: LatexDialogState::default(),
             view: View::default(),
@@ -4510,6 +4857,257 @@ mod tests {
             "Text toolbar quá rộng tại 1200px: width={}",
             m.tool_pill_rect.width()
         );
+        assert!(m.tool_pill_rect.top() > m.nav_outer_rect.bottom());
+    }
+
+    #[test]
+    fn test_image_insert_move_resize_undo_redo_and_save_load() {
+        let ctx = egui::Context::default();
+        theme::setup_fonts(&ctx);
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let mut app = new_test_app(&ctx);
+        let paper = egui::Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 720.0));
+        app.paper_rect = Some(paper);
+        app.toolbar_state.active_tool = ActiveTool::Image;
+
+        let rgba = vec![120u8; 320 * 160 * 4];
+        let loaded = image_box::encode_rgba_to_png(320, 160, rgba).expect("png");
+        let orig_bytes = loaded.bytes.clone();
+        app.insert_loaded_image(loaded);
+
+        assert_eq!(app.doc.pages()[0].images.len(), 1);
+        assert!(app.lasso_state.selection.is_some());
+        {
+            let img = &app.doc.pages()[0].images[0];
+            assert_eq!(img.pixel_size, [320, 160]);
+            assert_eq!(img.bytes, orig_bytes);
+            assert!((img.size[0] / img.size[1] - 2.0).abs() < 1e-4);
+        }
+
+        // Undo xoá ảnh -> Redo khôi phục ảnh (1 bước)
+        assert!(app.doc.undo());
+        assert_eq!(app.doc.pages()[0].images.len(), 0);
+        assert!(app.doc.redo());
+        assert_eq!(app.doc.pages()[0].images.len(), 1);
+
+        // Di chuyển ảnh trực tiếp bằng Image tool (1 bước Undo)
+        let origin = app.page_origin(paper, 0);
+        let img0 = app.doc.pages()[0].images[0].clone();
+        let center_screen =
+            origin + vec2((img0.pos[0] + img0.size[0] * 0.5) as f32, (img0.pos[1] + img0.size[1] * 0.5) as f32) * app.view.zoom;
+        app.image_down(&ctx, center_screen);
+        app.lasso_move(center_screen + vec2(40.0, 25.0) * app.view.zoom);
+        app.lasso_up();
+
+        let moved = app.doc.pages()[0].images[0].clone();
+        assert!((moved.pos[0] - (img0.pos[0] + 40.0)).abs() < 1.5);
+        assert!((moved.pos[1] - (img0.pos[1] + 25.0)).abs() < 1.5);
+
+        assert!(app.doc.undo());
+        assert!((app.doc.pages()[0].images[0].pos[0] - img0.pos[0]).abs() < 1e-4);
+        assert!(app.doc.redo());
+
+        // Kéo góc BottomRight phóng to giữ nguyên tỷ lệ (proportional resize)
+        let sel = app.lasso_state.selection.as_ref().unwrap().clone();
+        let handle = origin + lasso::corner_pos(sel.bbox, ResizeCorner::BottomRight).to_vec2() * app.view.zoom;
+        let prev_w = app.doc.pages()[0].images[0].size[0];
+        app.image_down(&ctx, handle);
+        app.lasso_move(
+            handle + vec2(sel.bbox.width() * 0.4, sel.bbox.height() * 0.4) * app.view.zoom,
+        );
+        app.lasso_up();
+        let resized = &app.doc.pages()[0].images[0];
+        assert!(resized.size[0] > prev_w * 1.25);
+        assert!((resized.size[0] / resized.size[1] - 2.0).abs() < 1e-4);
+
+        // Lưu & mở lại giữ nguyên byte gốc và pixel_size
+        let temp_file = std::env::temp_dir().join("test_app_image_roundtrip.inknote");
+        app.doc.to_file().save_to_path(&temp_file).unwrap();
+        let mut app2 = new_test_app(&ctx);
+        app2.load_document_from(temp_file.clone());
+        assert_eq!(app2.doc.pages()[0].images.len(), 1);
+        assert_eq!(app2.doc.pages()[0].images[0].pixel_size, [320, 160]);
+        assert_eq!(app2.doc.pages()[0].images[0].bytes, orig_bytes);
+        let _ = std::fs::remove_file(temp_file);
+    }
+
+    #[test]
+    fn test_eraser_standard_and_stroke_never_erase_images() {
+        let ctx = egui::Context::default();
+        theme::setup_fonts(&ctx);
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let mut app = new_test_app(&ctx);
+        let paper = egui::Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 720.0));
+        app.paper_rect = Some(paper);
+
+        // Vẽ 2 nét bút chồng lên vùng chứa ảnh
+        let origin = app.page_origin(paper, 0);
+        let t0 = Instant::now();
+        app.toolbar_state.active_tool = ActiveTool::Pen;
+        app.pen_down(origin + vec2(120.0, 180.0) * app.view.zoom, 0.5, t0);
+        app.pen_down(
+            origin + vec2(320.0, 180.0) * app.view.zoom,
+            0.5,
+            t0 + std::time::Duration::from_millis(16),
+        );
+        app.pen_up(
+            origin + vec2(320.0, 180.0) * app.view.zoom,
+            0.5,
+            t0 + std::time::Duration::from_millis(32),
+        );
+
+        let t1 = t0 + std::time::Duration::from_millis(50);
+        app.pen_down(origin + vec2(120.0, 220.0) * app.view.zoom, 0.5, t1);
+        app.pen_down(
+            origin + vec2(320.0, 220.0) * app.view.zoom,
+            0.5,
+            t1 + std::time::Duration::from_millis(16),
+        );
+        app.pen_up(
+            origin + vec2(320.0, 220.0) * app.view.zoom,
+            0.5,
+            t1 + std::time::Duration::from_millis(32),
+        );
+        assert_eq!(app.doc.pages()[0].strokes.len(), 2);
+
+        // Chèn ảnh phủ đè đúng vùng nét bút (dưới nét bút)
+        let loaded = image_box::encode_rgba_to_png(240, 140, vec![200u8; 240 * 140 * 4]).unwrap();
+        let id = app.doc.alloc_id();
+        app.doc.execute(Command::AddImage {
+            page_index: 0,
+            obj: ImageObject {
+                id,
+                pos: [140.0, 140.0],
+                size: [240.0, 140.0],
+                pixel_size: loaded.pixel_size,
+                bytes: loaded.bytes,
+            },
+        });
+        assert_eq!(app.doc.pages()[0].images.len(), 1);
+
+        // Tẩy thường (Standard) quét qua nét 1 + ảnh -> cắt đứt nét 1, ảnh còn nguyên
+        app.toolbar_state.active_tool = ActiveTool::Eraser;
+        app.toolbar_state.eraser_mode = toolbar::EraserMode::Standard;
+        app.eraser_down(origin + vec2(200.0, 180.0) * app.view.zoom, 0);
+        app.eraser_move(origin + vec2(230.0, 180.0) * app.view.zoom);
+        app.eraser_up(origin + vec2(230.0, 180.0) * app.view.zoom);
+        let gap_aabb = parry2d_f64::bounding_volume::Aabb::new(
+            parry2d_f64::math::Vector2::new(212.0, 178.0),
+            parry2d_f64::math::Vector2::new(218.0, 182.0),
+        );
+        assert!(
+            !app.doc.pages()[0]
+                .strokes
+                .iter()
+                .any(|s| !s.path.hittest(&gap_aabb, 1.0).is_empty()),
+            "Standard eraser must carve gap in stroke 1"
+        );
+        assert_eq!(app.doc.pages()[0].images.len(), 1);
+
+        // Tẩy nét (Stroke) quét qua nét 2 + ảnh -> xoá sạch nét 2, ảnh giữ nguyên 100%
+        app.toolbar_state.eraser_mode = toolbar::EraserMode::Stroke;
+        app.eraser_down(origin + vec2(200.0, 220.0) * app.view.zoom, 0);
+        app.eraser_move(origin + vec2(230.0, 220.0) * app.view.zoom);
+        app.eraser_up(origin + vec2(230.0, 220.0) * app.view.zoom);
+        let stroke2_aabb = parry2d_f64::bounding_volume::Aabb::new(
+            parry2d_f64::math::Vector2::new(125.0, 216.0),
+            parry2d_f64::math::Vector2::new(315.0, 224.0),
+        );
+        assert!(
+            !app.doc.pages()[0]
+                .strokes
+                .iter()
+                .any(|s| !s.path.hittest(&stroke2_aabb, 2.0).is_empty()),
+            "Stroke eraser must remove entire stroke 2"
+        );
+        assert_eq!(app.doc.pages()[0].images.len(), 1);
+    }
+
+    #[test]
+    fn test_lasso_select_filter_images_and_delete_undo() {
+        let ctx = egui::Context::default();
+        theme::setup_fonts(&ctx);
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let mut app = new_test_app(&ctx);
+        let paper = egui::Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 720.0));
+        app.paper_rect = Some(paper);
+
+        let loaded = image_box::encode_rgba_to_png(160, 120, vec![180u8; 160 * 120 * 4]).unwrap();
+        let id = app.doc.alloc_id();
+        app.doc.execute(Command::AddImage {
+            page_index: 0,
+            obj: ImageObject {
+                id,
+                pos: [120.0, 120.0],
+                size: [160.0, 120.0],
+                pixel_size: loaded.pixel_size,
+                bytes: loaded.bytes,
+            },
+        });
+
+        let origin = app.page_origin(paper, 0);
+        app.toolbar_state.active_tool = ActiveTool::Lasso;
+        app.toolbar_state.lasso_mode = toolbar::LassoMode::Rectangle;
+
+        // Tắt công tắc Images -> khoanh qua không chọn ảnh
+        app.toolbar_state.lasso_filter.images = false;
+        app.lasso_down(&ctx, origin + vec2(100.0, 100.0) * app.view.zoom);
+        app.lasso_move(origin + vec2(320.0, 280.0) * app.view.zoom);
+        app.lasso_up();
+        assert!(app.lasso_state.selection.is_none());
+
+        // Bật lại công tắc Images -> chọn được ảnh, xoá 1 bước & Undo khôi phục
+        app.toolbar_state.lasso_filter.images = true;
+        app.lasso_down(&ctx, origin + vec2(100.0, 100.0) * app.view.zoom);
+        app.lasso_move(origin + vec2(320.0, 280.0) * app.view.zoom);
+        app.lasso_up();
+        let sel = app.lasso_state.selection.as_ref().expect("image selected");
+        assert_eq!(sel.image_ids, vec![id]);
+
+        app.delete_lasso_selection();
+        assert_eq!(app.doc.pages()[0].images.len(), 0);
+        assert!(app.doc.undo());
+        assert_eq!(app.doc.pages()[0].images.len(), 1);
+    }
+
+    #[test]
+    fn test_image_toolbar_layout_fits_1200x800() {
+        let ctx = egui::Context::default();
+        theme::setup_fonts(&ctx);
+        let mut app = new_test_app(&ctx);
+        app.toolbar_state.active_tool = ActiveTool::Image;
+        app.toolbar_state.has_lasso_selection = true;
+        let file_status = autosave::FileStatusInfo {
+            file_name: "Untitled",
+            is_saved: true,
+            has_path: false,
+            is_draft_saved: false,
+            autosaved_notice: None,
+            has_error: false,
+        };
+        let mut raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 800.0))),
+            ..Default::default()
+        };
+        for _ in 0..3 {
+            let mut settings = app.doc.paper_settings().clone();
+            let _ = ctx.run_ui(raw.take(), |ui| {
+                let _ = show_toolbars(
+                    ui,
+                    &app.theme,
+                    &mut app.toolbar_state,
+                    &mut app.brush_config,
+                    &mut settings,
+                    &file_status,
+                    (1, 1),
+                    "test",
+                );
+            });
+        }
+        let m = app.toolbar_state.last_metrics;
+        assert!(m.tool_pill_rect.is_positive());
+        assert!((m.tool_pill_rect.center().x - 600.0).abs() <= 2.0);
+        assert!(m.tool_pill_rect.width() <= 1160.0);
         assert!(m.tool_pill_rect.top() > m.nav_outer_rect.bottom());
     }
 }

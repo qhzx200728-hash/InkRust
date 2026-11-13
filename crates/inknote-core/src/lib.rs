@@ -279,6 +279,33 @@ pub struct TextObject {
     pub color: [u8; 4],
 }
 
+mod serde_bytes_base64 {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        STANDARD
+            .decode(s.as_bytes())
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+/// Đối tượng ảnh chèn trên trang: luôn lưu byte gốc (PNG/JPEG/BMP/WebP) để giữ sắc nét khi zoom.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ImageObject {
+    pub id: u64,
+    pub pos: [f64; 2],
+    pub size: [f64; 2],
+    pub pixel_size: [u32; 2],
+    #[serde(with = "serde_bytes_base64")]
+    pub bytes: Vec<u8>,
+}
+
 /// Các loại đối tượng trên một trang (khớp docs/02-architecture.md mục 3).
 /// Chỉ BrushStroke mới bị Eraser xoá; các loại khác không bị tẩy xoá lướt qua.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -288,8 +315,7 @@ pub enum PageObject {
     Latex(LatexObject),
     Shape(ShapeObject),
     Text(TextObject),
-    // Dự phòng mở rộng cho các bước tiếp theo (P2):
-    // Image(ImageObject),
+    Image(ImageObject),
 }
 
 /// Một trang trong tài liệu.
@@ -392,30 +418,34 @@ pub enum Command {
         page_index: usize,
         new_obj: TextObject,
     },
+    /// Chèn một ảnh vào trang tại vị trí `page_index` (1 bước undo).
+    AddImage { page_index: usize, obj: ImageObject },
     /// Áp dụng kết quả tẩy nét bút trên một trang (chỉ tác động lên `strokes`, 1 bước undo).
     EraseStrokes {
         page_index: usize,
         removed: Vec<(usize, Stroke)>,
         added: Vec<Stroke>,
     },
-    /// Di chuyển và/hoặc đổi kích thước vùng chọn (nét bút + LaTeX + hình học + văn bản, 1 bước undo).
+    /// Di chuyển và/hoặc đổi kích thước vùng chọn (nét bút + LaTeX + hình học + văn bản + ảnh, 1 bước undo).
     TransformSelection {
         page_index: usize,
         stroke_ids: Vec<u64>,
         latex_ids: Vec<u64>,
         shape_ids: Vec<u64>,
         text_ids: Vec<u64>,
+        image_ids: Vec<u64>,
         anchor: [f64; 2],
         scale: [f64; 2],
         delta: [f64; 2],
     },
-    /// Xoá toàn bộ đối tượng đang chọn (nét bút + LaTeX + hình học + văn bản, 1 bước undo).
+    /// Xoá toàn bộ đối tượng đang chọn (nét bút + LaTeX + hình học + văn bản + ảnh, 1 bước undo).
     DeleteSelection {
         page_index: usize,
         stroke_ids: Vec<u64>,
         latex_ids: Vec<u64>,
         shape_ids: Vec<u64>,
         text_ids: Vec<u64>,
+        image_ids: Vec<u64>,
     },
 }
 
@@ -427,6 +457,7 @@ pub struct DocumentPage {
     pub latex_objects: Vec<LatexObject>,
     pub shapes: Vec<ShapeObject>,
     pub text_objects: Vec<TextObject>,
+    pub images: Vec<ImageObject>,
 }
 
 /// Lệnh đã thực thi, kèm dữ liệu cần để hoàn tác.
@@ -485,6 +516,10 @@ enum Done {
         old_obj: TextObject,
         new_obj: TextObject,
     },
+    AddImage {
+        page_index: usize,
+        obj: ImageObject,
+    },
     EraseStrokes {
         page_index: usize,
         removed: Vec<(usize, Stroke)>,
@@ -500,6 +535,8 @@ enum Done {
         new_shapes: Vec<(usize, ShapeObject)>,
         old_texts: Vec<(usize, TextObject)>,
         new_texts: Vec<(usize, TextObject)>,
+        old_images: Vec<(usize, ImageObject)>,
+        new_images: Vec<(usize, ImageObject)>,
     },
     DeleteSelection {
         page_index: usize,
@@ -507,6 +544,7 @@ enum Done {
         removed_latex: Vec<(usize, LatexObject)>,
         removed_shapes: Vec<(usize, ShapeObject)>,
         removed_texts: Vec<(usize, TextObject)>,
+        removed_images: Vec<(usize, ImageObject)>,
     },
 }
 
@@ -595,6 +633,21 @@ pub fn transform_text(obj: &mut TextObject, anchor: [f64; 2], scale: [f64; 2], d
     }
 }
 
+pub fn transform_image(obj: &mut ImageObject, anchor: [f64; 2], scale: [f64; 2], delta: [f64; 2]) {
+    let p0 = transform_xy(obj.pos, anchor, scale, delta);
+    let p1 = transform_xy(
+        [obj.pos[0] + obj.size[0], obj.pos[1] + obj.size[1]],
+        anchor,
+        scale,
+        delta,
+    );
+    obj.pos = [p0[0].min(p1[0]), p0[1].min(p1[1])];
+    obj.size = [
+        (p1[0] - p0[0]).abs().max(24.0),
+        (p1[1] - p0[1]).abs().max(24.0),
+    ];
+}
+
 /// Tài liệu nhiều trang + lịch sử Undo/Redo + trạng thái lưu file.
 pub struct Document {
     metadata: DocumentMetadata,
@@ -620,6 +673,7 @@ impl Default for Document {
                 latex_objects: Vec::new(),
                 shapes: Vec::new(),
                 text_objects: Vec::new(),
+                images: Vec::new(),
             }],
             active_page_idx: 0,
             undo_stack: Vec::new(),
@@ -795,6 +849,7 @@ impl Document {
                     latex_objects: Vec::new(),
                     shapes: Vec::new(),
                     text_objects: Vec::new(),
+                    images: Vec::new(),
                 };
                 let prev_active = self.active_page_idx;
                 self.pages.insert(insert_idx, page.clone());
@@ -814,6 +869,7 @@ impl Document {
                     latex_objects: Vec::new(),
                     shapes: Vec::new(),
                     text_objects: Vec::new(),
+                    images: Vec::new(),
                 };
                 let prev_active = self.active_page_idx;
                 self.pages.insert(insert_idx, page.clone());
@@ -861,12 +917,21 @@ impl Document {
                         txt
                     })
                     .collect();
+                let src_images = self.pages[src].images.clone();
+                let cloned_images: Vec<ImageObject> = src_images
+                    .into_iter()
+                    .map(|mut img| {
+                        img.id = self.alloc_id();
+                        img
+                    })
+                    .collect();
                 let page = DocumentPage {
                     id: page_id,
                     strokes: cloned_strokes,
                     latex_objects: cloned_latex,
                     shapes: cloned_shapes,
                     text_objects: cloned_texts,
+                    images: cloned_images,
                 };
                 let prev_active = self.active_page_idx;
                 self.pages.insert(insert_idx, page.clone());
@@ -997,6 +1062,15 @@ impl Document {
                     new_obj,
                 }
             }
+            Command::AddImage { page_index, obj } => {
+                let target_idx = page_index.min(self.pages.len().saturating_sub(1));
+                self.pages[target_idx].images.push(obj.clone());
+                self.active_page_idx = target_idx;
+                Done::AddImage {
+                    page_index: target_idx,
+                    obj,
+                }
+            }
             Command::EraseStrokes {
                 page_index,
                 mut removed,
@@ -1027,6 +1101,7 @@ impl Document {
                 latex_ids,
                 shape_ids,
                 text_ids,
+                image_ids,
                 anchor,
                 scale,
                 delta,
@@ -1036,6 +1111,7 @@ impl Document {
                 let l_set: HashSet<u64> = latex_ids.into_iter().collect();
                 let sh_set: HashSet<u64> = shape_ids.into_iter().collect();
                 let txt_set: HashSet<u64> = text_ids.into_iter().collect();
+                let img_set: HashSet<u64> = image_ids.into_iter().collect();
                 let mut old_strokes = Vec::new();
                 let mut new_strokes = Vec::new();
                 let mut old_latex = Vec::new();
@@ -1044,6 +1120,8 @@ impl Document {
                 let mut new_shapes = Vec::new();
                 let mut old_texts = Vec::new();
                 let mut new_texts = Vec::new();
+                let mut old_images = Vec::new();
+                let mut new_images = Vec::new();
 
                 let page = &mut self.pages[target_idx];
                 for (idx, s) in page.strokes.iter_mut().enumerate() {
@@ -1074,10 +1152,18 @@ impl Document {
                         new_texts.push((idx, txt.clone()));
                     }
                 }
+                for (idx, img) in page.images.iter_mut().enumerate() {
+                    if img_set.contains(&img.id) {
+                        old_images.push((idx, img.clone()));
+                        transform_image(img, anchor, scale, delta);
+                        new_images.push((idx, img.clone()));
+                    }
+                }
                 if old_strokes.is_empty()
                     && old_latex.is_empty()
                     && old_shapes.is_empty()
                     && old_texts.is_empty()
+                    && old_images.is_empty()
                 {
                     return;
                 }
@@ -1092,6 +1178,8 @@ impl Document {
                     new_shapes,
                     old_texts,
                     new_texts,
+                    old_images,
+                    new_images,
                 }
             }
             Command::DeleteSelection {
@@ -1100,12 +1188,14 @@ impl Document {
                 latex_ids,
                 shape_ids,
                 text_ids,
+                image_ids,
             } => {
                 let target_idx = page_index.min(self.pages.len().saturating_sub(1));
                 let s_set: HashSet<u64> = stroke_ids.into_iter().collect();
                 let l_set: HashSet<u64> = latex_ids.into_iter().collect();
                 let sh_set: HashSet<u64> = shape_ids.into_iter().collect();
                 let txt_set: HashSet<u64> = text_ids.into_iter().collect();
+                let img_set: HashSet<u64> = image_ids.into_iter().collect();
                 let page = &mut self.pages[target_idx];
 
                 let removed_strokes: Vec<(usize, Stroke)> = page
@@ -1136,11 +1226,19 @@ impl Document {
                     .filter(|(_, txt)| txt_set.contains(&txt.id))
                     .map(|(i, txt)| (i, txt.clone()))
                     .collect();
+                let removed_images: Vec<(usize, ImageObject)> = page
+                    .images
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, img)| img_set.contains(&img.id))
+                    .map(|(i, img)| (i, img.clone()))
+                    .collect();
 
                 if removed_strokes.is_empty()
                     && removed_latex.is_empty()
                     && removed_shapes.is_empty()
                     && removed_texts.is_empty()
+                    && removed_images.is_empty()
                 {
                     return;
                 }
@@ -1156,6 +1254,9 @@ impl Document {
                 for &(idx, _) in removed_texts.iter().rev() {
                     page.text_objects.remove(idx);
                 }
+                for &(idx, _) in removed_images.iter().rev() {
+                    page.images.remove(idx);
+                }
                 self.active_page_idx = target_idx;
                 Done::DeleteSelection {
                     page_index: target_idx,
@@ -1163,6 +1264,7 @@ impl Document {
                     removed_latex,
                     removed_shapes,
                     removed_texts,
+                    removed_images,
                 }
             }
         };
@@ -1246,6 +1348,10 @@ impl Document {
                 }
                 self.active_page_idx = *page_index;
             }
+            Done::AddImage { page_index, .. } => {
+                self.pages[*page_index].images.pop();
+                self.active_page_idx = *page_index;
+            }
             Done::UpdateLatex {
                 page_index,
                 obj_id,
@@ -1285,6 +1391,7 @@ impl Document {
                 old_latex,
                 old_shapes,
                 old_texts,
+                old_images,
                 ..
             } => {
                 let page = &mut self.pages[*page_index];
@@ -1308,6 +1415,11 @@ impl Document {
                         page.text_objects[*idx] = txt.clone();
                     }
                 }
+                for (idx, img) in old_images {
+                    if *idx < page.images.len() {
+                        page.images[*idx] = img.clone();
+                    }
+                }
                 self.active_page_idx = *page_index;
             }
             Done::DeleteSelection {
@@ -1316,6 +1428,7 @@ impl Document {
                 removed_latex,
                 removed_shapes,
                 removed_texts,
+                removed_images,
             } => {
                 let page = &mut self.pages[*page_index];
                 for (idx, s) in removed_strokes {
@@ -1333,6 +1446,10 @@ impl Document {
                 for (idx, txt) in removed_texts {
                     let at = (*idx).min(page.text_objects.len());
                     page.text_objects.insert(at, txt.clone());
+                }
+                for (idx, img) in removed_images {
+                    let at = (*idx).min(page.images.len());
+                    page.images.insert(at, img.clone());
                 }
                 self.active_page_idx = *page_index;
             }
@@ -1404,6 +1521,10 @@ impl Document {
                 }
                 self.active_page_idx = *page_index;
             }
+            Done::AddImage { page_index, obj } => {
+                self.pages[*page_index].images.push(obj.clone());
+                self.active_page_idx = *page_index;
+            }
             Done::UpdateLatex {
                 page_index,
                 obj_id,
@@ -1443,6 +1564,7 @@ impl Document {
                 new_latex,
                 new_shapes,
                 new_texts,
+                new_images,
                 ..
             } => {
                 let page = &mut self.pages[*page_index];
@@ -1466,6 +1588,11 @@ impl Document {
                         page.text_objects[*idx] = txt.clone();
                     }
                 }
+                for (idx, img) in new_images {
+                    if *idx < page.images.len() {
+                        page.images[*idx] = img.clone();
+                    }
+                }
                 self.active_page_idx = *page_index;
             }
             Done::DeleteSelection {
@@ -1474,6 +1601,7 @@ impl Document {
                 removed_latex,
                 removed_shapes,
                 removed_texts,
+                removed_images,
             } => {
                 let page = &mut self.pages[*page_index];
                 for &(idx, _) in removed_strokes.iter().rev() {
@@ -1494,6 +1622,11 @@ impl Document {
                 for &(idx, _) in removed_texts.iter().rev() {
                     if idx < page.text_objects.len() {
                         page.text_objects.remove(idx);
+                    }
+                }
+                for &(idx, _) in removed_images.iter().rev() {
+                    if idx < page.images.len() {
+                        page.images.remove(idx);
                     }
                 }
                 self.active_page_idx = *page_index;
@@ -1519,6 +1652,7 @@ impl Document {
                 objects.extend(p.latex_objects.iter().cloned().map(PageObject::Latex));
                 objects.extend(p.shapes.iter().cloned().map(PageObject::Shape));
                 objects.extend(p.text_objects.iter().cloned().map(PageObject::Text));
+                objects.extend(p.images.iter().cloned().map(PageObject::Image));
                 Page { id: p.id, objects }
             })
             .collect();
@@ -1544,6 +1678,7 @@ impl Document {
             let mut latex_objects = Vec::new();
             let mut shapes = Vec::new();
             let mut text_objects = Vec::new();
+            let mut images = Vec::new();
             for obj in page.objects {
                 match obj {
                     PageObject::BrushStroke(s) => {
@@ -1570,6 +1705,12 @@ impl Document {
                         }
                         text_objects.push(txt);
                     }
+                    PageObject::Image(img) => {
+                        if img.id > max_id {
+                            max_id = img.id;
+                        }
+                        images.push(img);
+                    }
                 }
             }
             pages.push(DocumentPage {
@@ -1578,6 +1719,7 @@ impl Document {
                 latex_objects,
                 shapes,
                 text_objects,
+                images,
             });
         }
         if pages.is_empty() {
@@ -1588,6 +1730,7 @@ impl Document {
                 latex_objects: Vec::new(),
                 shapes: Vec::new(),
                 text_objects: Vec::new(),
+                images: Vec::new(),
             });
         }
         Self {
@@ -2111,6 +2254,7 @@ mod tests {
             latex_ids: vec![l_id],
             shape_ids: vec![],
             text_ids: vec![],
+            image_ids: vec![],
             anchor: [0.0, 0.0],
             scale: [2.0, 2.0],
             delta: [50.0, 30.0],
@@ -2134,6 +2278,7 @@ mod tests {
             latex_ids: vec![l_id],
             shape_ids: vec![],
             text_ids: vec![],
+            image_ids: vec![],
         });
         assert_eq!(d.page_strokes(0).len(), 0);
         assert_eq!(d.pages()[0].latex_objects.len(), 0);
@@ -2175,6 +2320,7 @@ mod tests {
             latex_ids: vec![],
             shape_ids: vec![sh_id],
             text_ids: vec![],
+            image_ids: vec![],
             anchor: [0.0, 0.0],
             scale: [1.5, 1.0],
             delta: [10.0, 20.0],
@@ -2215,6 +2361,7 @@ mod tests {
             latex_ids: vec![],
             shape_ids: vec![sh_id],
             text_ids: vec![],
+            image_ids: vec![],
         });
         assert!(d.pages()[0].shapes.is_empty());
         assert!(d.undo());
@@ -2276,6 +2423,7 @@ mod tests {
             latex_ids: vec![],
             shape_ids: vec![],
             text_ids: vec![txt_id],
+            image_ids: vec![],
             anchor: [0.0, 0.0],
             scale: [1.5, 1.25],
             delta: [10.0, 20.0],
@@ -2317,9 +2465,81 @@ mod tests {
             latex_ids: vec![],
             shape_ids: vec![],
             text_ids: vec![txt_id],
+            image_ids: vec![],
         });
         assert!(d.pages()[0].text_objects.is_empty());
         assert!(d.undo());
         assert_eq!(d.pages()[0].text_objects.len(), 1);
+    }
+
+    #[test]
+    fn image_add_undo_redo_transform_delete_and_file_roundtrip() {
+        let mut d = Document::new();
+        let img_id = d.alloc_id();
+        let raw_bytes = vec![0x89, b'P', b'N', b'G', 1, 2, 3, 4, 255];
+        let img = ImageObject {
+            id: img_id,
+            pos: [60.0, 90.0],
+            size: [200.0, 100.0],
+            pixel_size: [800, 400],
+            bytes: raw_bytes.clone(),
+        };
+        d.execute(Command::AddImage {
+            page_index: 0,
+            obj: img.clone(),
+        });
+        assert_eq!(d.pages()[0].images, vec![img.clone()]);
+        assert!(d.undo());
+        assert!(d.pages()[0].images.is_empty());
+        assert!(d.redo());
+        assert_eq!(d.pages()[0].images, vec![img.clone()]);
+
+        // Di chuyển & phóng to ảnh qua TransformSelection = 1 bước Undo
+        d.execute(Command::TransformSelection {
+            page_index: 0,
+            stroke_ids: vec![],
+            latex_ids: vec![],
+            shape_ids: vec![],
+            text_ids: vec![],
+            image_ids: vec![img_id],
+            anchor: [60.0, 90.0],
+            scale: [1.5, 1.5],
+            delta: [20.0, 10.0],
+        });
+        assert_eq!(d.pages()[0].images[0].pos, [80.0, 100.0]);
+        assert_eq!(d.pages()[0].images[0].size, [300.0, 150.0]);
+        assert_eq!(d.pages()[0].images[0].bytes, raw_bytes);
+        assert!(d.undo());
+        assert_eq!(d.pages()[0].images[0], img);
+        assert!(d.redo());
+
+        // Lưu & mở lại .inknote bảo toàn chính xác từng byte ảnh gốc
+        let file = d.to_file();
+        let json = serde_json::to_string(&file).unwrap();
+        let parsed: DocumentFile = serde_json::from_str(&json).unwrap();
+        let loaded = Document::from_file(parsed);
+        assert_eq!(loaded.pages()[0].images.len(), 1);
+        assert_eq!(loaded.pages()[0].images[0].bytes, raw_bytes);
+        assert_eq!(loaded.pages()[0].images[0].pixel_size, [800, 400]);
+
+        // Tẩy & Xoá nhanh trang (ClearPage) không bao giờ chạm tới ảnh
+        let s = stroke(&mut d);
+        d.execute(Command::AddStroke(s));
+        d.execute(Command::ClearPage);
+        assert!(d.pages()[0].strokes.is_empty());
+        assert_eq!(d.pages()[0].images.len(), 1);
+
+        // DeleteSelection xoá ảnh = 1 bước Undo
+        d.execute(Command::DeleteSelection {
+            page_index: 0,
+            stroke_ids: vec![],
+            latex_ids: vec![],
+            shape_ids: vec![],
+            text_ids: vec![],
+            image_ids: vec![img_id],
+        });
+        assert!(d.pages()[0].images.is_empty());
+        assert!(d.undo());
+        assert_eq!(d.pages()[0].images.len(), 1);
     }
 }

@@ -2019,10 +2019,13 @@ checksum = "85ab80394333c02fe689eaf900ab500fbd0c2213da414687ebf995a65d5a6104"
 dependencies = [
  "bytemuck",
  "byteorder-lite",
+ "image-webp",
  "moxcms",
  "num-traits",
  "png 0.18.1",
  "tiff",
+ "zune-core 0.5.3",
+ "zune-jpeg 0.5.15",
 ]
 
 [[package]]
@@ -2064,7 +2067,9 @@ dependencies = [
 name = "inknote-app"
 version = "0.1.0"
 dependencies = [
+ "arboard",
  "eframe",
+ "image",
  "inknote-core",
  "inknote-latex",
  "inknote-pen",
@@ -2080,6 +2085,7 @@ dependencies = [
 name = "inknote-core"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "inknote-pen",
  "parry2d-f64",
  "serde",

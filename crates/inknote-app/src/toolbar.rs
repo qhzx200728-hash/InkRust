@@ -64,6 +64,8 @@ pub struct ToolbarActions {
     pub delete_selection_clicked: bool,
     pub text_style_changed: bool,
     pub text_list_mode_changed: bool,
+    pub insert_image_file_clicked: bool,
+    pub paste_image_clipboard_clicked: bool,
 }
 
 /// Thông tin hình học thực tế của các khu vực trên thanh công cụ (dùng để kiểm chứng alignment)
@@ -146,6 +148,7 @@ pub struct ToolbarState {
     pub text_list_mode: TextListMode,
     pub text_color: [u8; 4],
     pub last_metrics: ToolbarLayoutMetrics,
+    pub image_notice: Option<(String, std::time::Instant, bool)>,
 }
 
 impl Default for ToolbarState {
@@ -173,6 +176,7 @@ impl Default for ToolbarState {
             text_list_mode: TextListMode::None,
             text_color: [20, 22, 25, 255],
             last_metrics: ToolbarLayoutMetrics::default(),
+            image_notice: None,
         }
     }
 }
@@ -575,6 +579,8 @@ pub fn show_toolbars(
         delete_selection_clicked: false,
         text_style_changed: false,
         text_list_mode_changed: false,
+        insert_image_file_clicked: false,
+        paste_image_clipboard_clicked: false,
     };
 
     // =========================================================================
@@ -1073,6 +1079,9 @@ pub fn show_toolbars(
                             }
                             ActiveTool::Text => {
                                 show_text_contextual_options(ui, theme, state, &mut actions);
+                            }
+                            ActiveTool::Image => {
+                                show_image_contextual_options(ui, theme, state, &mut actions);
                             }
                             other => {
                                 ui.label(
@@ -2242,4 +2251,90 @@ fn show_text_contextual_options(
         },
         |_| {},
     );
+}
+
+fn show_image_contextual_options(
+    ui: &mut Ui,
+    theme: &Theme,
+    state: &mut ToolbarState,
+    actions: &mut ToolbarActions,
+) {
+    if eraser_mode_chip(
+        ui,
+        theme,
+        "Open File...",
+        false,
+        "Insert image from disk (PNG, JPEG, BMP, WebP)",
+    )
+    .clicked()
+    {
+        actions.insert_image_file_clicked = true;
+    }
+
+    draw_vertical_divider(ui, theme.tool_row_height, theme.tool_bar_pill_stroke);
+
+    if eraser_mode_chip(
+        ui,
+        theme,
+        "Paste Image",
+        false,
+        "Paste image from clipboard (Ctrl+V)",
+    )
+    .clicked()
+    {
+        actions.paste_image_clipboard_clicked = true;
+    }
+
+    if state.has_lasso_selection {
+        draw_vertical_divider(ui, theme.tool_row_height, theme.tool_bar_pill_stroke);
+        let row_h = theme.tool_row_height;
+        let del_text = "Delete";
+        let font_id = egui::FontId::proportional(theme.font_size_body);
+        let del_color = Color32::from_rgb(248, 113, 113);
+        let galley = ui
+            .painter()
+            .layout_no_wrap(del_text.to_string(), font_id, del_color);
+        let desired = vec2((galley.size().x + 20.0).max(58.0), row_h);
+        let (rect, resp) = ui.allocate_exact_size(desired, Sense::click());
+        if ui.is_rect_visible(rect) {
+            if resp.hovered() {
+                ui.painter().rect_filled(
+                    rect,
+                    CornerRadius::same(theme.tool_item_rounding),
+                    Color32::from_rgba_unmultiplied(239, 68, 68, 45),
+                );
+            }
+            let text_pos = pos2(
+                rect.center().x - galley.size().x * 0.5,
+                rect.center().y - galley.size().y * 0.5,
+            );
+            ui.painter().galley(text_pos, galley, del_color);
+        }
+        if resp.on_hover_text("Delete selected image (Del)").clicked() {
+            actions.delete_selection_clicked = true;
+        }
+    }
+
+    if let Some((msg, at, is_error)) = state.image_notice.clone() {
+        let elapsed = at.elapsed().as_secs_f32();
+        if elapsed >= 3.0 {
+            state.image_notice = None;
+        } else {
+            draw_vertical_divider(ui, theme.tool_row_height, theme.tool_bar_pill_stroke);
+            let color = if is_error {
+                Color32::from_rgb(248, 113, 113)
+            } else {
+                Color32::from_rgb(134, 239, 172)
+            };
+            ui.label(
+                egui::RichText::new(msg)
+                    .size(theme.font_size_small)
+                    .color(color),
+            );
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs_f32(
+                    (3.0 - elapsed).max(0.05),
+                ));
+        }
+    }
 }

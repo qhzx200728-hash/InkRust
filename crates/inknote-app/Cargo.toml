@@ -15,3 +15,5 @@ inknote-core = { path = "../inknote-core" }
 inknote-latex = { path = "../inknote-latex" }
 rfd = "0.15"
 serde_json = "1.0"
+arboard = "3.7"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "webp"] }
