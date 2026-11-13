@@ -16,14 +16,14 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use inknote_core::{CanvasMode, Command, Document, DocumentFile, PaperSettings, Stroke};
 use inknote_pen::{
-    Constraints, PenEvent, PenPath, Style,
     brushconfig::BrushConfig,
     builders::{
-        PenPathBuilderType, PenPathCurvedBuilder, PenPathModeledBuilder, PenPathSimpleBuilder,
         buildable::{Buildable, BuilderCreator, BuilderProgress},
+        PenPathBuilderType, PenPathCurvedBuilder, PenPathModeledBuilder, PenPathSimpleBuilder,
     },
     penpath::{Element, Segment},
     style::Composer,
+    Constraints, PenEvent, PenPath, Style,
 };
 use inknote_render::{CairoRenderContext, DrawBatch};
 use parry2d_f64::math::Vector2;
@@ -32,9 +32,12 @@ use crate::{
     autosave::AutoSaveState,
     icons::{draw_paper, paper_sheet_rect},
     theme::Theme,
-    toolbar::{ActiveTool, ToolbarState, show_toolbars},
+    toolbar::{show_toolbars, ActiveTool, ToolbarState},
     view::View,
 };
+
+const PAGE_GAP: f32 = 28.0;
+const PULL_TO_ADD_THRESHOLD: f32 = 150.0;
 
 /// Lưới tam giác của 1 nét (toạ độ TRANG) + hộp bao để bỏ qua nét nằm ngoài màn hình.
 struct CachedStroke {
@@ -64,7 +67,7 @@ struct ActiveStroke {
     committed_segs: usize,
 }
 
-/// Khoá bộ nhớ đệm lưới tĩnh: (revision trang, zoom, pan, vùng giấy).
+/// Khoá bộ nhớ đệm lưới tĩnh: (revision trang, zoom, pan, vùng giấy, số trang, chế độ).
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct StaticKey {
     rev: u64,
@@ -75,10 +78,19 @@ struct StaticKey {
     paper_min_y: u32,
     paper_max_x: u32,
     paper_max_y: u32,
+    page_count: usize,
+    mode_tag: u8,
 }
 
 impl StaticKey {
-    fn new(rev: u64, zoom: f32, pan: egui::Vec2, paper: egui::Rect) -> Self {
+    fn new(
+        rev: u64,
+        zoom: f32,
+        pan: egui::Vec2,
+        paper: egui::Rect,
+        page_count: usize,
+        mode: CanvasMode,
+    ) -> Self {
         Self {
             rev,
             zoom_bits: zoom.to_bits(),
@@ -88,6 +100,11 @@ impl StaticKey {
             paper_min_y: paper.min.y.to_bits(),
             paper_max_x: paper.max.x.to_bits(),
             paper_max_y: paper.max.y.to_bits(),
+            page_count,
+            mode_tag: match mode {
+                CanvasMode::Paper => 0,
+                CanvasMode::Whiteboard => 1,
+            },
         }
     }
 }
@@ -147,8 +164,14 @@ struct InkNoteApp {
     fps: f32,
     last_frame: Instant,
     active: Option<ActiveStroke>,
-    static_cache: Option<(StaticKey, std::sync::Arc<egui::epaint::Mesh>)>,
+    drawing_page_index: Option<usize>,
+    static_cache: Option<(StaticKey, Vec<(usize, std::sync::Arc<egui::epaint::Mesh>)>)>,
     render_cx: CairoRenderContext,
+
+    // Kéo quá đáy trang cuối để tự thêm trang mới
+    pull_overscroll: f32,
+    last_pull_at: Instant,
+    pull_cooldown_until: Instant,
 
     // Quản lý thời gian sự kiện cho ink-stroke-modeler-rs
     base_instant: Instant,
@@ -190,8 +213,12 @@ impl InkNoteApp {
             fps: 0.0,
             last_frame: Instant::now(),
             active: None,
+            drawing_page_index: None,
             static_cache: None,
             render_cx: CairoRenderContext::new(),
+            pull_overscroll: 0.0,
+            last_pull_at: Instant::now(),
+            pull_cooldown_until: Instant::now(),
             base_instant: Instant::now(),
             prev_frame_t: 0.0,
             last_event_secs: 0.0,
@@ -225,42 +252,178 @@ impl InkNoteApp {
         self.base_instant + Duration::from_secs_f64(s)
     }
 
-    fn can_draw_at(&self, ctx: &egui::Context, pos: egui::Pos2) -> bool {
+    fn page_stride(settings: &PaperSettings) -> f32 {
+        settings.page_height + PAGE_GAP
+    }
+
+    fn page_origin(&self, workspace: egui::Rect, page_index: usize) -> egui::Pos2 {
+        let doc_origin = self.view.origin(workspace);
+        let y_offset =
+            page_index as f32 * Self::page_stride(self.doc.paper_settings()) * self.view.zoom;
+        doc_origin + egui::vec2(0.0, y_offset)
+    }
+
+    fn page_screen_rect(&self, workspace: egui::Rect, page_index: usize) -> egui::Rect {
+        let origin = self.page_origin(workspace, page_index);
+        let settings = self.doc.paper_settings();
+        match settings.mode {
+            CanvasMode::Paper => paper_sheet_rect(origin, settings, self.view.zoom),
+            CanvasMode::Whiteboard => {
+                if self.doc.page_count() <= 1 {
+                    workspace
+                } else {
+                    egui::Rect::from_min_max(
+                        egui::pos2(workspace.left(), origin.y),
+                        egui::pos2(
+                            workspace.right(),
+                            origin.y + settings.page_height * self.view.zoom,
+                        ),
+                    )
+                }
+            }
+        }
+    }
+
+    /// Tìm trang hợp lệ chứa con trỏ `pos` để bắt đầu nét vẽ.
+    fn drawable_page_at(&self, ctx: &egui::Context, pos: egui::Pos2) -> Option<usize> {
         if self.toolbar_state.read_only || self.toolbar_state.active_tool != ActiveTool::Pen {
-            return false;
+            return None;
         }
         if egui::Popup::is_any_open(ctx) || self.confirm_clear || self.confirm_unsaved.is_some() {
-            return false;
+            return None;
         }
         // Giữ Space để kéo trang bằng chuột/bút thay vì vẽ
         if ctx.input(|i| i.key_down(egui::Key::Space)) {
-            return false;
+            return None;
         }
-        self.drawable_rect().is_some_and(|r| r.contains(pos))
-    }
-
-    /// Khung chữ nhật có thể viết vẽ trên màn hình:
-    /// - Ở chế độ Paper: chính là diện tích tờ giấy (không vẽ lên mặt bàn xám bên ngoài).
-    /// - Ở chế độ Whiteboard: là toàn bộ vùng làm việc.
-    fn drawable_rect(&self) -> Option<egui::Rect> {
         let workspace = self.paper_rect?;
-        let origin = self.view.origin(workspace);
-        match self.doc.paper_settings().mode {
-            CanvasMode::Paper => Some(paper_sheet_rect(
-                origin,
-                self.doc.paper_settings(),
-                self.view.zoom,
-            )),
-            CanvasMode::Whiteboard => Some(workspace),
+        if !workspace.contains(pos) {
+            return None;
         }
+        (0..self.doc.page_count()).find(|&idx| {
+            self.page_screen_rect(workspace, idx)
+                .intersect(workspace)
+                .contains(pos)
+        })
     }
 
-    /// Đổi toạ độ màn hình → toạ độ trang (theo zoom/kéo hiện tại).
-    fn to_page(&self, pos: egui::Pos2) -> egui::Pos2 {
+    /// Đổi toạ độ màn hình → toạ độ cục bộ của trang đang viết.
+    fn to_page_local(&self, pos: egui::Pos2) -> egui::Pos2 {
         match self.paper_rect {
-            Some(r) => self.view.to_page(r, pos),
+            Some(workspace) => {
+                let page_idx = self
+                    .drawing_page_index
+                    .unwrap_or_else(|| self.doc.active_page_index());
+                let origin = self.page_origin(workspace, page_idx);
+                ((pos - origin) / self.view.zoom).to_pos2()
+            }
             None => pos,
         }
+    }
+
+    /// Cuộn khung nhìn đến trang `page_index` (đưa mép trên trang về sát đầu vùng làm việc).
+    fn scroll_to_page(&mut self, page_index: usize) {
+        let Some(workspace) = self.paper_rect else {
+            return;
+        };
+        let settings = self.doc.paper_settings();
+        if settings.mode == CanvasMode::Paper && self.view.pan == egui::Vec2::ZERO {
+            self.view.pan.x =
+                ((workspace.width() - settings.page_width * self.view.zoom).max(0.0)) * 0.5;
+        }
+        let top_pad = if settings.mode == CanvasMode::Paper {
+            24.0
+        } else {
+            0.0
+        };
+        self.view.pan.y =
+            top_pad - page_index as f32 * Self::page_stride(settings) * self.view.zoom;
+    }
+
+    fn add_page_after_current(&mut self) {
+        let after = self.doc.active_page_index();
+        self.doc.execute(Command::InsertPageAfter(after));
+        let new_idx = self.doc.active_page_index();
+        self.scroll_to_page(new_idx);
+    }
+
+    fn delete_current_page(&mut self) {
+        if self.doc.page_count() <= 1 {
+            return;
+        }
+        let idx = self.doc.active_page_index();
+        self.doc.execute(Command::DeletePage(idx));
+        let cur = self.doc.active_page_index();
+        self.scroll_to_page(cur);
+    }
+
+    /// Cập nhật trang đang xem dựa theo trang nằm ở tâm dọc vùng nhìn thấy.
+    fn update_active_page_from_viewport(&mut self, workspace: egui::Rect) {
+        let center_y = workspace.center().y;
+        let mut best_idx = self.doc.active_page_index().min(self.doc.page_count() - 1);
+        let mut best_dist = f32::INFINITY;
+        for idx in 0..self.doc.page_count() {
+            let r = self.page_screen_rect(workspace, idx);
+            if r.top() <= center_y && center_y <= r.bottom() {
+                best_idx = idx;
+                break;
+            }
+            let dist = if center_y < r.top() {
+                r.top() - center_y
+            } else {
+                center_y - r.bottom()
+            };
+            if dist < best_dist {
+                best_dist = dist;
+                best_idx = idx;
+            }
+        }
+        self.doc.set_active_page_index(best_idx);
+    }
+
+    /// Kiểm tra và áp dụng lực kéo vượt đáy trang cuối để tự động tạo trang mới.
+    /// Trả về `true` nếu đã tự động thêm trang mới.
+    fn apply_pan_limits_and_pull_trigger(
+        &mut self,
+        workspace: egui::Rect,
+        dy: f32,
+        now: Instant,
+    ) -> bool {
+        let settings = self.doc.paper_settings();
+        if settings.mode != CanvasMode::Paper {
+            return false;
+        }
+        let page_count = self.doc.page_count().max(1);
+        let total_h = ((page_count - 1) as f32 * Self::page_stride(settings)
+            + settings.page_height)
+            * self.view.zoom;
+        let max_pan_y = (workspace.height() * 0.45).max(80.0);
+        let bottom_keep = 140.0_f32.min(workspace.height() * 0.45);
+        let min_pan_y = (workspace.height() - bottom_keep - total_h).min(24.0);
+
+        if dy < 0.0 && self.view.pan.y <= min_pan_y + 1.0 {
+            let overflow = (min_pan_y - self.view.pan.y).max(-dy);
+            self.view.pan.y = min_pan_y;
+            if now >= self.pull_cooldown_until {
+                self.pull_overscroll += overflow;
+                self.last_pull_at = now;
+                if self.pull_overscroll >= PULL_TO_ADD_THRESHOLD {
+                    let last = page_count - 1;
+                    self.doc.execute(Command::InsertPageAfter(last));
+                    self.pull_overscroll = 0.0;
+                    self.pull_cooldown_until = now + Duration::from_millis(850);
+                    self.scroll_to_page(self.doc.active_page_index());
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        self.view.pan.y = self.view.pan.y.clamp(min_pan_y, max_pan_y);
+        if dy > 0.0 {
+            self.pull_overscroll = 0.0;
+        }
+        false
     }
 
     /// Tạo `n` nét mẫu rải khắp trang (để test hiệu năng). 1 lần = 1 bước undo.
@@ -354,12 +517,16 @@ impl InkNoteApp {
                 self.batch_cache.clear();
                 self.static_cache = None;
                 self.active = None;
-                // Tái tạo lại batch_cache cho các nét vừa nạp
-                for s in self.doc.strokes() {
-                    self.render_cx.clear_batches();
-                    s.path.draw_composed(&mut self.render_cx, &s.style);
-                    let batches = std::mem::take(&mut self.render_cx.batches);
-                    self.batch_cache.insert(s.id, CachedStroke::new(batches));
+                self.drawing_page_index = None;
+                self.pull_overscroll = 0.0;
+                // Tái tạo lại batch_cache cho các nét trên tất cả các trang vừa nạp
+                for page in self.doc.pages() {
+                    for s in &page.strokes {
+                        self.render_cx.clear_batches();
+                        s.path.draw_composed(&mut self.render_cx, &s.style);
+                        let batches = std::mem::take(&mut self.render_cx.batches);
+                        self.batch_cache.insert(s.id, CachedStroke::new(batches));
+                    }
                 }
             }
             Err(e) => {
@@ -398,11 +565,14 @@ impl InkNoteApp {
         self.batch_cache.clear();
         self.static_cache = None;
         self.active = None;
+        self.drawing_page_index = None;
+        self.pull_overscroll = 0.0;
+        self.view.pan = egui::Vec2::ZERO;
     }
 
     fn pen_down(&mut self, pos: egui::Pos2, pressure: f64, now: Instant) {
         self.cur_pressure = pressure;
-        let pos = self.to_page(pos);
+        let pos = self.to_page_local(pos);
         let element = Element::new(Vector2::new(pos.x as f64, pos.y as f64), pressure);
 
         if let Some(active) = &mut self.active {
@@ -463,55 +633,81 @@ impl InkNoteApp {
         }
     }
 
-    /// Dựng lại lưới tĩnh của các nét đã xong (gộp thành 1 mesh, toạ độ màn hình).
-    fn build_static_mesh(&self, paper: egui::Rect) -> egui::epaint::Mesh {
+    /// Dựng lại lưới tĩnh cho từng trang đang hiển thị trong vùng nhìn thấy (`paper`).
+    fn build_static_meshes(
+        &self,
+        paper: egui::Rect,
+    ) -> Vec<(usize, std::sync::Arc<egui::epaint::Mesh>)> {
         let view = self.view;
-        let origin = view.origin(paper);
-        let mut n_verts = 0;
-        let mut n_indices = 0;
-        for s in self.doc.strokes() {
-            if let Some(c) = self.batch_cache.get(&s.id) {
-                if view.rect_to_screen(paper, c.bbox).intersects(paper) {
-                    for b in &c.batches {
-                        n_verts += b.vertices.len();
-                        n_indices += b.indices.len();
+        let mut result = Vec::new();
+        for (page_idx, page) in self.doc.pages().iter().enumerate() {
+            let page_rect_screen = self.page_screen_rect(paper, page_idx);
+            let cull_rect = page_rect_screen.intersect(paper);
+            if !cull_rect.is_positive() {
+                continue;
+            }
+            let origin = self.page_origin(paper, page_idx);
+            let mut n_verts = 0;
+            let mut n_indices = 0;
+            for s in &page.strokes {
+                if let Some(c) = self.batch_cache.get(&s.id) {
+                    let s_rect = egui::Rect::from_min_max(
+                        origin + c.bbox.min.to_vec2() * view.zoom,
+                        origin + c.bbox.max.to_vec2() * view.zoom,
+                    );
+                    if s_rect.intersects(cull_rect) {
+                        for b in &c.batches {
+                            n_verts += b.vertices.len();
+                            n_indices += b.indices.len();
+                        }
                     }
                 }
             }
-        }
-        let mut mesh = egui::epaint::Mesh::default();
-        mesh.vertices.reserve(n_verts);
-        mesh.indices.reserve(n_indices);
-        for s in self.doc.strokes() {
-            let Some(c) = self.batch_cache.get(&s.id) else {
-                continue;
-            };
-            if !view.rect_to_screen(paper, c.bbox).intersects(paper) {
+            if n_indices == 0 {
                 continue;
             }
-            for batch in &c.batches {
-                if batch.indices.is_empty() || batch.vertices.is_empty() {
+            let mut mesh = egui::epaint::Mesh::default();
+            mesh.vertices.reserve(n_verts);
+            mesh.indices.reserve(n_indices);
+            for s in &page.strokes {
+                let Some(c) = self.batch_cache.get(&s.id) else {
+                    continue;
+                };
+                let s_rect = egui::Rect::from_min_max(
+                    origin + c.bbox.min.to_vec2() * view.zoom,
+                    origin + c.bbox.max.to_vec2() * view.zoom,
+                );
+                if !s_rect.intersects(cull_rect) {
                     continue;
                 }
-                let [r, g, b, a] = batch.color;
-                let col = egui::Color32::from_rgba_unmultiplied(r, g, b, a);
-                let base = mesh.vertices.len() as u32;
-                mesh.vertices
-                    .extend(batch.vertices.iter().map(|&[x, y]| egui::epaint::Vertex {
-                        pos: egui::pos2(origin.x + x * view.zoom, origin.y + y * view.zoom),
-                        uv: egui::epaint::WHITE_UV,
-                        color: col,
+                for batch in &c.batches {
+                    if batch.indices.is_empty() || batch.vertices.is_empty() {
+                        continue;
+                    }
+                    let [r, g, b, a] = batch.color;
+                    let col = egui::Color32::from_rgba_unmultiplied(r, g, b, a);
+                    let base = mesh.vertices.len() as u32;
+                    mesh.vertices.extend(batch.vertices.iter().map(|&[x, y]| {
+                        egui::epaint::Vertex {
+                            pos: egui::pos2(origin.x + x * view.zoom, origin.y + y * view.zoom),
+                            uv: egui::epaint::WHITE_UV,
+                            color: col,
+                        }
                     }));
-                mesh.indices.extend(batch.indices.iter().map(|i| i + base));
+                    mesh.indices.extend(batch.indices.iter().map(|i| i + base));
+                }
+            }
+            if !mesh.is_empty() {
+                result.push((page_idx, std::sync::Arc::new(mesh)));
             }
         }
-        mesh
+        result
     }
 
     fn pen_up(&mut self, pos: egui::Pos2, pressure: f64, now: Instant) {
         self.cur_pressure = pressure;
         self.last_up_pressure = pressure;
-        let pos = self.to_page(pos);
+        let pos = self.to_page_local(pos);
         let element = Element::new(Vector2::new(pos.x as f64, pos.y as f64), pressure);
 
         if let Some(active) = &mut self.active {
@@ -533,6 +729,10 @@ impl InkNoteApp {
     }
 
     fn finish_active_stroke(&mut self) {
+        let target_page = self
+            .drawing_page_index
+            .take()
+            .unwrap_or_else(|| self.doc.active_page_index());
         if let Some(active) = self.active.take() {
             self.render_cx.clear_batches();
             active
@@ -541,6 +741,7 @@ impl InkNoteApp {
             let batches = std::mem::take(&mut self.render_cx.batches);
             let id = self.doc.alloc_id();
             self.batch_cache.insert(id, CachedStroke::new(batches));
+            self.doc.set_active_page_index(target_page);
             self.doc.execute(Command::AddStroke(Stroke {
                 id,
                 path: active.path,
@@ -593,9 +794,11 @@ impl eframe::App for InkNoteApp {
                     self.stylus_mode = true;
                     match phase {
                         egui::TouchPhase::Start => {
-                            if !self.can_draw_at(&ctx, pos) {
+                            let Some(page_idx) = self.drawable_page_at(&ctx, pos) else {
                                 continue;
-                            }
+                            };
+                            self.doc.set_active_page_index(page_idx);
+                            self.drawing_page_index = Some(page_idx);
                             self.touch_active = true;
                             self.stylus_has_force = force.is_some();
                             let p = match force {
@@ -648,8 +851,12 @@ impl eframe::App for InkNoteApp {
                 } if !self.touch_active && !self.stylus_mode => {
                     self.last_source = "Mouse (p=0.5)";
                     let now = self.monotonic_instant(ev_secs);
-                    if pressed && self.can_draw_at(&ctx, pos) {
-                        self.pen_down(pos, Element::PRESSURE_DEFAULT, now);
+                    if pressed {
+                        if let Some(page_idx) = self.drawable_page_at(&ctx, pos) {
+                            self.doc.set_active_page_index(page_idx);
+                            self.drawing_page_index = Some(page_idx);
+                            self.pen_down(pos, Element::PRESSURE_DEFAULT, now);
+                        }
                     } else if !pressed && self.active.is_some() {
                         self.pen_up(pos, Element::PRESSURE_DEFAULT, now);
                     }
@@ -702,6 +909,7 @@ impl eframe::App for InkNoteApp {
             self.doc.strokes().len()
         );
         let mut paper_settings = self.doc.paper_settings().clone();
+        let page_info = (self.doc.active_page_index() + 1, self.doc.page_count());
         let actions = show_toolbars(
             ui,
             &self.theme,
@@ -709,6 +917,7 @@ impl eframe::App for InkNoteApp {
             &mut self.brush_config,
             &mut paper_settings,
             &file_status,
+            page_info,
             &wacom_status,
         );
         if self.doc.set_paper_settings(paper_settings.clone()) {
@@ -717,20 +926,23 @@ impl eframe::App for InkNoteApp {
         }
         // Phím tắt: Ctrl+Z = Undo; Ctrl+Y hoặc Ctrl+Shift+Z = Redo
         // Phím tắt tệp: Ctrl+S = Save, Ctrl+Shift+S = Save As, Ctrl+O = Open, Ctrl+N = New
-        let (key_undo, key_redo, key_save, key_save_as, key_open, key_new) = ctx.input(|i| {
-            let cmd = i.modifiers.command;
-            let shift = i.modifiers.shift;
-            let z = i.key_pressed(egui::Key::Z);
-            (
-                cmd && !shift && z,
-                cmd && ((shift && z) || i.key_pressed(egui::Key::Y)),
-                cmd && !shift && i.key_pressed(egui::Key::S),
-                cmd && shift && i.key_pressed(egui::Key::S),
-                cmd && !shift && i.key_pressed(egui::Key::O),
-                cmd && !shift && i.key_pressed(egui::Key::N),
-            )
-        });
-        // Không hoàn tác / thao tác file khi đang kéo nét dở
+        let (key_undo, key_redo, key_save, key_save_as, key_open, key_new, key_pgup, key_pgdn) =
+            ctx.input(|i| {
+                let cmd = i.modifiers.command;
+                let shift = i.modifiers.shift;
+                let z = i.key_pressed(egui::Key::Z);
+                (
+                    cmd && !shift && z,
+                    cmd && ((shift && z) || i.key_pressed(egui::Key::Y)),
+                    cmd && !shift && i.key_pressed(egui::Key::S),
+                    cmd && shift && i.key_pressed(egui::Key::S),
+                    cmd && !shift && i.key_pressed(egui::Key::O),
+                    cmd && !shift && i.key_pressed(egui::Key::N),
+                    i.key_pressed(egui::Key::PageUp),
+                    i.key_pressed(egui::Key::PageDown),
+                )
+            });
+        // Không hoàn tác / thao tác file / thêm trang khi đang kéo nét dở
         if self.active.is_none() {
             if actions.undo_clicked || key_undo {
                 self.doc.undo();
@@ -740,6 +952,22 @@ impl eframe::App for InkNoteApp {
             }
             if actions.clear_clicked {
                 self.confirm_clear = true;
+            }
+            if actions.add_page_clicked {
+                self.add_page_after_current();
+            }
+            if actions.delete_page_clicked {
+                self.delete_current_page();
+            }
+            if key_pgup && self.doc.active_page_index() > 0 {
+                let target = self.doc.active_page_index() - 1;
+                self.doc.set_active_page_index(target);
+                self.scroll_to_page(target);
+            }
+            if key_pgdn && self.doc.active_page_index() + 1 < self.doc.page_count() {
+                let target = self.doc.active_page_index() + 1;
+                self.doc.set_active_page_index(target);
+                self.scroll_to_page(target);
             }
             if actions.save_clicked || key_save {
                 self.save_document();
@@ -844,7 +1072,19 @@ impl eframe::App for InkNoteApp {
             }
         }
 
-        // Zoom / kéo trang
+        // FPS khi đang tương tác liên tục (bỏ qua khoảng nghỉ lúc không chạm vào app)
+        let now = Instant::now();
+        let real_dt = now.duration_since(self.last_frame).as_secs_f32().max(1e-4);
+        self.last_frame = now;
+        if real_dt < 0.25 {
+            self.fps = if self.fps == 0.0 {
+                1.0 / real_dt
+            } else {
+                self.fps * 0.9 + 0.1 / real_dt
+            };
+        }
+
+        // Zoom / kéo trang & cuộn dọc nhiều trang (+ trigger kéo đáy tạo trang mới)
         if let Some(paper) = self.paper_rect {
             let (hover, zoom_delta, scroll, middle, space_drag, ptr_delta, keys) = ctx.input(|i| {
                 let cmd = i.modifiers.command;
@@ -865,50 +1105,64 @@ impl eframe::App for InkNoteApp {
             let blocked = egui::Popup::is_any_open(&ctx)
                 || self.confirm_clear
                 || self.confirm_unsaved.is_some();
+            let mut scrolled_or_panned = false;
+            let mut dy_total = 0.0_f32;
             if !blocked {
                 if keys.0 {
                     self.view.zoom = 1.0;
                     if self.doc.paper_settings().mode == CanvasMode::Paper {
                         let centered_x =
                             ((paper.width() - self.doc.paper_settings().page_width).max(0.0)) * 0.5;
-                        self.view.pan = egui::vec2(centered_x, 24.0);
+                        self.view.pan.x = centered_x;
                     } else {
-                        self.view.pan = egui::Vec2::ZERO;
+                        self.view.pan.x = 0.0;
                     }
+                    let cur = self.doc.active_page_index();
+                    self.scroll_to_page(cur);
+                    self.pull_overscroll = 0.0;
                 }
                 if keys.1 {
                     self.view.zoom_at(paper, paper.center(), 1.25);
+                    scrolled_or_panned = true;
                 }
                 if keys.2 {
                     self.view.zoom_at(paper, paper.center(), 0.8);
+                    scrolled_or_panned = true;
                 }
                 if let Some(h) = hover.filter(|h| paper.contains(*h)) {
                     if zoom_delta != 1.0 {
                         self.view.zoom_at(paper, h, zoom_delta);
+                        scrolled_or_panned = true;
                     }
-                    self.view.pan += scroll;
-                    if middle || space_drag {
+                    if scroll != egui::Vec2::ZERO {
+                        self.view.pan += scroll;
+                        dy_total += scroll.y;
+                        scrolled_or_panned = true;
+                    }
+                    if (middle || space_drag) && ptr_delta != egui::Vec2::ZERO {
                         self.view.pan += ptr_delta;
+                        dy_total += ptr_delta.y;
+                        scrolled_or_panned = true;
                     }
                 }
+            }
+
+            if scrolled_or_panned {
+                let added = self.apply_pan_limits_and_pull_trigger(paper, dy_total, now);
+                if !added && self.active.is_none() {
+                    self.update_active_page_from_viewport(paper);
+                }
+            } else if self.pull_overscroll > 0.0
+                && now.duration_since(self.last_pull_at) > Duration::from_millis(120)
+            {
+                // Hồi lực kéo về 0 mượt mà khi người dùng ngừng cuộn
+                self.pull_overscroll = (self.pull_overscroll - 480.0 * real_dt).max(0.0);
             }
         }
 
         // F9: thêm 2000 nét mẫu để test hiệu năng
         if self.active.is_none() && ctx.input(|i| i.key_pressed(egui::Key::F9)) {
             self.add_sample_strokes(2000);
-        }
-
-        // FPS khi đang tương tác liên tục (bỏ qua khoảng nghỉ lúc không chạm vào app)
-        let now = Instant::now();
-        let real_dt = now.duration_since(self.last_frame).as_secs_f32().max(1e-4);
-        self.last_frame = now;
-        if real_dt < 0.25 {
-            self.fps = if self.fps == 0.0 {
-                1.0 / real_dt
-            } else {
-                self.fps * 0.9 + 0.1 / real_dt
-            };
         }
 
         // Khu vực 3: Main Canvas (trang giấy chấm Dotted Paper)
@@ -925,7 +1179,7 @@ impl eframe::App for InkNoteApp {
                 self.paper_rect = Some(paper_rect);
 
                 let view = self.view;
-                let origin = view.origin(paper_rect);
+                let page_count = self.doc.page_count().max(1);
 
                 // 1. Tự động căn giữa trang ở chế độ Paper khi mở ghi chú mới (pan chưa đặt)
                 if self.view.pan == egui::Vec2::ZERO && settings.mode == CanvasMode::Paper {
@@ -934,76 +1188,194 @@ impl eframe::App for InkNoteApp {
                     self.view.pan = egui::vec2(centered_x, 24.0);
                 }
 
-                // 2. Vẽ nền giấy theo PaperSettings (Plain, Dotted, Grid, Lined + Margin lines)
-                draw_paper(
-                    ui.painter(),
-                    paper_rect,
-                    origin,
-                    &self.theme,
-                    settings,
-                    view.zoom,
-                );
-
-                // 3. Vùng giới hạn nét vẽ (clip_rect):
-                // - Paper: Giới hạn nghiêm ngặt trong tờ giấy (không vẽ lem ra bàn xám)
-                // - Whiteboard: Tràn toàn bộ vùng làm việc
-                let clip_rect = match settings.mode {
+                // 2. Vẽ nền giấy cho từng trang đang nằm trong khung nhìn
+                match settings.mode {
                     CanvasMode::Paper => {
-                        let sheet = paper_sheet_rect(origin, settings, view.zoom);
-                        sheet.intersect(paper_rect)
+                        for page_idx in 0..page_count {
+                            let origin = self.page_origin(paper_rect, page_idx);
+                            draw_paper(
+                                ui.painter(),
+                                paper_rect,
+                                origin,
+                                &self.theme,
+                                settings,
+                                view.zoom,
+                            );
+                        }
                     }
-                    CanvasMode::Whiteboard => paper_rect,
-                };
-                let painter = ui.painter().with_clip_rect(clip_rect);
+                    CanvasMode::Whiteboard => {
+                        let origin0 = self.page_origin(paper_rect, 0);
+                        draw_paper(
+                            ui.painter(),
+                            paper_rect,
+                            origin0,
+                            &self.theme,
+                            settings,
+                            view.zoom,
+                        );
+                        if page_count > 1 {
+                            let div_painter = ui.painter().with_clip_rect(paper_rect);
+                            for page_idx in 1..page_count {
+                                let p_rect = self.page_screen_rect(paper_rect, page_idx);
+                                let y = p_rect.top();
+                                if y >= paper_rect.top() && y <= paper_rect.bottom() {
+                                    div_painter.line_segment(
+                                        [
+                                            egui::pos2(paper_rect.left(), y),
+                                            egui::pos2(paper_rect.right(), y),
+                                        ],
+                                        egui::Stroke::new(1.0, self.theme.paper_border),
+                                    );
+                                    div_painter.text(
+                                        egui::pos2(paper_rect.left() + 10.0, y + 6.0),
+                                        egui::Align2::LEFT_TOP,
+                                        format!("Page {}", page_idx + 1),
+                                        egui::FontId::proportional(self.theme.font_size_small),
+                                        self.theme.tool_text_muted,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+
                 let paint_start = Instant::now();
 
-                // 4. Vẽ các nét bút đã hoàn thành (gộp 1 Mesh và cache theo StaticKey)
-                let static_key =
-                    StaticKey::new(self.doc.revision(), view.zoom, view.pan, paper_rect);
-                let static_mesh = match &self.static_cache {
-                    Some((k, mesh)) if *k == static_key => mesh.clone(),
+                // 3. Vẽ các nét bút đã hoàn thành theo từng trang (cắt gọn trong tờ giấy của trang đó)
+                let static_key = StaticKey::new(
+                    self.doc.revision(),
+                    view.zoom,
+                    view.pan,
+                    paper_rect,
+                    page_count,
+                    settings.mode,
+                );
+                let static_meshes = match &self.static_cache {
+                    Some((k, meshes)) if *k == static_key => meshes.clone(),
                     _ => {
-                        let mesh = std::sync::Arc::new(self.build_static_mesh(paper_rect));
-                        self.static_cache = Some((static_key, mesh.clone()));
-                        mesh
+                        let meshes = self.build_static_meshes(paper_rect);
+                        self.static_cache = Some((static_key, meshes.clone()));
+                        meshes
                     }
                 };
-                if !static_mesh.is_empty() {
-                    painter.add(egui::Shape::Mesh(static_mesh));
+                for (page_idx, mesh) in static_meshes {
+                    let clip = self
+                        .page_screen_rect(paper_rect, page_idx)
+                        .intersect(paper_rect);
+                    if clip.is_positive() {
+                        ui.painter()
+                            .with_clip_rect(clip)
+                            .add(egui::Shape::Mesh(mesh));
+                    }
                 }
 
-                // 5. Vẽ nét bút đang kéo (active)
+                // 4. Vẽ nét bút đang kéo (active) trên đúng trang đang chạm
                 if let Some(active) = &self.active {
-                    // 5a. Các đoạn nét đã chốt (đã tessellate sẵn)
-                    if !active.committed_batches.is_empty() {
-                        Self::paint_batches(&painter, &active.committed_batches, origin, view.zoom);
-                    }
+                    let active_page = self
+                        .drawing_page_index
+                        .unwrap_or_else(|| self.doc.active_page_index());
+                    let active_origin = self.page_origin(paper_rect, active_page);
+                    let active_clip = self
+                        .page_screen_rect(paper_rect, active_page)
+                        .intersect(paper_rect);
+                    if active_clip.is_positive() {
+                        let painter = ui.painter().with_clip_rect(active_clip);
+                        // 4a. Các đoạn nét đã chốt (đã tessellate sẵn)
+                        if !active.committed_batches.is_empty() {
+                            Self::paint_batches(
+                                &painter,
+                                &active.committed_batches,
+                                active_origin,
+                                view.zoom,
+                            );
+                        }
 
-                    // 5b. Phần đuôi ngắn chưa chốt (< 16 đoạn)
-                    if active.path.segments.len() > active.committed_segs {
-                        let tail_start = if active.committed_segs == 0 {
-                            active.path.start
-                        } else {
-                            active.path.segments[active.committed_segs - 1].end()
-                        };
-                        let tail_path = PenPath::new_w_segments(
-                            tail_start,
-                            active.path.segments[active.committed_segs..].to_vec(),
-                        );
+                        // 4b. Phần đuôi ngắn chưa chốt (< 16 đoạn)
+                        if active.path.segments.len() > active.committed_segs {
+                            let tail_start = if active.committed_segs == 0 {
+                                active.path.start
+                            } else {
+                                active.path.segments[active.committed_segs - 1].end()
+                            };
+                            let tail_path = PenPath::new_w_segments(
+                                tail_start,
+                                active.path.segments[active.committed_segs..].to_vec(),
+                            );
+                            self.render_cx.clear_batches();
+                            tail_path.draw_composed(&mut self.render_cx, &active.style);
+                            Self::paint_batches(
+                                &painter,
+                                &self.render_cx.batches,
+                                active_origin,
+                                view.zoom,
+                            );
+                        }
+
+                        // 4c. Đầu bút động và dự đoán nét từ Modeler
                         self.render_cx.clear_batches();
-                        tail_path.draw_composed(&mut self.render_cx, &active.style);
-                        Self::paint_batches(&painter, &self.render_cx.batches, origin, view.zoom);
+                        active
+                            .builder
+                            .draw_styled(&mut self.render_cx, &active.style, 1.0);
+                        Self::paint_batches(
+                            &painter,
+                            &self.render_cx.batches,
+                            active_origin,
+                            view.zoom,
+                        );
                     }
-
-                    // 5c. Đầu bút động và dự đoán nét từ Modeler
-                    self.render_cx.clear_batches();
-                    active
-                        .builder
-                        .draw_styled(&mut self.render_cx, &active.style, 1.0);
-                    Self::paint_batches(&painter, &self.render_cx.batches, origin, view.zoom);
                 }
 
-                // 6. Thông số góc dưới-trái: Mode, zoom, thời gian dựng khung, FPS
+                // 5. Chỉ báo kéo quá đáy trang cuối để tự động tạo trang mới (Paper mode)
+                if settings.mode == CanvasMode::Paper {
+                    let last_sheet = self.page_screen_rect(paper_rect, page_count - 1);
+                    if last_sheet.bottom() <= paper_rect.bottom() - 8.0
+                        && last_sheet.bottom() >= paper_rect.top()
+                    {
+                        let hint_pos = egui::pos2(
+                            last_sheet.center().x,
+                            (last_sheet.bottom() + 26.0).min(paper_rect.bottom() - 28.0),
+                        );
+                        let hint_painter = ui.painter().with_clip_rect(paper_rect);
+                        if self.pull_overscroll > 4.0 {
+                            let ratio =
+                                (self.pull_overscroll / PULL_TO_ADD_THRESHOLD).clamp(0.0, 1.0);
+                            let pill_rect =
+                                egui::Rect::from_center_size(hint_pos, egui::vec2(210.0, 26.0));
+                            hint_painter.rect_filled(
+                                pill_rect,
+                                egui::CornerRadius::same(13),
+                                self.theme.tool_bar_pill_bg,
+                            );
+                            let fill_w = (pill_rect.width() * ratio).max(10.0);
+                            let fill_rect = egui::Rect::from_min_size(
+                                pill_rect.min,
+                                egui::vec2(fill_w, pill_rect.height()),
+                            );
+                            hint_painter.rect_filled(
+                                fill_rect,
+                                egui::CornerRadius::same(13),
+                                self.theme.tool_selected_bg,
+                            );
+                            hint_painter.text(
+                                pill_rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                "Pull down to add page...",
+                                egui::FontId::proportional(self.theme.font_size_small),
+                                self.theme.tool_text_fg,
+                            );
+                        } else {
+                            hint_painter.text(
+                                hint_pos,
+                                egui::Align2::CENTER_CENTER,
+                                "Scroll down further to add a new page",
+                                egui::FontId::proportional(self.theme.font_size_small),
+                                self.theme.tool_text_muted,
+                            );
+                        }
+                    }
+                }
+
+                // 6. Thông số góc dưới-trái: Trang, Mode, zoom, thời gian dựng khung, FPS
                 self.paint_ms =
                     self.paint_ms * 0.9 + paint_start.elapsed().as_secs_f32() * 1000.0 * 0.1;
                 let mode_str = match settings.mode {
@@ -1014,7 +1386,9 @@ impl eframe::App for InkNoteApp {
                     paper_rect.left_bottom() + egui::vec2(10.0, -8.0),
                     egui::Align2::LEFT_BOTTOM,
                     format!(
-                        "Mode: {}  |  Zoom {:.0}%  |  build {:.1} ms  |  {:.0} fps  |  F9: +2000 strokes",
+                        "Page {}/{}  |  Mode: {}  |  Zoom {:.0}%  |  build {:.1} ms  |  {:.0} fps  |  F9: +2000 strokes",
+                        self.doc.active_page_index() + 1,
+                        page_count,
                         mode_str,
                         view.zoom_percent(),
                         self.paint_ms,
@@ -1025,9 +1399,10 @@ impl eframe::App for InkNoteApp {
                 );
             });
 
-        // Chỉ hẹn vẽ lại khi có bộ đếm auto-save hoặc cần tự ẩn thông báo sau 3s;
-        // khi đứng yên sẽ không render liên tục gây quá tải CPU/GPU.
-        if let Some(delay) =
+        // Chỉ hẹn vẽ lại khi có bộ đếm auto-save, thông báo 3s hoặc hiệu ứng hồi lực kéo trang
+        if self.pull_overscroll > 0.0 {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        } else if let Some(delay) =
             self.autosave
                 .next_repaint_delay(&self.doc, self.current_path.as_ref(), autosave_now)
         {
@@ -1063,7 +1438,7 @@ fn main() -> eframe::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use eframe::egui::{Pos2, RawInput, Rect, vec2};
+    use eframe::egui::{vec2, Pos2, RawInput, Rect};
     use inknote_core::{CanvasMode, PaperOrientation, PaperPattern, PaperSize};
 
     fn new_test_app(ctx: &egui::Context) -> InkNoteApp {
@@ -1084,8 +1459,12 @@ mod tests {
             fps: 0.0,
             last_frame: Instant::now(),
             active: None,
+            drawing_page_index: None,
             static_cache: None,
             render_cx: CairoRenderContext::new(),
+            pull_overscroll: 0.0,
+            last_pull_at: Instant::now(),
+            pull_cooldown_until: Instant::now(),
             base_instant: Instant::now(),
             prev_frame_t: 0.0,
             last_event_secs: 0.0,
@@ -1207,18 +1586,24 @@ mod tests {
                     );
                     let t_dots = t0.elapsed();
                     let t1 = Instant::now();
-                    let static_key =
-                        StaticKey::new(app.doc.revision(), app.view.zoom, app.view.pan, paper);
-                    let static_mesh = match &app.static_cache {
-                        Some((k, mesh)) if *k == static_key => mesh.clone(),
+                    let static_key = StaticKey::new(
+                        app.doc.revision(),
+                        app.view.zoom,
+                        app.view.pan,
+                        paper,
+                        app.doc.page_count(),
+                        app.doc.paper_settings().mode,
+                    );
+                    let static_meshes = match &app.static_cache {
+                        Some((k, meshes)) if *k == static_key => meshes.clone(),
                         _ => {
-                            let mesh = std::sync::Arc::new(app.build_static_mesh(paper));
-                            app.static_cache = Some((static_key, mesh.clone()));
-                            mesh
+                            let meshes = app.build_static_meshes(paper);
+                            app.static_cache = Some((static_key, meshes.clone()));
+                            meshes
                         }
                     };
-                    if !static_mesh.is_empty() {
-                        painter.add(egui::Shape::Mesh(static_mesh));
+                    for (_, mesh) in static_meshes {
+                        painter.add(egui::Shape::Mesh(mesh));
                     }
                     build_dur = t1.elapsed();
                     println!("  pass {pass} -> dots: {t_dots:?}, mesh build: {build_dur:?}");
@@ -1342,6 +1727,7 @@ mod tests {
                         &mut app.brush_config,
                         &mut paper_settings,
                         &file_status,
+                        (1, 1),
                         wacom_status,
                     );
                     let workspace_frame =
@@ -1429,5 +1815,85 @@ mod tests {
                 win_center_x
             );
         }
+    }
+
+    #[test]
+    fn test_multipage_scroll_and_add_page_after_current() {
+        let ctx = egui::Context::default();
+        let mut app = new_test_app(&ctx);
+        let paper = Rect::from_min_size(Pos2::new(20.0, 100.0), vec2(1160.0, 680.0));
+        app.paper_rect = Some(paper);
+        app.scroll_to_page(0);
+
+        // Vẽ 1 nét lên trang 0, rồi thêm 4 trang thành tổng 5 trang (mỗi trang 1 số nét khác nhau)
+        app.add_sample_strokes(1);
+        for k in 1..=4 {
+            app.add_page_after_current();
+            assert_eq!(app.doc.active_page_index(), k);
+            app.add_sample_strokes(k + 1);
+        }
+        assert_eq!(app.doc.page_count(), 5);
+        for k in 0..5 {
+            assert_eq!(app.doc.page_strokes(k).len(), k + 1);
+        }
+
+        // Cuộn về trang 1 -> tâm màn hình nhận diện đúng trang 1
+        app.scroll_to_page(1);
+        app.update_active_page_from_viewport(paper);
+        assert_eq!(app.doc.active_page_index(), 1);
+
+        // Bấm Add Page khi đang ở trang 1 -> trang mới chèn ngay sau trang 1 (tại index 2)
+        app.add_page_after_current();
+        assert_eq!(app.doc.page_count(), 6);
+        assert_eq!(app.doc.active_page_index(), 2);
+        assert_eq!(app.doc.page_strokes(2).len(), 0);
+        assert_eq!(app.doc.page_strokes(3).len(), 3);
+
+        // Xoá trang mới chèn -> về lại 5 trang và Undo khôi phục lại 6 trang
+        app.delete_current_page();
+        assert_eq!(app.doc.page_count(), 5);
+        assert!(app.doc.undo());
+        assert_eq!(app.doc.page_count(), 6);
+    }
+
+    #[test]
+    fn test_pull_to_add_page_trigger_requires_strong_pull() {
+        let ctx = egui::Context::default();
+        let mut app = new_test_app(&ctx);
+        let paper = Rect::from_min_size(Pos2::new(20.0, 100.0), vec2(1160.0, 680.0));
+        app.paper_rect = Some(paper);
+        app.doc.paper_settings_mut().pattern = PaperPattern::Grid;
+
+        // Kéo view xuống chạm sát đáy trang 0
+        let settings = app.doc.paper_settings();
+        let bottom_keep = 140.0_f32.min(paper.height() * 0.45);
+        let min_pan_y = (paper.height() - bottom_keep - settings.page_height).min(24.0);
+        app.view.pan = vec2(160.0, min_pan_y);
+        let t0 = Instant::now();
+        app.pull_cooldown_until = t0;
+
+        // Cuộn nhẹ 1 chút -> chưa tạo trang
+        assert!(!app.apply_pan_limits_and_pull_trigger(paper, -45.0, t0));
+        assert_eq!(app.doc.page_count(), 1);
+        assert!(app.pull_overscroll > 0.0 && app.pull_overscroll < PULL_TO_ADD_THRESHOLD);
+
+        // Giật mạnh thêm quá ngưỡng -> tự động thêm trang 2 và giữ nguyên cài đặt giấy
+        assert!(app.apply_pan_limits_and_pull_trigger(
+            paper,
+            -(PULL_TO_ADD_THRESHOLD),
+            t0 + Duration::from_millis(40),
+        ));
+        assert_eq!(app.doc.page_count(), 2);
+        assert_eq!(app.doc.active_page_index(), 1);
+        assert_eq!(app.doc.paper_settings().pattern, PaperPattern::Grid);
+        assert_eq!(app.pull_overscroll, 0.0);
+
+        // Ngay sau đó nếu vẫn còn quán tính cuộn -> cooldown ngăn tạo trang thứ 3 ngoài ý muốn
+        assert!(!app.apply_pan_limits_and_pull_trigger(
+            paper,
+            -200.0,
+            t0 + Duration::from_millis(100),
+        ));
+        assert_eq!(app.doc.page_count(), 2);
     }
 }

@@ -256,34 +256,85 @@ impl DocumentFile {
     }
 }
 
-/// Lệnh thay đổi nội dung trang.
+/// Lệnh thay đổi nội dung tài liệu / trang.
 pub enum Command {
-    /// Thêm một nét vào cuối trang.
+    /// Thêm một nét vào cuối trang hiện hành.
     AddStroke(Stroke),
-    /// Thêm nhiều nét cùng lúc (1 bước undo).
+    /// Thêm nhiều nét cùng lúc vào trang hiện hành (1 bước undo).
     AddStrokes(Vec<Stroke>),
-    /// Xoá toàn bộ nét trên trang.
+    /// Xoá toàn bộ nét trên trang hiện hành (1 bước undo).
     ClearPage,
+    /// Chèn một trang mới ngay sau vị trí `after_index` (1 bước undo).
+    InsertPageAfter(usize),
+    /// Xoá trang tại vị trí `index` (chỉ xoá khi tài liệu có > 1 trang, 1 bước undo).
+    DeletePage(usize),
+}
+
+/// Một trang trong bộ nhớ làm việc của `Document`.
+#[derive(Clone, Debug)]
+pub struct DocumentPage {
+    pub id: u64,
+    pub strokes: Vec<Stroke>,
 }
 
 /// Lệnh đã thực thi, kèm dữ liệu cần để hoàn tác.
 enum Done {
-    AddStroke(Stroke),
-    AddStrokes(Vec<Stroke>),
-    ClearPage(Vec<Stroke>),
+    AddStroke {
+        page_index: usize,
+        stroke: Stroke,
+    },
+    AddStrokes {
+        page_index: usize,
+        strokes: Vec<Stroke>,
+    },
+    ClearPage {
+        page_index: usize,
+        removed: Vec<Stroke>,
+    },
+    InsertPage {
+        index: usize,
+        page: DocumentPage,
+        prev_active: usize,
+    },
+    DeletePage {
+        index: usize,
+        page: DocumentPage,
+        prev_active: usize,
+    },
 }
 
-/// Trang + lịch sử Undo/Redo + trạng thái lưu file.
-#[derive(Default)]
+/// Tài liệu nhiều trang + lịch sử Undo/Redo + trạng thái lưu file.
 pub struct Document {
     metadata: DocumentMetadata,
     paper_settings: PaperSettings,
-    strokes: Vec<Stroke>,
+    pages: Vec<DocumentPage>,
+    active_page_idx: usize,
     undo_stack: Vec<Done>,
     redo_stack: Vec<Done>,
     next_id: u64,
+    next_page_id: u64,
     rev: u64,
     saved_rev: u64,
+}
+
+impl Default for Document {
+    fn default() -> Self {
+        Self {
+            metadata: DocumentMetadata::default(),
+            paper_settings: PaperSettings::default(),
+            pages: vec![DocumentPage {
+                id: 1,
+                strokes: Vec::new(),
+            }],
+            active_page_idx: 0,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            next_id: 0,
+            next_page_id: 1,
+            rev: 0,
+            saved_rev: 0,
+        }
+    }
 }
 
 impl Document {
@@ -323,8 +374,44 @@ impl Document {
         self.next_id
     }
 
+    fn alloc_page_id(&mut self) -> u64 {
+        self.next_page_id += 1;
+        self.next_page_id
+    }
+
+    pub fn page_count(&self) -> usize {
+        self.pages.len()
+    }
+
+    pub fn active_page_index(&self) -> usize {
+        self.active_page_idx
+    }
+
+    pub fn set_active_page_index(&mut self, index: usize) -> bool {
+        if self.pages.is_empty() {
+            return false;
+        }
+        let clamped = index.min(self.pages.len() - 1);
+        if self.active_page_idx == clamped {
+            return false;
+        }
+        self.active_page_idx = clamped;
+        true
+    }
+
+    pub fn pages(&self) -> &[DocumentPage] {
+        &self.pages
+    }
+
+    pub fn page_strokes(&self, page_index: usize) -> &[Stroke] {
+        self.pages
+            .get(page_index)
+            .map(|p| p.strokes.as_slice())
+            .unwrap_or(&[])
+    }
+
     pub fn strokes(&self) -> &[Stroke] {
-        &self.strokes
+        self.page_strokes(self.active_page_idx)
     }
 
     /// Số đổi mỗi khi nội dung trang thay đổi (execute/undo/redo) — dùng để làm mới bộ nhớ đệm hình vẽ.
@@ -364,23 +451,64 @@ impl Document {
 
     /// Thực thi lệnh mới. Xoá nhánh Redo (như mọi trình soạn thảo).
     pub fn execute(&mut self, cmd: Command) {
+        let page_index = self.active_page_idx;
         let done = match cmd {
             Command::AddStroke(s) => {
-                self.strokes.push(s.clone());
-                Done::AddStroke(s)
+                self.pages[page_index].strokes.push(s.clone());
+                Done::AddStroke {
+                    page_index,
+                    stroke: s,
+                }
             }
             Command::AddStrokes(list) => {
                 if list.is_empty() {
                     return;
                 }
-                self.strokes.extend(list.iter().cloned());
-                Done::AddStrokes(list)
+                self.pages[page_index].strokes.extend(list.iter().cloned());
+                Done::AddStrokes {
+                    page_index,
+                    strokes: list,
+                }
             }
             Command::ClearPage => {
-                if self.strokes.is_empty() {
+                if self.pages[page_index].strokes.is_empty() {
                     return; // không có gì để xoá → không tạo bước undo rỗng
                 }
-                Done::ClearPage(std::mem::take(&mut self.strokes))
+                let removed = std::mem::take(&mut self.pages[page_index].strokes);
+                Done::ClearPage {
+                    page_index,
+                    removed,
+                }
+            }
+            Command::InsertPageAfter(after_idx) => {
+                let insert_idx = (after_idx.min(self.pages.len().saturating_sub(1))) + 1;
+                let page_id = self.alloc_page_id();
+                let page = DocumentPage {
+                    id: page_id,
+                    strokes: Vec::new(),
+                };
+                let prev_active = self.active_page_idx;
+                self.pages.insert(insert_idx, page.clone());
+                self.active_page_idx = insert_idx;
+                Done::InsertPage {
+                    index: insert_idx,
+                    page,
+                    prev_active,
+                }
+            }
+            Command::DeletePage(idx) => {
+                if self.pages.len() <= 1 {
+                    return; // luôn giữ ít nhất 1 trang trong tài liệu
+                }
+                let del_idx = idx.min(self.pages.len() - 1);
+                let prev_active = self.active_page_idx;
+                let page = self.pages.remove(del_idx);
+                self.active_page_idx = del_idx.min(self.pages.len() - 1);
+                Done::DeletePage {
+                    index: del_idx,
+                    page,
+                    prev_active,
+                }
             }
         };
         self.undo_stack.push(done);
@@ -394,14 +522,40 @@ impl Document {
             return false;
         };
         match &done {
-            Done::AddStroke(_) => {
-                self.strokes.pop();
+            Done::AddStroke { page_index, .. } => {
+                self.pages[*page_index].strokes.pop();
+                self.active_page_idx = *page_index;
             }
-            Done::AddStrokes(list) => {
-                let keep = self.strokes.len().saturating_sub(list.len());
-                self.strokes.truncate(keep);
+            Done::AddStrokes {
+                page_index,
+                strokes,
+            } => {
+                let target = &mut self.pages[*page_index].strokes;
+                let keep = target.len().saturating_sub(strokes.len());
+                target.truncate(keep);
+                self.active_page_idx = *page_index;
             }
-            Done::ClearPage(removed) => self.strokes = removed.clone(),
+            Done::ClearPage {
+                page_index,
+                removed,
+            } => {
+                self.pages[*page_index].strokes = removed.clone();
+                self.active_page_idx = *page_index;
+            }
+            Done::InsertPage {
+                index, prev_active, ..
+            } => {
+                self.pages.remove(*index);
+                self.active_page_idx = (*prev_active).min(self.pages.len().saturating_sub(1));
+            }
+            Done::DeletePage {
+                index,
+                page,
+                prev_active,
+            } => {
+                self.pages.insert(*index, page.clone());
+                self.active_page_idx = (*prev_active).min(self.pages.len().saturating_sub(1));
+            }
         }
         self.redo_stack.push(done);
         self.rev += 1;
@@ -414,9 +568,31 @@ impl Document {
             return false;
         };
         match &done {
-            Done::AddStroke(s) => self.strokes.push(s.clone()),
-            Done::AddStrokes(list) => self.strokes.extend(list.iter().cloned()),
-            Done::ClearPage(_) => self.strokes.clear(),
+            Done::AddStroke { page_index, stroke } => {
+                self.pages[*page_index].strokes.push(stroke.clone());
+                self.active_page_idx = *page_index;
+            }
+            Done::AddStrokes {
+                page_index,
+                strokes,
+            } => {
+                self.pages[*page_index]
+                    .strokes
+                    .extend(strokes.iter().cloned());
+                self.active_page_idx = *page_index;
+            }
+            Done::ClearPage { page_index, .. } => {
+                self.pages[*page_index].strokes.clear();
+                self.active_page_idx = *page_index;
+            }
+            Done::InsertPage { index, page, .. } => {
+                self.pages.insert(*index, page.clone());
+                self.active_page_idx = *index;
+            }
+            Done::DeletePage { index, .. } => {
+                self.pages.remove(*index);
+                self.active_page_idx = (*index).min(self.pages.len().saturating_sub(1));
+            }
         }
         self.undo_stack.push(done);
         self.rev += 1;
@@ -425,29 +601,38 @@ impl Document {
 
     /// Xuất dữ liệu sang cấu trúc `DocumentFile` để lưu đĩa.
     pub fn to_file(&self) -> DocumentFile {
-        let page_objects = self
-            .strokes
+        let pages = self
+            .pages
             .iter()
-            .cloned()
-            .map(PageObject::BrushStroke)
+            .map(|p| Page {
+                id: p.id,
+                objects: p
+                    .strokes
+                    .iter()
+                    .cloned()
+                    .map(PageObject::BrushStroke)
+                    .collect(),
+            })
             .collect();
         DocumentFile {
             format_version: FORMAT_VERSION,
             metadata: self.metadata.clone(),
             paper_settings: self.paper_settings.clone(),
-            pages: vec![Page {
-                id: 1,
-                objects: page_objects,
-            }],
+            pages,
             first_page_thumbnail: None,
         }
     }
 
     /// Nạp dữ liệu từ `DocumentFile` đã đọc từ đĩa.
     pub fn from_file(file: DocumentFile) -> Self {
-        let mut strokes = Vec::new();
+        let mut pages = Vec::with_capacity(file.pages.len().max(1));
         let mut max_id = 0u64;
+        let mut max_page_id = 0u64;
         for page in file.pages {
+            if page.id > max_page_id {
+                max_page_id = page.id;
+            }
+            let mut strokes = Vec::new();
             for obj in page.objects {
                 match obj {
                     PageObject::BrushStroke(s) => {
@@ -458,14 +643,27 @@ impl Document {
                     }
                 }
             }
+            pages.push(DocumentPage {
+                id: page.id,
+                strokes,
+            });
+        }
+        if pages.is_empty() {
+            max_page_id = max_page_id.max(1);
+            pages.push(DocumentPage {
+                id: 1,
+                strokes: Vec::new(),
+            });
         }
         Self {
             metadata: file.metadata,
             paper_settings: file.paper_settings,
-            strokes,
+            pages,
+            active_page_idx: 0,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             next_id: max_id,
+            next_page_id: max_page_id,
             rev: 1,
             saved_rev: 1,
         }
@@ -666,5 +864,101 @@ mod tests {
         assert_eq!(loaded.pages[0].objects.len(), 2);
 
         let _ = std::fs::remove_file(&file_path);
+    }
+
+    #[test]
+    fn insert_page_after_active_and_undo_redo() {
+        let mut d = Document::new();
+        assert_eq!(d.page_count(), 1);
+        assert_eq!(d.active_page_index(), 0);
+
+        let s1 = stroke(&mut d);
+        d.execute(Command::AddStroke(s1));
+
+        // Thêm trang sau trang 0 -> trang mới là index 1
+        d.execute(Command::InsertPageAfter(0));
+        assert_eq!(d.page_count(), 2);
+        assert_eq!(d.active_page_index(), 1);
+
+        let s2 = stroke(&mut d);
+        d.execute(Command::AddStroke(s2));
+
+        // Quay lại trang 0, chèn thêm trang mới -> nằm giữa tại index 1
+        d.set_active_page_index(0);
+        d.execute(Command::InsertPageAfter(0));
+        assert_eq!(d.page_count(), 3);
+        assert_eq!(d.active_page_index(), 1);
+        assert!(d.page_strokes(0).len() == 1);
+        assert!(d.page_strokes(1).is_empty());
+        assert!(d.page_strokes(2).len() == 1);
+
+        // Undo việc chèn ở giữa -> còn 2 trang, quay về trang 0
+        assert!(d.undo());
+        assert_eq!(d.page_count(), 2);
+        assert_eq!(d.active_page_index(), 0);
+        assert_eq!(d.page_strokes(1).len(), 1);
+
+        // Redo lại -> lại có 3 trang
+        assert!(d.redo());
+        assert_eq!(d.page_count(), 3);
+        assert_eq!(d.active_page_index(), 1);
+    }
+
+    #[test]
+    fn delete_page_with_undo_restores_strokes_and_keeps_last_page() {
+        let mut d = Document::new();
+        // Không thể xoá khi chỉ còn 1 trang
+        d.execute(Command::DeletePage(0));
+        assert_eq!(d.page_count(), 1);
+        assert!(!d.can_undo());
+
+        let s1 = stroke(&mut d);
+        d.execute(Command::AddStroke(s1));
+        d.execute(Command::InsertPageAfter(0));
+        let s2 = stroke(&mut d);
+        let s3 = stroke(&mut d);
+        d.execute(Command::AddStroke(s2));
+        d.execute(Command::AddStroke(s3));
+
+        // Xoá trang 1 (có 2 nét)
+        d.execute(Command::DeletePage(1));
+        assert_eq!(d.page_count(), 1);
+        assert_eq!(d.active_page_index(), 0);
+
+        // Undo khôi phục đúng trang 1 và cả 2 nét của nó
+        assert!(d.undo());
+        assert_eq!(d.page_count(), 2);
+        assert_eq!(d.active_page_index(), 1);
+        assert_eq!(d.page_strokes(1).len(), 2);
+
+        // Redo xoá lại
+        assert!(d.redo());
+        assert_eq!(d.page_count(), 1);
+    }
+
+    #[test]
+    fn multi_page_save_and_load_roundtrip() {
+        let temp_file = std::env::temp_dir().join("test_multipage_roundtrip.inknote");
+        let _ = std::fs::remove_file(&temp_file);
+
+        let mut d = Document::new();
+        let s0 = stroke(&mut d);
+        d.execute(Command::AddStroke(s0));
+
+        for page_idx in 0..4 {
+            d.execute(Command::InsertPageAfter(page_idx));
+            let s = stroke(&mut d);
+            d.execute(Command::AddStroke(s));
+        }
+        assert_eq!(d.page_count(), 5);
+
+        d.to_file().save_to_path(&temp_file).unwrap();
+        let loaded = Document::from_file(DocumentFile::load_from_path(&temp_file).unwrap());
+        assert_eq!(loaded.page_count(), 5);
+        for i in 0..5 {
+            assert_eq!(loaded.page_strokes(i).len(), 1);
+        }
+
+        let _ = std::fs::remove_file(&temp_file);
     }
 }

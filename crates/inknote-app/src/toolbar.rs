@@ -2,23 +2,23 @@
 // theo đặc tả docs/04-ui-spec.md (Ngôn ngữ giao diện: Tiếng Anh).
 
 use eframe::egui::{
-    self, Align, Align2, Color32, CornerRadius, Layout, PopupCloseBehavior, Pos2, Rect, RichText, Sense, Stroke, Ui,
-    UiBuilder, Vec2, pos2, vec2,
+    self, pos2, vec2, Align, Align2, Color32, CornerRadius, Layout, PopupCloseBehavior, Pos2, Rect,
+    RichText, Sense, Stroke, Ui, UiBuilder, Vec2,
 };
 use inknote_core::{CanvasMode, PaperOrientation, PaperPattern, PaperSettings, PaperSize};
 use inknote_pen::{
-    Color as PenColor,
     brushconfig::{BrushConfig, BrushStyle},
     builders::PenPathBuilderType,
     style::PressureCurve,
+    Color as PenColor,
 };
 
 use crate::{
     autosave::FileStatusInfo,
-    icons::{ToolIcon, draw_icon},
+    icons::{draw_icon, ToolIcon},
     theme::{
-        EXTENDED_PALETTE, MARKER_QUICK_WIDTHS, QUICK_COLORS, SOLID_QUICK_WIDTHS, Theme,
-        pen_color_to_egui, rgb_to_pen_color,
+        pen_color_to_egui, rgb_to_pen_color, Theme, EXTENDED_PALETTE, MARKER_QUICK_WIDTHS,
+        QUICK_COLORS, SOLID_QUICK_WIDTHS,
     },
 };
 
@@ -54,6 +54,8 @@ pub struct ToolbarActions {
     pub save_clicked: bool,
     pub open_clicked: bool,
     pub new_clicked: bool,
+    pub add_page_clicked: bool,
+    pub delete_page_clicked: bool,
 }
 
 /// Thông tin hình học thực tế của các khu vực trên thanh công cụ (dùng để kiểm chứng alignment)
@@ -471,6 +473,7 @@ pub fn show_toolbars(
     brush_config: &mut BrushConfig,
     paper_settings: &mut PaperSettings,
     file_status: &FileStatusInfo<'_>,
+    page_info: (usize, usize),
     wacom_status: &str,
 ) -> ToolbarActions {
     let mut actions = ToolbarActions {
@@ -480,6 +483,8 @@ pub fn show_toolbars(
         save_clicked: false,
         open_clicked: false,
         new_clicked: false,
+        add_page_clicked: false,
+        delete_page_clicked: false,
     };
 
     // =========================================================================
@@ -583,6 +588,36 @@ pub fn show_toolbars(
                         });
                     ui.add_space(8.0);
                     ui.label(
+                        RichText::new(format!("Pages ({} / {})", page_info.0, page_info.1))
+                            .size(theme.font_size_title)
+                            .strong()
+                            .color(theme.popup_header_fg),
+                    );
+                    ui.add_space(4.0);
+                    egui::Frame::new()
+                        .fill(theme.popup_section_bg)
+                        .corner_radius(CornerRadius::same(8))
+                        .inner_margin(egui::Margin::same(8))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                if ui.button("+ Add Page After").clicked() {
+                                    actions.add_page_clicked = true;
+                                }
+                                let can_delete = page_info.1 > 1;
+                                if ui
+                                    .add_enabled(
+                                        can_delete,
+                                        egui::Button::new("Delete Current Page"),
+                                    )
+                                    .on_disabled_hover_text("A note must have at least 1 page")
+                                    .clicked()
+                                {
+                                    actions.delete_page_clicked = true;
+                                }
+                            });
+                        });
+                    ui.add_space(8.0);
+                    ui.label(
                         RichText::new("Paper Settings (P1)")
                             .size(theme.font_size_title)
                             .strong()
@@ -647,7 +682,8 @@ pub fn show_toolbars(
                                 ui.horizontal(|ui| {
                                     if ui
                                         .selectable_label(
-                                            paper_settings.orientation == PaperOrientation::Portrait,
+                                            paper_settings.orientation
+                                                == PaperOrientation::Portrait,
                                             "Portrait (Dọc)",
                                         )
                                         .clicked()
@@ -656,7 +692,8 @@ pub fn show_toolbars(
                                     }
                                     if ui
                                         .selectable_label(
-                                            paper_settings.orientation == PaperOrientation::Landscape,
+                                            paper_settings.orientation
+                                                == PaperOrientation::Landscape,
                                             "Landscape (Ngang)",
                                         )
                                         .clicked()
@@ -674,10 +711,26 @@ pub fn show_toolbars(
                                     .color(theme.tool_text_muted),
                             );
                             ui.horizontal(|ui| {
-                                ui.selectable_value(&mut paper_settings.pattern, PaperPattern::Plain, "Plain");
-                                ui.selectable_value(&mut paper_settings.pattern, PaperPattern::Dotted, "Dotted");
-                                ui.selectable_value(&mut paper_settings.pattern, PaperPattern::Grid, "Grid");
-                                ui.selectable_value(&mut paper_settings.pattern, PaperPattern::Lined, "Lined");
+                                ui.selectable_value(
+                                    &mut paper_settings.pattern,
+                                    PaperPattern::Plain,
+                                    "Plain",
+                                );
+                                ui.selectable_value(
+                                    &mut paper_settings.pattern,
+                                    PaperPattern::Dotted,
+                                    "Dotted",
+                                );
+                                ui.selectable_value(
+                                    &mut paper_settings.pattern,
+                                    PaperPattern::Grid,
+                                    "Grid",
+                                );
+                                ui.selectable_value(
+                                    &mut paper_settings.pattern,
+                                    PaperPattern::Lined,
+                                    "Lined",
+                                );
                             });
 
                             // 2. Cỡ ô / khoảng cách
@@ -690,8 +743,11 @@ pub fn show_toolbars(
                                             .color(theme.tool_text_fg),
                                     );
                                     ui.add(
-                                        egui::Slider::new(&mut paper_settings.dot_spacing, 14.0..=56.0)
-                                            .suffix(" pt"),
+                                        egui::Slider::new(
+                                            &mut paper_settings.dot_spacing,
+                                            14.0..=56.0,
+                                        )
+                                        .suffix(" pt"),
                                     );
                                 });
                             }
@@ -709,8 +765,11 @@ pub fn show_toolbars(
                                                 .color(theme.tool_text_fg),
                                         );
                                         ui.add(
-                                            egui::Slider::new(&mut paper_settings.left_margin, 20.0..=240.0)
-                                                .suffix(" pt"),
+                                            egui::Slider::new(
+                                                &mut paper_settings.left_margin,
+                                                20.0..=240.0,
+                                            )
+                                            .suffix(" pt"),
                                         );
                                     });
                                     ui.horizontal(|ui| {
@@ -720,8 +779,11 @@ pub fn show_toolbars(
                                                 .color(theme.tool_text_fg),
                                         );
                                         ui.add(
-                                            egui::Slider::new(&mut paper_settings.right_margin, 20.0..=240.0)
-                                                .suffix(" pt"),
+                                            egui::Slider::new(
+                                                &mut paper_settings.right_margin,
+                                                20.0..=240.0,
+                                            )
+                                            .suffix(" pt"),
                                         );
                                     });
                                 }
@@ -760,13 +822,17 @@ pub fn show_toolbars(
                 false,
                 "Export PDF / Image (Step 7.3 - P3)",
             );
-            let _ = nav_icon_button(
+            if nav_icon_button(
                 &mut right_ui,
                 theme,
                 ToolIcon::AddPage,
                 false,
-                "Add Page (Step 3.1 - P1)",
-            );
+                "Add Page After Current",
+            )
+            .clicked()
+            {
+                actions.add_page_clicked = true;
+            }
             let right_rect = right_ui.min_rect();
 
             // 3. Nhóm Giữa: tâm trùng với tâm cửa sổ (`bar_rect.center()`),
