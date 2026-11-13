@@ -231,6 +231,54 @@ pub struct ShapeObject {
     pub dashed: bool,
 }
 
+/// Nhóm phông chữ cho hộp văn bản (Bước 5.4 - P2, khớp docs/04-ui-spec.md).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TextFontFamily {
+    #[default]
+    Sans,
+    Serif,
+    Mono,
+}
+
+/// Căn lề đoạn văn bản trong hộp văn bản.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TextAlign {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
+/// Kiểu danh sách của hộp văn bản.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TextListMode {
+    #[default]
+    None,
+    Bullet,
+    Numbered,
+}
+
+/// Đối tượng hộp văn bản (Text Box) trên trang.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TextObject {
+    pub id: u64,
+    pub pos: [f64; 2],
+    pub size: [f64; 2],
+    pub text: String,
+    #[serde(default)]
+    pub font_family: TextFontFamily,
+    pub font_size: f64,
+    #[serde(default)]
+    pub bold: bool,
+    #[serde(default)]
+    pub italic: bool,
+    #[serde(default)]
+    pub align: TextAlign,
+    #[serde(default)]
+    pub list_mode: TextListMode,
+    pub color: [u8; 4],
+}
+
 /// Các loại đối tượng trên một trang (khớp docs/02-architecture.md mục 3).
 /// Chỉ BrushStroke mới bị Eraser xoá; các loại khác không bị tẩy xoá lướt qua.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -239,8 +287,8 @@ pub enum PageObject {
     BrushStroke(Stroke),
     Latex(LatexObject),
     Shape(ShapeObject),
+    Text(TextObject),
     // Dự phòng mở rộng cho các bước tiếp theo (P2):
-    // Text(TextObject),
     // Image(ImageObject),
 }
 
@@ -337,28 +385,37 @@ pub enum Command {
     },
     /// Chèn một hình học cơ bản vào trang tại vị trí `page_index` (1 bước undo).
     AddShape { page_index: usize, obj: ShapeObject },
+    /// Chèn một hộp văn bản vào trang tại vị trí `page_index` (1 bước undo).
+    AddText { page_index: usize, obj: TextObject },
+    /// Cập nhật toàn bộ nội dung/định dạng/vị trí hộp văn bản `new_obj` theo `id` (1 bước undo).
+    UpdateText {
+        page_index: usize,
+        new_obj: TextObject,
+    },
     /// Áp dụng kết quả tẩy nét bút trên một trang (chỉ tác động lên `strokes`, 1 bước undo).
     EraseStrokes {
         page_index: usize,
         removed: Vec<(usize, Stroke)>,
         added: Vec<Stroke>,
     },
-    /// Di chuyển và/hoặc đổi kích thước vùng chọn (nét bút + LaTeX + hình học, 1 bước undo).
+    /// Di chuyển và/hoặc đổi kích thước vùng chọn (nét bút + LaTeX + hình học + văn bản, 1 bước undo).
     TransformSelection {
         page_index: usize,
         stroke_ids: Vec<u64>,
         latex_ids: Vec<u64>,
         shape_ids: Vec<u64>,
+        text_ids: Vec<u64>,
         anchor: [f64; 2],
         scale: [f64; 2],
         delta: [f64; 2],
     },
-    /// Xoá toàn bộ đối tượng đang chọn (nét bút + LaTeX + hình học, 1 bước undo).
+    /// Xoá toàn bộ đối tượng đang chọn (nét bút + LaTeX + hình học + văn bản, 1 bước undo).
     DeleteSelection {
         page_index: usize,
         stroke_ids: Vec<u64>,
         latex_ids: Vec<u64>,
         shape_ids: Vec<u64>,
+        text_ids: Vec<u64>,
     },
 }
 
@@ -369,6 +426,7 @@ pub struct DocumentPage {
     pub strokes: Vec<Stroke>,
     pub latex_objects: Vec<LatexObject>,
     pub shapes: Vec<ShapeObject>,
+    pub text_objects: Vec<TextObject>,
 }
 
 /// Lệnh đã thực thi, kèm dữ liệu cần để hoàn tác.
@@ -418,6 +476,15 @@ enum Done {
         page_index: usize,
         obj: ShapeObject,
     },
+    AddText {
+        page_index: usize,
+        obj: TextObject,
+    },
+    UpdateText {
+        page_index: usize,
+        old_obj: TextObject,
+        new_obj: TextObject,
+    },
     EraseStrokes {
         page_index: usize,
         removed: Vec<(usize, Stroke)>,
@@ -431,12 +498,15 @@ enum Done {
         new_latex: Vec<(usize, LatexObject)>,
         old_shapes: Vec<(usize, ShapeObject)>,
         new_shapes: Vec<(usize, ShapeObject)>,
+        old_texts: Vec<(usize, TextObject)>,
+        new_texts: Vec<(usize, TextObject)>,
     },
     DeleteSelection {
         page_index: usize,
         removed_strokes: Vec<(usize, Stroke)>,
         removed_latex: Vec<(usize, LatexObject)>,
         removed_shapes: Vec<(usize, ShapeObject)>,
+        removed_texts: Vec<(usize, TextObject)>,
     },
 }
 
@@ -506,6 +576,25 @@ pub fn transform_shape(obj: &mut ShapeObject, anchor: [f64; 2], scale: [f64; 2],
     obj.end = transform_xy(obj.end, anchor, scale, delta);
 }
 
+pub fn transform_text(obj: &mut TextObject, anchor: [f64; 2], scale: [f64; 2], delta: [f64; 2]) {
+    let p0 = transform_xy(obj.pos, anchor, scale, delta);
+    let p1 = transform_xy(
+        [obj.pos[0] + obj.size[0], obj.pos[1] + obj.size[1]],
+        anchor,
+        scale,
+        delta,
+    );
+    obj.pos = [p0[0].min(p1[0]), p0[1].min(p1[1])];
+    obj.size = [
+        (p1[0] - p0[0]).abs().max(48.0),
+        (p1[1] - p0[1]).abs().max(20.0),
+    ];
+    let sy = scale[1].abs();
+    if (sy - 1.0).abs() > 1e-4 {
+        obj.font_size = (obj.font_size * sy).clamp(8.0, 120.0);
+    }
+}
+
 /// Tài liệu nhiều trang + lịch sử Undo/Redo + trạng thái lưu file.
 pub struct Document {
     metadata: DocumentMetadata,
@@ -530,6 +619,7 @@ impl Default for Document {
                 strokes: Vec::new(),
                 latex_objects: Vec::new(),
                 shapes: Vec::new(),
+                text_objects: Vec::new(),
             }],
             active_page_idx: 0,
             undo_stack: Vec::new(),
@@ -704,6 +794,7 @@ impl Document {
                     strokes: Vec::new(),
                     latex_objects: Vec::new(),
                     shapes: Vec::new(),
+                    text_objects: Vec::new(),
                 };
                 let prev_active = self.active_page_idx;
                 self.pages.insert(insert_idx, page.clone());
@@ -722,6 +813,7 @@ impl Document {
                     strokes: Vec::new(),
                     latex_objects: Vec::new(),
                     shapes: Vec::new(),
+                    text_objects: Vec::new(),
                 };
                 let prev_active = self.active_page_idx;
                 self.pages.insert(insert_idx, page.clone());
@@ -761,11 +853,20 @@ impl Document {
                         sh
                     })
                     .collect();
+                let src_texts = self.pages[src].text_objects.clone();
+                let cloned_texts: Vec<TextObject> = src_texts
+                    .into_iter()
+                    .map(|mut txt| {
+                        txt.id = self.alloc_id();
+                        txt
+                    })
+                    .collect();
                 let page = DocumentPage {
                     id: page_id,
                     strokes: cloned_strokes,
                     latex_objects: cloned_latex,
                     shapes: cloned_shapes,
+                    text_objects: cloned_texts,
                 };
                 let prev_active = self.active_page_idx;
                 self.pages.insert(insert_idx, page.clone());
@@ -863,6 +964,39 @@ impl Document {
                     obj,
                 }
             }
+            Command::AddText { page_index, obj } => {
+                let target_idx = page_index.min(self.pages.len().saturating_sub(1));
+                self.pages[target_idx].text_objects.push(obj.clone());
+                self.active_page_idx = target_idx;
+                Done::AddText {
+                    page_index: target_idx,
+                    obj,
+                }
+            }
+            Command::UpdateText {
+                page_index,
+                new_obj,
+            } => {
+                let target_idx = page_index.min(self.pages.len().saturating_sub(1));
+                let Some(obj) = self.pages[target_idx]
+                    .text_objects
+                    .iter_mut()
+                    .find(|o| o.id == new_obj.id)
+                else {
+                    return;
+                };
+                if *obj == new_obj {
+                    return;
+                }
+                let old_obj = obj.clone();
+                *obj = new_obj.clone();
+                self.active_page_idx = target_idx;
+                Done::UpdateText {
+                    page_index: target_idx,
+                    old_obj,
+                    new_obj,
+                }
+            }
             Command::EraseStrokes {
                 page_index,
                 mut removed,
@@ -892,6 +1026,7 @@ impl Document {
                 stroke_ids,
                 latex_ids,
                 shape_ids,
+                text_ids,
                 anchor,
                 scale,
                 delta,
@@ -900,12 +1035,15 @@ impl Document {
                 let s_set: HashSet<u64> = stroke_ids.into_iter().collect();
                 let l_set: HashSet<u64> = latex_ids.into_iter().collect();
                 let sh_set: HashSet<u64> = shape_ids.into_iter().collect();
+                let txt_set: HashSet<u64> = text_ids.into_iter().collect();
                 let mut old_strokes = Vec::new();
                 let mut new_strokes = Vec::new();
                 let mut old_latex = Vec::new();
                 let mut new_latex = Vec::new();
                 let mut old_shapes = Vec::new();
                 let mut new_shapes = Vec::new();
+                let mut old_texts = Vec::new();
+                let mut new_texts = Vec::new();
 
                 let page = &mut self.pages[target_idx];
                 for (idx, s) in page.strokes.iter_mut().enumerate() {
@@ -929,7 +1067,18 @@ impl Document {
                         new_shapes.push((idx, sh.clone()));
                     }
                 }
-                if old_strokes.is_empty() && old_latex.is_empty() && old_shapes.is_empty() {
+                for (idx, txt) in page.text_objects.iter_mut().enumerate() {
+                    if txt_set.contains(&txt.id) {
+                        old_texts.push((idx, txt.clone()));
+                        transform_text(txt, anchor, scale, delta);
+                        new_texts.push((idx, txt.clone()));
+                    }
+                }
+                if old_strokes.is_empty()
+                    && old_latex.is_empty()
+                    && old_shapes.is_empty()
+                    && old_texts.is_empty()
+                {
                     return;
                 }
                 self.active_page_idx = target_idx;
@@ -941,6 +1090,8 @@ impl Document {
                     new_latex,
                     old_shapes,
                     new_shapes,
+                    old_texts,
+                    new_texts,
                 }
             }
             Command::DeleteSelection {
@@ -948,11 +1099,13 @@ impl Document {
                 stroke_ids,
                 latex_ids,
                 shape_ids,
+                text_ids,
             } => {
                 let target_idx = page_index.min(self.pages.len().saturating_sub(1));
                 let s_set: HashSet<u64> = stroke_ids.into_iter().collect();
                 let l_set: HashSet<u64> = latex_ids.into_iter().collect();
                 let sh_set: HashSet<u64> = shape_ids.into_iter().collect();
+                let txt_set: HashSet<u64> = text_ids.into_iter().collect();
                 let page = &mut self.pages[target_idx];
 
                 let removed_strokes: Vec<(usize, Stroke)> = page
@@ -976,10 +1129,18 @@ impl Document {
                     .filter(|(_, sh)| sh_set.contains(&sh.id))
                     .map(|(i, sh)| (i, sh.clone()))
                     .collect();
+                let removed_texts: Vec<(usize, TextObject)> = page
+                    .text_objects
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, txt)| txt_set.contains(&txt.id))
+                    .map(|(i, txt)| (i, txt.clone()))
+                    .collect();
 
                 if removed_strokes.is_empty()
                     && removed_latex.is_empty()
                     && removed_shapes.is_empty()
+                    && removed_texts.is_empty()
                 {
                     return;
                 }
@@ -992,12 +1153,16 @@ impl Document {
                 for &(idx, _) in removed_shapes.iter().rev() {
                     page.shapes.remove(idx);
                 }
+                for &(idx, _) in removed_texts.iter().rev() {
+                    page.text_objects.remove(idx);
+                }
                 self.active_page_idx = target_idx;
                 Done::DeleteSelection {
                     page_index: target_idx,
                     removed_strokes,
                     removed_latex,
                     removed_shapes,
+                    removed_texts,
                 }
             }
         };
@@ -1063,6 +1228,24 @@ impl Document {
                 self.pages[*page_index].shapes.pop();
                 self.active_page_idx = *page_index;
             }
+            Done::AddText { page_index, .. } => {
+                self.pages[*page_index].text_objects.pop();
+                self.active_page_idx = *page_index;
+            }
+            Done::UpdateText {
+                page_index,
+                old_obj,
+                ..
+            } => {
+                if let Some(obj) = self.pages[*page_index]
+                    .text_objects
+                    .iter_mut()
+                    .find(|o| o.id == old_obj.id)
+                {
+                    *obj = old_obj.clone();
+                }
+                self.active_page_idx = *page_index;
+            }
             Done::UpdateLatex {
                 page_index,
                 obj_id,
@@ -1101,6 +1284,7 @@ impl Document {
                 old_strokes,
                 old_latex,
                 old_shapes,
+                old_texts,
                 ..
             } => {
                 let page = &mut self.pages[*page_index];
@@ -1119,6 +1303,11 @@ impl Document {
                         page.shapes[*idx] = sh.clone();
                     }
                 }
+                for (idx, txt) in old_texts {
+                    if *idx < page.text_objects.len() {
+                        page.text_objects[*idx] = txt.clone();
+                    }
+                }
                 self.active_page_idx = *page_index;
             }
             Done::DeleteSelection {
@@ -1126,6 +1315,7 @@ impl Document {
                 removed_strokes,
                 removed_latex,
                 removed_shapes,
+                removed_texts,
             } => {
                 let page = &mut self.pages[*page_index];
                 for (idx, s) in removed_strokes {
@@ -1139,6 +1329,10 @@ impl Document {
                 for (idx, sh) in removed_shapes {
                     let at = (*idx).min(page.shapes.len());
                     page.shapes.insert(at, sh.clone());
+                }
+                for (idx, txt) in removed_texts {
+                    let at = (*idx).min(page.text_objects.len());
+                    page.text_objects.insert(at, txt.clone());
                 }
                 self.active_page_idx = *page_index;
             }
@@ -1192,6 +1386,24 @@ impl Document {
                 self.pages[*page_index].shapes.push(obj.clone());
                 self.active_page_idx = *page_index;
             }
+            Done::AddText { page_index, obj } => {
+                self.pages[*page_index].text_objects.push(obj.clone());
+                self.active_page_idx = *page_index;
+            }
+            Done::UpdateText {
+                page_index,
+                new_obj,
+                ..
+            } => {
+                if let Some(obj) = self.pages[*page_index]
+                    .text_objects
+                    .iter_mut()
+                    .find(|o| o.id == new_obj.id)
+                {
+                    *obj = new_obj.clone();
+                }
+                self.active_page_idx = *page_index;
+            }
             Done::UpdateLatex {
                 page_index,
                 obj_id,
@@ -1230,6 +1442,7 @@ impl Document {
                 new_strokes,
                 new_latex,
                 new_shapes,
+                new_texts,
                 ..
             } => {
                 let page = &mut self.pages[*page_index];
@@ -1248,6 +1461,11 @@ impl Document {
                         page.shapes[*idx] = sh.clone();
                     }
                 }
+                for (idx, txt) in new_texts {
+                    if *idx < page.text_objects.len() {
+                        page.text_objects[*idx] = txt.clone();
+                    }
+                }
                 self.active_page_idx = *page_index;
             }
             Done::DeleteSelection {
@@ -1255,6 +1473,7 @@ impl Document {
                 removed_strokes,
                 removed_latex,
                 removed_shapes,
+                removed_texts,
             } => {
                 let page = &mut self.pages[*page_index];
                 for &(idx, _) in removed_strokes.iter().rev() {
@@ -1270,6 +1489,11 @@ impl Document {
                 for &(idx, _) in removed_shapes.iter().rev() {
                     if idx < page.shapes.len() {
                         page.shapes.remove(idx);
+                    }
+                }
+                for &(idx, _) in removed_texts.iter().rev() {
+                    if idx < page.text_objects.len() {
+                        page.text_objects.remove(idx);
                     }
                 }
                 self.active_page_idx = *page_index;
@@ -1294,6 +1518,7 @@ impl Document {
                     .collect();
                 objects.extend(p.latex_objects.iter().cloned().map(PageObject::Latex));
                 objects.extend(p.shapes.iter().cloned().map(PageObject::Shape));
+                objects.extend(p.text_objects.iter().cloned().map(PageObject::Text));
                 Page { id: p.id, objects }
             })
             .collect();
@@ -1318,6 +1543,7 @@ impl Document {
             let mut strokes = Vec::new();
             let mut latex_objects = Vec::new();
             let mut shapes = Vec::new();
+            let mut text_objects = Vec::new();
             for obj in page.objects {
                 match obj {
                     PageObject::BrushStroke(s) => {
@@ -1338,6 +1564,12 @@ impl Document {
                         }
                         shapes.push(sh);
                     }
+                    PageObject::Text(txt) => {
+                        if txt.id > max_id {
+                            max_id = txt.id;
+                        }
+                        text_objects.push(txt);
+                    }
                 }
             }
             pages.push(DocumentPage {
@@ -1345,6 +1577,7 @@ impl Document {
                 strokes,
                 latex_objects,
                 shapes,
+                text_objects,
             });
         }
         if pages.is_empty() {
@@ -1354,6 +1587,7 @@ impl Document {
                 strokes: Vec::new(),
                 latex_objects: Vec::new(),
                 shapes: Vec::new(),
+                text_objects: Vec::new(),
             });
         }
         Self {
@@ -1876,6 +2110,7 @@ mod tests {
             stroke_ids: vec![s1_id],
             latex_ids: vec![l_id],
             shape_ids: vec![],
+            text_ids: vec![],
             anchor: [0.0, 0.0],
             scale: [2.0, 2.0],
             delta: [50.0, 30.0],
@@ -1898,6 +2133,7 @@ mod tests {
             stroke_ids: vec![s1_id],
             latex_ids: vec![l_id],
             shape_ids: vec![],
+            text_ids: vec![],
         });
         assert_eq!(d.page_strokes(0).len(), 0);
         assert_eq!(d.pages()[0].latex_objects.len(), 0);
@@ -1938,6 +2174,7 @@ mod tests {
             stroke_ids: vec![],
             latex_ids: vec![],
             shape_ids: vec![sh_id],
+            text_ids: vec![],
             anchor: [0.0, 0.0],
             scale: [1.5, 1.0],
             delta: [10.0, 20.0],
@@ -1977,9 +2214,112 @@ mod tests {
             stroke_ids: vec![],
             latex_ids: vec![],
             shape_ids: vec![sh_id],
+            text_ids: vec![],
         });
         assert!(d.pages()[0].shapes.is_empty());
         assert!(d.undo());
         assert_eq!(d.pages()[0].shapes.len(), 1);
+    }
+
+    #[test]
+    fn text_add_update_undo_redo_transform_delete_and_file_roundtrip() {
+        let mut d = Document::new();
+        let txt_id = d.alloc_id();
+        let original = TextObject {
+            id: txt_id,
+            pos: [60.0, 90.0],
+            size: [260.0, 48.0],
+            text: "Tiếng Việt, ắ ằ ẳ ẵ ặ ơ ư".to_string(),
+            font_family: TextFontFamily::Sans,
+            font_size: 16.0,
+            bold: true,
+            italic: false,
+            align: TextAlign::Left,
+            list_mode: TextListMode::None,
+            color: [20, 22, 25, 255],
+        };
+        d.execute(Command::AddText {
+            page_index: 0,
+            obj: original.clone(),
+        });
+        assert_eq!(d.pages()[0].text_objects.len(), 1);
+        assert_eq!(d.pages()[0].text_objects[0], original);
+
+        assert!(d.undo());
+        assert!(d.pages()[0].text_objects.is_empty());
+        assert!(d.redo());
+        assert_eq!(d.pages()[0].text_objects[0], original);
+
+        // Sửa nội dung & kiểu chữ trong 1 bước Undo
+        let mut updated = original.clone();
+        updated.text = "• Tiếng Việt, ắ ằ ẳ ẵ ặ ơ ư\n• Dòng thứ hai".to_string();
+        updated.font_family = TextFontFamily::Serif;
+        updated.font_size = 20.0;
+        updated.italic = true;
+        updated.align = TextAlign::Center;
+        updated.list_mode = TextListMode::Bullet;
+        updated.color = [25, 103, 210, 255];
+        d.execute(Command::UpdateText {
+            page_index: 0,
+            new_obj: updated.clone(),
+        });
+        assert_eq!(d.pages()[0].text_objects[0], updated);
+        assert!(d.undo());
+        assert_eq!(d.pages()[0].text_objects[0], original);
+        assert!(d.redo());
+        assert_eq!(d.pages()[0].text_objects[0], updated);
+
+        // Lasso transform (scale cả chiều rộng và cỡ chữ) + Undo
+        d.execute(Command::TransformSelection {
+            page_index: 0,
+            stroke_ids: vec![],
+            latex_ids: vec![],
+            shape_ids: vec![],
+            text_ids: vec![txt_id],
+            anchor: [0.0, 0.0],
+            scale: [1.5, 1.25],
+            delta: [10.0, 20.0],
+        });
+        assert_eq!(d.pages()[0].text_objects[0].pos, [100.0, 132.5]);
+        assert_eq!(d.pages()[0].text_objects[0].size, [390.0, 60.0]);
+        assert!((d.pages()[0].text_objects[0].font_size - 25.0).abs() < 1e-6);
+        assert!(d.undo());
+        assert_eq!(d.pages()[0].text_objects[0], updated);
+        assert!(d.redo());
+
+        // Lưu & mở lại .inknote giữ nguyên tiếng Việt + định dạng
+        let file = d.to_file();
+        let json = serde_json::to_string(&file).unwrap();
+        let parsed: DocumentFile = serde_json::from_str(&json).unwrap();
+        let loaded = Document::from_file(parsed);
+        assert_eq!(loaded.pages()[0].text_objects.len(), 1);
+        assert_eq!(
+            loaded.pages()[0].text_objects[0],
+            d.pages()[0].text_objects[0]
+        );
+
+        // Tẩy (EraseStrokes) không bao giờ chạm tới text_objects
+        let s = stroke(&mut d);
+        d.execute(Command::AddStroke(s));
+        let rem = d.pages()[0].strokes[0].clone();
+        d.execute(Command::EraseStrokes {
+            page_index: 0,
+            removed: vec![(0, rem)],
+            added: vec![],
+        });
+        assert!(d.pages()[0].strokes.is_empty());
+        assert_eq!(d.pages()[0].text_objects.len(), 1);
+
+        // DeleteSelection xoá hộp văn bản và undo khôi phục lại
+        d.execute(Command::DeleteSelection {
+            page_index: 0,
+            stroke_ids: vec![],
+            latex_ids: vec![],
+            shape_ids: vec![],
+            text_ids: vec![txt_id],
+        });
+        assert!(d.pages()[0].text_objects.is_empty());
+        assert!(d.undo());
+        assert_eq!(d.pages()[0].text_objects.len(), 1);
     }
 }

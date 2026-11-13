@@ -11,6 +11,7 @@ use inknote_core::{Document, DocumentPage};
 use crate::{
     CachedStroke,
     shapes::{shape_intersects_polygon, shape_intersects_rect, shape_page_bbox},
+    text_box::text_page_bbox,
     toolbar::{LassoFilter, LassoMode},
 };
 
@@ -28,6 +29,7 @@ pub struct LassoSelection {
     pub stroke_ids: Vec<u64>,
     pub latex_ids: Vec<u64>,
     pub shape_ids: Vec<u64>,
+    pub text_ids: Vec<u64>,
     pub bbox: egui::Rect,
 }
 
@@ -128,11 +130,13 @@ pub fn compute_selection_bbox(
     stroke_ids: &[u64],
     latex_ids: &[u64],
     shape_ids: &[u64],
+    text_ids: &[u64],
     batch_cache: &HashMap<u64, CachedStroke>,
 ) -> Option<egui::Rect> {
     let s_set: HashSet<u64> = stroke_ids.iter().copied().collect();
     let l_set: HashSet<u64> = latex_ids.iter().copied().collect();
     let sh_set: HashSet<u64> = shape_ids.iter().copied().collect();
+    let txt_set: HashSet<u64> = text_ids.iter().copied().collect();
     let mut bbox = egui::Rect::NOTHING;
 
     for s in &page.strokes {
@@ -152,6 +156,11 @@ pub fn compute_selection_bbox(
     for sh in &page.shapes {
         if sh_set.contains(&sh.id) {
             bbox = bbox.union(shape_page_bbox(sh));
+        }
+    }
+    for txt in &page.text_objects {
+        if txt_set.contains(&txt.id) {
+            bbox = bbox.union(text_page_bbox(txt));
         }
     }
 
@@ -177,6 +186,7 @@ pub fn select_in_freehand(
     let mut stroke_ids = Vec::new();
     let mut latex_ids = Vec::new();
     let mut shape_ids = Vec::new();
+    let mut text_ids = Vec::new();
 
     if filter.handwriting {
         for s in &page.strokes {
@@ -217,12 +227,28 @@ pub fn select_in_freehand(
         }
     }
 
-    let bbox = compute_selection_bbox(page, &stroke_ids, &latex_ids, &shape_ids, batch_cache)?;
+    if filter.text_boxes {
+        for txt in &page.text_objects {
+            if rect_intersects_polygon(text_page_bbox(txt), poly) {
+                text_ids.push(txt.id);
+            }
+        }
+    }
+
+    let bbox = compute_selection_bbox(
+        page,
+        &stroke_ids,
+        &latex_ids,
+        &shape_ids,
+        &text_ids,
+        batch_cache,
+    )?;
     Some(LassoSelection {
         page_index,
         stroke_ids,
         latex_ids,
         shape_ids,
+        text_ids,
         bbox,
     })
 }
@@ -240,6 +266,7 @@ pub fn select_in_rect(
     let mut stroke_ids = Vec::new();
     let mut latex_ids = Vec::new();
     let mut shape_ids = Vec::new();
+    let mut text_ids = Vec::new();
 
     if filter.handwriting {
         for s in &page.strokes {
@@ -270,12 +297,28 @@ pub fn select_in_rect(
         }
     }
 
-    let bbox = compute_selection_bbox(page, &stroke_ids, &latex_ids, &shape_ids, batch_cache)?;
+    if filter.text_boxes {
+        for txt in &page.text_objects {
+            if text_page_bbox(txt).intersects(rect) {
+                text_ids.push(txt.id);
+            }
+        }
+    }
+
+    let bbox = compute_selection_bbox(
+        page,
+        &stroke_ids,
+        &latex_ids,
+        &shape_ids,
+        &text_ids,
+        batch_cache,
+    )?;
     Some(LassoSelection {
         page_index,
         stroke_ids,
         latex_ids,
         shape_ids,
+        text_ids,
         bbox,
     })
 }
@@ -328,6 +371,7 @@ pub fn refresh_selection_bbox(
         &sel.stroke_ids,
         &sel.latex_ids,
         &sel.shape_ids,
+        &sel.text_ids,
         batch_cache,
     ) {
         sel.bbox = bbox;

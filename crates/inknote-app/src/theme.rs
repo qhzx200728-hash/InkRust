@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use eframe::egui::{self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, Margin};
+use inknote_core::TextFontFamily;
 use inknote_pen::Color as PenColor;
 
 #[derive(Clone, Debug)]
@@ -230,7 +231,57 @@ pub fn rgb_to_pen_color(rgb: [u8; 3], alpha: f64) -> PenColor {
     }
 }
 
-/// Nạp font hệ thống Windows (`Segoe UI` và `Consolas`) để hiển thị sắc nét và hỗ trợ đầy đủ 100% dấu tiếng Việt.
+pub fn text_font_family_key(family: TextFontFamily, bold: bool, italic: bool) -> &'static str {
+    match (family, bold, italic) {
+        (TextFontFamily::Sans, false, false) => "sans_regular",
+        (TextFontFamily::Sans, true, false) => "sans_bold",
+        (TextFontFamily::Sans, false, true) => "sans_italic",
+        (TextFontFamily::Sans, true, true) => "sans_bold_italic",
+        (TextFontFamily::Serif, false, false) => "serif_regular",
+        (TextFontFamily::Serif, true, false) => "serif_bold",
+        (TextFontFamily::Serif, false, true) => "serif_italic",
+        (TextFontFamily::Serif, true, true) => "serif_bold_italic",
+        (TextFontFamily::Mono, false, false) => "mono_regular",
+        (TextFontFamily::Mono, true, false) => "mono_bold",
+        (TextFontFamily::Mono, false, true) => "mono_italic",
+        (TextFontFamily::Mono, true, true) => "mono_bold_italic",
+    }
+}
+
+pub fn text_font_family(family: TextFontFamily, bold: bool, italic: bool) -> FontFamily {
+    FontFamily::Name(Arc::from(text_font_family_key(family, bold, italic)))
+}
+
+fn register_font_variant(
+    fonts: &mut FontDefinitions,
+    key: &str,
+    path: &str,
+    fallback_family: FontFamily,
+) {
+    let mut chain = Vec::new();
+    if let Ok(bytes) = std::fs::read(path) {
+        fonts
+            .font_data
+            .insert(key.to_owned(), Arc::new(FontData::from_owned(bytes)));
+        chain.push(key.to_owned());
+    }
+    if let Some(defaults) = fonts.families.get(&fallback_family) {
+        for f in defaults {
+            if !chain.contains(f) {
+                chain.push(f.clone());
+            }
+        }
+    }
+    if fonts.font_data.contains_key("segoeui") && !chain.iter().any(|f| f == "segoeui") {
+        chain.push("segoeui".to_owned());
+    }
+    fonts
+        .families
+        .insert(FontFamily::Name(Arc::from(key)), chain);
+}
+
+/// Nạp font hệ thống Windows (`Segoe UI`, `Times New Roman`, `Consolas` đủ Regular/Bold/Italic)
+/// để hiển thị sắc nét và hỗ trợ đầy đủ 100% dấu tiếng Việt.
 pub fn setup_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
 
@@ -250,6 +301,71 @@ pub fn setup_fonts(ctx: &egui::Context) {
         if let Some(mono) = fonts.families.get_mut(&FontFamily::Monospace) {
             mono.insert(0, "consolas".to_owned());
         }
+    }
+
+    for (key, path, fb) in [
+        (
+            "sans_regular",
+            r"C:\Windows\Fonts\segoeui.ttf",
+            FontFamily::Proportional,
+        ),
+        (
+            "sans_bold",
+            r"C:\Windows\Fonts\segoeuib.ttf",
+            FontFamily::Proportional,
+        ),
+        (
+            "sans_italic",
+            r"C:\Windows\Fonts\segoeuii.ttf",
+            FontFamily::Proportional,
+        ),
+        (
+            "sans_bold_italic",
+            r"C:\Windows\Fonts\segoeuiz.ttf",
+            FontFamily::Proportional,
+        ),
+        (
+            "serif_regular",
+            r"C:\Windows\Fonts\times.ttf",
+            FontFamily::Proportional,
+        ),
+        (
+            "serif_bold",
+            r"C:\Windows\Fonts\timesbd.ttf",
+            FontFamily::Proportional,
+        ),
+        (
+            "serif_italic",
+            r"C:\Windows\Fonts\timesi.ttf",
+            FontFamily::Proportional,
+        ),
+        (
+            "serif_bold_italic",
+            r"C:\Windows\Fonts\timesbi.ttf",
+            FontFamily::Proportional,
+        ),
+        (
+            "mono_regular",
+            r"C:\Windows\Fonts\consola.ttf",
+            FontFamily::Monospace,
+        ),
+        (
+            "mono_bold",
+            r"C:\Windows\Fonts\consolab.ttf",
+            FontFamily::Monospace,
+        ),
+        (
+            "mono_italic",
+            r"C:\Windows\Fonts\consolai.ttf",
+            FontFamily::Monospace,
+        ),
+        (
+            "mono_bold_italic",
+            r"C:\Windows\Fonts\consolaz.ttf",
+            FontFamily::Monospace,
+        ),
+    ] {
+        register_font_variant(&mut fonts, key, path, fb);
     }
 
     ctx.set_fonts(fonts);

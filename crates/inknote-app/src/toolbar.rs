@@ -6,7 +6,8 @@ use eframe::egui::{
     Sense, Stroke, Ui, UiBuilder, Vec2, pos2, vec2,
 };
 use inknote_core::{
-    CanvasMode, PaperOrientation, PaperPattern, PaperSettings, PaperSize, ShapeKind,
+    CanvasMode, PaperOrientation, PaperPattern, PaperSettings, PaperSize, ShapeKind, TextAlign,
+    TextFontFamily, TextListMode,
 };
 use inknote_pen::{
     Color as PenColor,
@@ -21,7 +22,7 @@ use crate::{
     shapes::{QUICK_SHAPE_KINDS, SHAPE_GROUPS, draw_shape_kind_icon, shape_kind_label},
     theme::{
         EXTENDED_PALETTE, MARKER_QUICK_WIDTHS, QUICK_COLORS, SOLID_QUICK_WIDTHS, Theme,
-        pen_color_to_egui, rgb_to_pen_color,
+        pen_color_to_egui, rgb_to_pen_color, text_font_family,
     },
 };
 
@@ -61,6 +62,8 @@ pub struct ToolbarActions {
     pub delete_page_clicked: bool,
     pub latex_clicked: bool,
     pub delete_selection_clicked: bool,
+    pub text_style_changed: bool,
+    pub text_list_mode_changed: bool,
 }
 
 /// Thông tin hình học thực tế của các khu vực trên thanh công cụ (dùng để kiểm chứng alignment)
@@ -135,6 +138,13 @@ pub struct ToolbarState {
     pub shape_stroke_width: f64,
     pub shape_color: [u8; 4],
     pub shape_dashed: bool,
+    pub text_font_family: TextFontFamily,
+    pub text_font_size: f64,
+    pub text_bold: bool,
+    pub text_italic: bool,
+    pub text_align: TextAlign,
+    pub text_list_mode: TextListMode,
+    pub text_color: [u8; 4],
     pub last_metrics: ToolbarLayoutMetrics,
 }
 
@@ -155,6 +165,13 @@ impl Default for ToolbarState {
             shape_stroke_width: 2.5,
             shape_color: [20, 22, 25, 255],
             shape_dashed: false,
+            text_font_family: TextFontFamily::Sans,
+            text_font_size: 16.0,
+            text_bold: false,
+            text_italic: false,
+            text_align: TextAlign::Left,
+            text_list_mode: TextListMode::None,
+            text_color: [20, 22, 25, 255],
             last_metrics: ToolbarLayoutMetrics::default(),
         }
     }
@@ -556,6 +573,8 @@ pub fn show_toolbars(
         delete_page_clicked: false,
         latex_clicked: false,
         delete_selection_clicked: false,
+        text_style_changed: false,
+        text_list_mode_changed: false,
     };
 
     // =========================================================================
@@ -937,7 +956,7 @@ pub fn show_toolbars(
                             ToolIcon::Eraser,
                             "Eraser - Strokes Only (Step 5.1)",
                         ),
-                        (ActiveTool::Text, ToolIcon::Text, "Text Tool (Step 5.4)"),
+                        (ActiveTool::Text, ToolIcon::Text, "Text Tool (T)"),
                         (
                             ActiveTool::Image,
                             ToolIcon::Image,
@@ -1051,6 +1070,9 @@ pub fn show_toolbars(
                             }
                             ActiveTool::Shapes => {
                                 show_shapes_contextual_options(ui, theme, state);
+                            }
+                            ActiveTool::Text => {
+                                show_text_contextual_options(ui, theme, state, &mut actions);
                             }
                             other => {
                                 ui.label(
@@ -1890,6 +1912,333 @@ fn show_shapes_contextual_options(ui: &mut Ui, theme: &Theme, state: &mut Toolba
         |col, from_swatch| {
             let [r, g, b, a] = col.to_srgba_unmultiplied();
             state.shape_color = [r, g, b, if from_swatch { 255 } else { a.max(25) }];
+        },
+        |_| {},
+    );
+}
+
+fn compact_text_chip(
+    ui: &mut Ui,
+    theme: &Theme,
+    font_id: egui::FontId,
+    label: &str,
+    selected: bool,
+    min_w: f32,
+    tooltip: &str,
+) -> egui::Response {
+    let row_h = theme.tool_row_height;
+    let text_color = if selected {
+        Color32::WHITE
+    } else {
+        theme.tool_text_fg
+    };
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_string(), font_id, text_color);
+    let desired = vec2((galley.size().x + 12.0).max(min_w), row_h);
+    let (rect, resp) = ui.allocate_exact_size(desired, Sense::click());
+
+    if ui.is_rect_visible(rect) {
+        let p = ui.painter();
+        if selected {
+            p.rect_filled(
+                rect,
+                CornerRadius::same(theme.tool_item_rounding),
+                theme.tool_selected_bg,
+            );
+        } else if resp.hovered() {
+            p.rect_filled(
+                rect,
+                CornerRadius::same(theme.tool_item_rounding),
+                theme.tool_hover_bg,
+            );
+        }
+        let gpos = pos2(
+            rect.center().x - galley.size().x * 0.5,
+            rect.center().y - galley.size().y * 0.5,
+        );
+        p.galley(gpos, galley, text_color);
+    }
+    resp.on_hover_text(tooltip)
+}
+
+fn text_align_chip(
+    ui: &mut Ui,
+    theme: &Theme,
+    align: TextAlign,
+    selected: bool,
+    tooltip: &str,
+) -> egui::Response {
+    let h = theme.tool_row_height;
+    let (rect, resp) = ui.allocate_exact_size(vec2(h, h), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let p = ui.painter();
+        if selected {
+            p.rect_filled(
+                rect,
+                CornerRadius::same(theme.tool_item_rounding),
+                theme.tool_selected_bg,
+            );
+        } else if resp.hovered() {
+            p.rect_filled(
+                rect,
+                CornerRadius::same(theme.tool_item_rounding),
+                theme.tool_hover_bg,
+            );
+        }
+        let fg = if selected {
+            Color32::WHITE
+        } else {
+            theme.tool_text_fg
+        };
+        let r = rect.shrink(6.0);
+        let widths = [1.0_f32, 0.65, 0.9, 0.55];
+        for (i, w_frac) in widths.into_iter().enumerate() {
+            let y = r.top() + r.height() * (i as f32 / 3.0);
+            let line_w = r.width() * w_frac;
+            let x0 = match align {
+                TextAlign::Left => r.left(),
+                TextAlign::Center => r.center().x - line_w * 0.5,
+                TextAlign::Right => r.right() - line_w,
+            };
+            p.line_segment([pos2(x0, y), pos2(x0 + line_w, y)], Stroke::new(1.5, fg));
+        }
+    }
+    resp.on_hover_text(tooltip)
+}
+
+/// Nội dung Thanh tuỳ chọn khi đang chọn công cụ Văn bản (Text)
+fn show_text_contextual_options(
+    ui: &mut Ui,
+    theme: &Theme,
+    state: &mut ToolbarState,
+    actions: &mut ToolbarActions,
+) {
+    let row_h = theme.tool_row_height;
+
+    // 1. Kiểu chữ: Sans / Serif / Mono
+    for (fam, label, tip) in [
+        (TextFontFamily::Sans, "Sans", "Sans-serif (Segoe UI)"),
+        (TextFontFamily::Serif, "Serif", "Serif (Times New Roman)"),
+        (TextFontFamily::Mono, "Mono", "Monospace (Consolas)"),
+    ] {
+        let font = egui::FontId::new(theme.font_size_small, text_font_family(fam, false, false));
+        if compact_text_chip(
+            ui,
+            theme,
+            font,
+            label,
+            state.text_font_family == fam,
+            38.0,
+            tip,
+        )
+        .clicked()
+        {
+            state.text_font_family = fam;
+            actions.text_style_changed = true;
+        }
+    }
+
+    draw_vertical_divider(ui, row_h, theme.tool_bar_pill_stroke);
+
+    // 2. Cỡ chữ: - / <cỡ> ⌄ / +
+    let small_font = egui::FontId::proportional(theme.font_size_body);
+    if compact_text_chip(
+        ui,
+        theme,
+        small_font.clone(),
+        "−",
+        false,
+        24.0,
+        "Decrease Font Size",
+    )
+    .clicked()
+    {
+        state.text_font_size = (state.text_font_size - 2.0).clamp(8.0, 96.0);
+        actions.text_style_changed = true;
+    }
+
+    let size_label = format!("{} ⌄", state.text_font_size.round() as i32);
+    let size_btn = compact_text_chip(
+        ui,
+        theme,
+        egui::FontId::proportional(theme.font_size_small),
+        &size_label,
+        false,
+        46.0,
+        "Font Size",
+    );
+    egui::Popup::from_toggle_button_response(&size_btn)
+        .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+        .frame(theme.dark_popup_frame(ui.style()))
+        .show(|ui| {
+            ui.set_min_width(180.0);
+            ui.label(
+                RichText::new("Font Size")
+                    .size(theme.font_size_title)
+                    .strong()
+                    .color(theme.popup_header_fg),
+            );
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                for sz in [12.0, 14.0, 16.0, 18.0, 22.0, 28.0, 36.0, 48.0] {
+                    let is_sel = (state.text_font_size - sz).abs() < 0.5;
+                    if compact_text_chip(
+                        ui,
+                        theme,
+                        egui::FontId::proportional(theme.font_size_small),
+                        &format!("{}", sz as i32),
+                        is_sel,
+                        36.0,
+                        "Set Font Size",
+                    )
+                    .clicked()
+                    {
+                        state.text_font_size = sz;
+                        actions.text_style_changed = true;
+                        ui.close();
+                    }
+                }
+            });
+            ui.add_space(6.0);
+            let mut sz_val = state.text_font_size as f32;
+            if ui
+                .add(egui::Slider::new(&mut sz_val, 8.0..=96.0).suffix(" pt"))
+                .changed()
+            {
+                state.text_font_size = sz_val.round() as f64;
+                actions.text_style_changed = true;
+            }
+        });
+
+    if compact_text_chip(
+        ui,
+        theme,
+        small_font,
+        "+",
+        false,
+        24.0,
+        "Increase Font Size",
+    )
+    .clicked()
+    {
+        state.text_font_size = (state.text_font_size + 2.0).clamp(8.0, 96.0);
+        actions.text_style_changed = true;
+    }
+
+    draw_vertical_divider(ui, row_h, theme.tool_bar_pill_stroke);
+
+    // 3. In đậm (B) & In nghiêng (I)
+    let bold_font = egui::FontId::new(
+        theme.font_size_body,
+        text_font_family(TextFontFamily::Sans, true, false),
+    );
+    if compact_text_chip(ui, theme, bold_font, "B", state.text_bold, 26.0, "Bold").clicked() {
+        state.text_bold = !state.text_bold;
+        actions.text_style_changed = true;
+    }
+    let italic_font = egui::FontId::new(
+        theme.font_size_body,
+        text_font_family(TextFontFamily::Sans, false, true),
+    );
+    if compact_text_chip(
+        ui,
+        theme,
+        italic_font,
+        "I",
+        state.text_italic,
+        26.0,
+        "Italic",
+    )
+    .clicked()
+    {
+        state.text_italic = !state.text_italic;
+        actions.text_style_changed = true;
+    }
+
+    draw_vertical_divider(ui, row_h, theme.tool_bar_pill_stroke);
+
+    // 4. Căn lề: Left / Center / Right
+    for (al, tip) in [
+        (TextAlign::Left, "Align Left"),
+        (TextAlign::Center, "Align Center"),
+        (TextAlign::Right, "Align Right"),
+    ] {
+        if text_align_chip(ui, theme, al, state.text_align == al, tip).clicked() {
+            state.text_align = al;
+            actions.text_style_changed = true;
+        }
+    }
+
+    draw_vertical_divider(ui, row_h, theme.tool_bar_pill_stroke);
+
+    // 5. Danh sách: Bullet (•) & Numbered (1.)
+    let list_font = egui::FontId::proportional(theme.font_size_body);
+    if compact_text_chip(
+        ui,
+        theme,
+        list_font.clone(),
+        "•",
+        state.text_list_mode == TextListMode::Bullet,
+        26.0,
+        "Bulleted List",
+    )
+    .clicked()
+    {
+        state.text_list_mode = if state.text_list_mode == TextListMode::Bullet {
+            TextListMode::None
+        } else {
+            TextListMode::Bullet
+        };
+        actions.text_style_changed = true;
+        actions.text_list_mode_changed = true;
+    }
+    if compact_text_chip(
+        ui,
+        theme,
+        egui::FontId::proportional(theme.font_size_small),
+        "1.",
+        state.text_list_mode == TextListMode::Numbered,
+        28.0,
+        "Numbered List",
+    )
+    .clicked()
+    {
+        state.text_list_mode = if state.text_list_mode == TextListMode::Numbered {
+            TextListMode::None
+        } else {
+            TextListMode::Numbered
+        };
+        actions.text_style_changed = true;
+        actions.text_list_mode_changed = true;
+    }
+
+    draw_vertical_divider(ui, row_h, theme.tool_bar_pill_stroke);
+
+    // 6. Màu chữ (quick dots + Pop-up bảng màu mở rộng)
+    let cur_rgb = [
+        state.text_color[0],
+        state.text_color[1],
+        state.text_color[2],
+    ];
+    let cur_rgba = Color32::from_rgba_unmultiplied(
+        state.text_color[0],
+        state.text_color[1],
+        state.text_color[2],
+        state.text_color[3],
+    );
+    show_color_controls(
+        ui,
+        theme,
+        "text_extended_color_grid",
+        "Text Color",
+        cur_rgb,
+        cur_rgba,
+        |col, from_swatch| {
+            let [r, g, b, a] = col.to_srgba_unmultiplied();
+            state.text_color = [r, g, b, if from_swatch { 255 } else { a.max(25) }];
+            actions.text_style_changed = true;
         },
         |_| {},
     );

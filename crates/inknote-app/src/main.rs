@@ -10,6 +10,7 @@ mod lasso;
 mod latex_dialog;
 mod shapes;
 mod svg_cache;
+mod text_box;
 mod theme;
 mod thumbnails;
 mod toolbar;
@@ -21,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use inknote_core::{
-    CanvasMode, Command, Document, DocumentFile, LatexObject, PaperSettings, Stroke,
+    CanvasMode, Command, Document, DocumentFile, LatexObject, PaperSettings, Stroke, TextObject,
 };
 use inknote_pen::{
     Constraints, PenEvent, PenPath, Style,
@@ -47,6 +48,11 @@ use crate::{
     latex_dialog::{LatexDialogAction, LatexDialogState},
     shapes::{ActiveShapeDrag, paint_shape},
     svg_cache::{LATEX_DISPLAY_SCALE, SvgTextureCache},
+    text_box::{
+        ActiveTextEdit, DEFAULT_TEXT_BOX_WIDTH, MIN_TEXT_BOX_WIDTH, TextStyleState,
+        apply_list_mode_to_text, continue_list_on_newline, egui_align2, is_text_effectively_empty,
+        measure_text_page_size, paint_text_object, text_page_bbox,
+    },
     theme::Theme,
     thumbnails::{ThumbCache, ThumbnailAction, append_batches_to_mesh, show_thumbnail_panel},
     toolbar::{ActiveTool, ToolbarState, show_toolbars},
@@ -206,6 +212,8 @@ struct InkNoteApp {
     active: Option<ActiveStroke>,
     active_eraser: Option<ActiveEraser>,
     active_shape: Option<ActiveShapeDrag>,
+    active_text_edit: Option<ActiveTextEdit>,
+    active_text_drag: Option<(usize, egui::Pos2, egui::Pos2)>,
     lasso_state: LassoState,
     drawing_page_index: Option<usize>,
     static_cache: Option<(StaticKey, Vec<(usize, std::sync::Arc<egui::epaint::Mesh>)>)>,
@@ -283,6 +291,8 @@ impl InkNoteApp {
             active: None,
             active_eraser: None,
             active_shape: None,
+            active_text_edit: None,
+            active_text_drag: None,
             lasso_state: LassoState::default(),
             drawing_page_index: None,
             static_cache: None,
@@ -432,6 +442,115 @@ impl InkNoteApp {
             }
         }
         None
+    }
+
+    /// Tìm hộp văn bản nằm dưới con trỏ màn hình `screen_pos` (nếu có).
+    fn text_object_at(
+        &self,
+        paper_rect: egui::Rect,
+        screen_pos: egui::Pos2,
+    ) -> Option<(usize, TextObject)> {
+        if !paper_rect.contains(screen_pos) {
+            return None;
+        }
+        for page_idx in 0..self.doc.page_count() {
+            let page = &self.doc.pages()[page_idx];
+            if page.text_objects.is_empty() {
+                continue;
+            }
+            let sheet = self.page_screen_rect(paper_rect, page_idx);
+            if !sheet.intersects(paper_rect) {
+                continue;
+            }
+            let origin = self.page_origin(paper_rect, page_idx);
+            for obj in page.text_objects.iter().rev() {
+                let b = text_page_bbox(obj);
+                let rect = egui::Rect::from_min_max(
+                    origin + b.min.to_vec2() * self.view.zoom,
+                    origin + b.max.to_vec2() * self.view.zoom,
+                )
+                .expand(4.0);
+                if rect.contains(screen_pos) {
+                    return Some((page_idx, obj.clone()));
+                }
+            }
+        }
+        None
+    }
+
+    fn current_text_style_from_toolbar(&self) -> TextStyleState {
+        TextStyleState {
+            font_family: self.toolbar_state.text_font_family,
+            font_size: self.toolbar_state.text_font_size,
+            bold: self.toolbar_state.text_bold,
+            italic: self.toolbar_state.text_italic,
+            align: self.toolbar_state.text_align,
+            list_mode: self.toolbar_state.text_list_mode,
+            color: self.toolbar_state.text_color,
+        }
+    }
+
+    fn sync_toolbar_from_text(&mut self, obj: &TextObject) {
+        self.toolbar_state.text_font_family = obj.font_family;
+        self.toolbar_state.text_font_size = obj.font_size;
+        self.toolbar_state.text_bold = obj.bold;
+        self.toolbar_state.text_italic = obj.italic;
+        self.toolbar_state.text_align = obj.align;
+        self.toolbar_state.text_list_mode = obj.list_mode;
+        self.toolbar_state.text_color = obj.color;
+    }
+
+    fn open_new_text_edit(&mut self, page_index: usize, page_pos: egui::Pos2, width: f64) {
+        let id = self.doc.alloc_id();
+        let style = self.current_text_style_from_toolbar();
+        self.doc.set_active_page_index(page_index);
+        self.active_text_edit = Some(ActiveTextEdit::new_blank(
+            page_index,
+            id,
+            [page_pos.x as f64, page_pos.y as f64],
+            width,
+            style,
+        ));
+    }
+
+    fn open_existing_text_edit(&mut self, page_index: usize, obj: TextObject) {
+        self.doc.set_active_page_index(page_index);
+        self.sync_toolbar_from_text(&obj);
+        self.active_text_edit = Some(ActiveTextEdit::from_existing(page_index, obj));
+    }
+
+    /// Chốt hộp văn bản đang mở vào tài liệu (1 bước Undo cho mỗi lần thêm mới hoặc chỉnh sửa).
+    fn commit_active_text_edit(&mut self, ctx: &egui::Context) {
+        let Some(mut edit) = self.active_text_edit.take() else {
+            return;
+        };
+        edit.draft.size = measure_text_page_size(ctx, &edit.draft);
+        match edit.original_snapshot {
+            None => {
+                if !is_text_effectively_empty(&edit.draft.text) {
+                    self.doc.execute(Command::AddText {
+                        page_index: edit.page_index,
+                        obj: edit.draft,
+                    });
+                }
+            }
+            Some(old_obj) => {
+                if is_text_effectively_empty(&edit.draft.text) {
+                    self.doc.execute(Command::DeleteSelection {
+                        page_index: edit.page_index,
+                        stroke_ids: vec![],
+                        latex_ids: vec![],
+                        shape_ids: vec![],
+                        text_ids: vec![old_obj.id],
+                    });
+                } else if edit.draft != old_obj {
+                    self.doc.execute(Command::UpdateText {
+                        page_index: edit.page_index,
+                        new_obj: edit.draft,
+                    });
+                }
+            }
+        }
     }
 
     /// Đổi toạ độ màn hình → toạ độ cục bộ của trang đang viết.
@@ -678,6 +797,8 @@ impl InkNoteApp {
                 self.active = None;
                 self.active_eraser = None;
                 self.active_shape = None;
+                self.active_text_edit = None;
+                self.active_text_drag = None;
                 self.lasso_state.clear();
                 self.drawing_page_index = None;
                 self.pull_overscroll = 0.0;
@@ -724,6 +845,8 @@ impl InkNoteApp {
         self.active = None;
         self.active_eraser = None;
         self.active_shape = None;
+        self.active_text_edit = None;
+        self.active_text_drag = None;
         self.lasso_state.clear();
         self.drawing_page_index = None;
         self.pull_overscroll = 0.0;
@@ -951,6 +1074,7 @@ impl InkNoteApp {
                             stroke_ids: sel.stroke_ids.clone(),
                             latex_ids: sel.latex_ids.clone(),
                             shape_ids: sel.shape_ids.clone(),
+                            text_ids: sel.text_ids.clone(),
                             anchor: [0.0, 0.0],
                             scale: [1.0, 1.0],
                             delta: [delta.x as f64, delta.y as f64],
@@ -972,6 +1096,7 @@ impl InkNoteApp {
                             stroke_ids: sel.stroke_ids.clone(),
                             latex_ids: sel.latex_ids.clone(),
                             shape_ids: sel.shape_ids.clone(),
+                            text_ids: sel.text_ids.clone(),
                             anchor,
                             scale,
                             delta: [0.0, 0.0],
@@ -998,6 +1123,7 @@ impl InkNoteApp {
             stroke_ids: sel.stroke_ids,
             latex_ids: sel.latex_ids,
             shape_ids: sel.shape_ids,
+            text_ids: sel.text_ids,
         });
     }
 
@@ -1399,6 +1525,7 @@ impl InkNoteApp {
 
         // Khi người dùng tắt app mà chưa lưu ra file .inknote chính thức -> chặn tắt để hỏi xác nhận
         if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close {
+            self.commit_active_text_edit(&ctx);
             if self.current_path.is_none() && self.needs_save_prompt() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.confirm_unsaved = Some(UnsavedAction::CloseApp);
@@ -1410,7 +1537,9 @@ impl InkNoteApp {
         self.autosave.poll_and_maybe_save(
             &mut self.doc,
             self.current_path.as_ref(),
-            self.active.is_some() || self.active_shape.is_some(),
+            self.active.is_some()
+                || self.active_shape.is_some()
+                || self.active_text_edit.is_some(),
             autosave_now,
         );
 
@@ -1461,6 +1590,30 @@ impl InkNoteApp {
             page_info,
             &wacom_status,
         );
+        if self.toolbar_state.active_tool != ActiveTool::Text || self.toolbar_state.read_only {
+            self.commit_active_text_edit(&ctx);
+            self.active_text_drag = None;
+        }
+        if actions.text_style_changed || actions.text_list_mode_changed {
+            let new_style = self.current_text_style_from_toolbar();
+            if let Some(edit) = &mut self.active_text_edit {
+                edit.draft.font_family = new_style.font_family;
+                edit.draft.font_size = new_style.font_size;
+                edit.draft.bold = new_style.bold;
+                edit.draft.italic = new_style.italic;
+                edit.draft.align = new_style.align;
+                edit.draft.color = new_style.color;
+                if actions.text_list_mode_changed {
+                    edit.draft.list_mode = new_style.list_mode;
+                    apply_list_mode_to_text(&mut edit.draft.text, edit.draft.list_mode);
+                    edit.prev_text = edit.draft.text.clone();
+                    edit.cursor_override = Some(edit.draft.text.chars().count());
+                }
+                if !egui::Popup::is_any_open(&ctx) {
+                    edit.needs_focus = true;
+                }
+            }
+        }
         if self.doc.set_paper_settings(paper_settings.clone()) {
             self.default_paper_settings = paper_settings.clone();
             save_default_paper_settings(&paper_settings);
@@ -1494,13 +1647,19 @@ impl InkNoteApp {
             && self.active_shape.is_none()
             && !self.lasso_state.is_active()
         {
-            if (actions.undo_clicked || key_undo) && self.doc.undo() {
-                self.lasso_state.clear();
-                self.rebuild_batch_cache();
+            if actions.undo_clicked || key_undo {
+                self.commit_active_text_edit(&ctx);
+                if self.doc.undo() {
+                    self.lasso_state.clear();
+                    self.rebuild_batch_cache();
+                }
             }
-            if (actions.redo_clicked || key_redo) && self.doc.redo() {
-                self.lasso_state.clear();
-                self.rebuild_batch_cache();
+            if actions.redo_clicked || key_redo {
+                self.commit_active_text_edit(&ctx);
+                if self.doc.redo() {
+                    self.lasso_state.clear();
+                    self.rebuild_batch_cache();
+                }
             }
             let key_delete = !ctx.egui_wants_keyboard_input()
                 && ctx.input(|i| {
@@ -1510,12 +1669,15 @@ impl InkNoteApp {
                 self.delete_lasso_selection();
             }
             if actions.clear_clicked {
+                self.commit_active_text_edit(&ctx);
                 self.confirm_clear = Some(vec![self.doc.active_page_index()]);
             }
             if actions.add_page_clicked {
+                self.commit_active_text_edit(&ctx);
                 self.add_page_after_current();
             }
             if actions.delete_page_clicked && self.doc.page_count() > 1 {
+                self.commit_active_text_edit(&ctx);
                 self.confirm_delete_page = Some(vec![self.doc.active_page_index()]);
             }
             let _ = actions.latex_clicked;
@@ -1530,15 +1692,19 @@ impl InkNoteApp {
                 self.scroll_to_page(target);
             }
             if actions.save_clicked || key_save {
+                self.commit_active_text_edit(&ctx);
                 self.save_document();
             }
             if key_save_as {
+                self.commit_active_text_edit(&ctx);
                 self.save_document_as();
             }
             if actions.open_clicked || key_open {
+                self.commit_active_text_edit(&ctx);
                 self.trigger_open();
             }
             if actions.new_clicked || key_new {
+                self.commit_active_text_edit(&ctx);
                 self.trigger_new();
             }
         }
@@ -1900,6 +2066,12 @@ impl InkNoteApp {
                     );
                 });
             if self.active.is_none() {
+                if !matches!(
+                    thumb_action,
+                    ThumbnailAction::None | ThumbnailAction::Close
+                ) {
+                    self.commit_active_text_edit(&ctx);
+                }
                 match thumb_action {
                     ThumbnailAction::None => {}
                     ThumbnailAction::Close => {
@@ -1962,7 +2134,7 @@ impl InkNoteApp {
             .frame(workspace_frame)
             .show(ui, |ui| {
                 let avail = ui.max_rect();
-                let settings = self.doc.paper_settings();
+                let settings = self.doc.paper_settings().clone();
                 let paper_rect = match settings.mode {
                     CanvasMode::Paper => avail.shrink(self.theme.paper_margin),
                     CanvasMode::Whiteboard => avail,
@@ -1989,7 +2161,7 @@ impl InkNoteApp {
                                 paper_rect,
                                 origin,
                                 &self.theme,
-                                settings,
+                                &settings,
                                 view.zoom,
                             );
                         }
@@ -2001,7 +2173,7 @@ impl InkNoteApp {
                             paper_rect,
                             origin0,
                             &self.theme,
-                            settings,
+                            &settings,
                             view.zoom,
                         );
                         if page_count > 1 {
@@ -2239,6 +2411,113 @@ impl InkNoteApp {
                     }
                 }
 
+                // 4c½. Vẽ toàn bộ đối tượng Văn bản (Text Box) trên các trang đang hiển thị
+                let editing_text_id = self
+                    .active_text_edit
+                    .as_ref()
+                    .map(|e| (e.page_index, e.draft.id));
+                let hovered_text = if !latex_dialog_was_open
+                    && !self.latex_dialog.open
+                    && self.active_text_edit.is_none()
+                    && self.active_text_drag.is_none()
+                    && self.toolbar_state.active_tool == ActiveTool::Text
+                    && !self.toolbar_state.read_only
+                {
+                    ctx.input(|i| i.pointer.hover_pos())
+                        .and_then(|hp| self.text_object_at(paper_rect, hp))
+                } else {
+                    None
+                };
+
+                for page_idx in 0..self.doc.page_count() {
+                    let page = &self.doc.pages()[page_idx];
+                    let has_drag_preview = matches!(
+                        self.active_text_drag,
+                        Some((p, _, _)) if p == page_idx
+                    );
+                    if page.text_objects.is_empty() && !has_drag_preview {
+                        continue;
+                    }
+                    let sheet = self.page_screen_rect(paper_rect, page_idx);
+                    if !sheet.intersects(paper_rect) {
+                        continue;
+                    }
+                    let page_painter = ui.painter().with_clip_rect(paper_rect.intersect(sheet));
+                    let origin = self.page_origin(paper_rect, page_idx);
+                    for txt in &page.text_objects {
+                        if editing_text_id == Some((page_idx, txt.id)) {
+                            continue;
+                        }
+                        let interaction = match (
+                            &self.lasso_state.selection,
+                            &self.lasso_state.interaction,
+                        ) {
+                            (
+                                Some(sel),
+                                Some(
+                                    inter @ (LassoInteraction::Moving { .. }
+                                    | LassoInteraction::Resizing { .. }),
+                                ),
+                            ) if sel.page_index == page_idx
+                                && sel.text_ids.contains(&txt.id) =>
+                            {
+                                Some(inter)
+                            }
+                            _ => None,
+                        };
+                        paint_text_object(&page_painter, txt, origin, view.zoom, interaction);
+
+                        if hovered_text
+                            .as_ref()
+                            .is_some_and(|(hp_idx, ho)| *hp_idx == page_idx && ho.id == txt.id)
+                        {
+                            let b = text_page_bbox(txt);
+                            let r = egui::Rect::from_min_max(
+                                origin + b.min.to_vec2() * view.zoom,
+                                origin + b.max.to_vec2() * view.zoom,
+                            )
+                            .expand(2.0);
+                            page_painter.rect_stroke(
+                                r,
+                                egui::CornerRadius::same(4),
+                                egui::Stroke::new(
+                                    1.5,
+                                    egui::Color32::from_rgba_unmultiplied(10, 132, 255, 190),
+                                ),
+                                egui::StrokeKind::Outside,
+                            );
+                        }
+                    }
+
+                    if let Some((drag_page, start_local, curr_local)) = self.active_text_drag
+                        && drag_page == page_idx
+                        && (curr_local - start_local).length() * view.zoom >= 8.0
+                    {
+                        let min_x = start_local.x.min(curr_local.x);
+                        let max_x = start_local.x.max(curr_local.x);
+                        let drag_w = (max_x - min_x).max(MIN_TEXT_BOX_WIDTH as f32);
+                        let drag_h = ((self.toolbar_state.text_font_size as f32) * 1.6).max(28.0);
+                        let r = egui::Rect::from_min_size(
+                            origin + egui::vec2(min_x, start_local.y) * view.zoom,
+                            egui::vec2(drag_w, drag_h) * view.zoom,
+                        );
+                        page_painter.rect_filled(
+                            r,
+                            egui::CornerRadius::same(4),
+                            egui::Color32::from_rgba_unmultiplied(10, 132, 255, 22),
+                        );
+                        page_painter.rect_stroke(
+                            r,
+                            egui::CornerRadius::same(4),
+                            egui::Stroke::new(
+                                1.5,
+                                egui::Color32::from_rgba_unmultiplied(10, 132, 255, 210),
+                            ),
+                            egui::StrokeKind::Outside,
+                        );
+                    }
+                }
+
                 let latex_tool_ready = !latex_dialog_was_open
                     && !self.latex_dialog.open
                     && self.toolbar_state.active_tool == ActiveTool::Latex;
@@ -2371,6 +2650,245 @@ impl InkNoteApp {
                                     });
                                     self.latex_dialog.open_with("", &ctx);
                                 }
+                            }
+                        }
+                    }
+                }
+
+                // 4e½. Công cụ Văn bản (Text Box): gõ trực tiếp trên canvas, kéo đặt độ rộng hoặc nhấp để tạo/sửa
+                let text_modal_open = latex_dialog_was_open
+                    || self.latex_dialog.open
+                    || self.confirm_clear.is_some()
+                    || self.confirm_delete_page.is_some()
+                    || self.confirm_unsaved.is_some();
+                if self.toolbar_state.active_tool == ActiveTool::Text
+                    && !self.toolbar_state.read_only
+                    && !text_modal_open
+                {
+                    let popup_open = egui::Popup::is_any_open(&ctx);
+                    let mut just_dismissed_edit = false;
+
+                    if self.active_text_edit.is_some() && !popup_open {
+                        let commit_by_key = ctx.input(|i| {
+                            i.key_pressed(egui::Key::Escape)
+                                || ((i.modifiers.ctrl || i.modifiers.command)
+                                    && i.key_pressed(egui::Key::Enter))
+                        });
+                        if commit_by_key {
+                            self.commit_active_text_edit(&ctx);
+                        } else if let Some(cp) = ctx.input(|i| {
+                            if i.pointer.primary_pressed() {
+                                i.pointer.interact_pos()
+                            } else {
+                                None
+                            }
+                        }) {
+                            let in_editor = self.active_text_edit.as_ref().is_some_and(|e| {
+                                e.area_rect != egui::Rect::NOTHING && e.area_rect.contains(cp)
+                            });
+                            let tool_pill = self.toolbar_state.last_metrics.tool_pill_rect;
+                            let in_tool_pill =
+                                tool_pill.is_positive() && tool_pill.expand(4.0).contains(cp);
+                            if !in_editor && !in_tool_pill && paper_rect.contains(cp) {
+                                self.commit_active_text_edit(&ctx);
+                                if let Some((hit_page, hit_obj)) =
+                                    self.text_object_at(paper_rect, cp)
+                                {
+                                    self.open_existing_text_edit(hit_page, hit_obj);
+                                } else {
+                                    just_dismissed_edit = true;
+                                }
+                            }
+                        }
+                    }
+
+                    if let Some(edit_page) = self.active_text_edit.as_ref().map(|e| e.page_index) {
+                        let origin = self.page_origin(paper_rect, edit_page);
+                        let sheet = self.page_screen_rect(paper_rect, edit_page);
+                        let view_zoom = view.zoom;
+                        if let Some(edit) = self.active_text_edit.as_mut()
+                            && sheet.intersects(paper_rect)
+                        {
+                            let screen_pos = origin
+                                + egui::vec2(edit.draft.pos[0] as f32, edit.draft.pos[1] as f32)
+                                    * view_zoom;
+                            let wrap_w = ((edit.draft.size[0] as f32) * view_zoom).max(40.0);
+                            let font_px =
+                                ((edit.draft.font_size as f32) * view_zoom).clamp(6.0, 240.0);
+                            let text_color = egui::Color32::from_rgba_unmultiplied(
+                                edit.draft.color[0],
+                                edit.draft.color[1],
+                                edit.draft.color[2],
+                                edit.draft.color[3],
+                            );
+                            let font_family = theme::text_font_family(
+                                edit.draft.font_family,
+                                edit.draft.bold,
+                                edit.draft.italic,
+                            );
+                            let align = egui_align2(edit.draft.align);
+                            let layout_template = edit.draft.clone();
+                            let editor_id = ui.make_persistent_id("inline_text_editor_input");
+
+                            let mut layouter =
+                                |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
+                                    let mut temp = layout_template.clone();
+                                    temp.text = buf.as_str().to_owned();
+                                    let job = text_box::build_text_layout_job(
+                                        &temp,
+                                        font_px,
+                                        wrap_width.max(wrap_w),
+                                    );
+                                    ui.ctx().fonts_mut(|f| f.layout_job(job))
+                                };
+
+                            egui::Area::new(ui.make_persistent_id("inline_text_editor_area"))
+                                .order(egui::Order::Middle)
+                                .constrain(false)
+                                .fixed_pos(screen_pos)
+                                .show(&ctx, |area_ui| {
+                                    area_ui.set_clip_rect(paper_rect);
+                                    area_ui.set_min_width(wrap_w);
+                                    area_ui.set_max_width(wrap_w);
+
+                                    let output = egui::TextEdit::multiline(&mut edit.draft.text)
+                                        .id(editor_id)
+                                        .frame(egui::Frame::NONE)
+                                        .margin(egui::Margin::ZERO)
+                                        .desired_width(wrap_w)
+                                        .desired_rows(1)
+                                        .align(align)
+                                        .font(egui::FontId::new(font_px, font_family))
+                                        .text_color(text_color)
+                                        .background_color(egui::Color32::TRANSPARENT)
+                                        .layouter(&mut layouter)
+                                        .show(area_ui);
+
+                                    let box_rect = egui::Rect::from_min_size(
+                                        screen_pos,
+                                        egui::vec2(
+                                            wrap_w,
+                                            output.response.rect.height().max(font_px * 1.45),
+                                        ),
+                                    );
+                                    edit.area_rect = box_rect.expand(4.0);
+                                    area_ui.painter().rect_stroke(
+                                        box_rect.expand(3.0),
+                                        egui::CornerRadius::same(4),
+                                        egui::Stroke::new(
+                                            1.5,
+                                            egui::Color32::from_rgb(10, 132, 255),
+                                        ),
+                                        egui::StrokeKind::Outside,
+                                    );
+
+                                    if output.response.changed()
+                                        && edit.draft.list_mode != inknote_core::TextListMode::None
+                                    {
+                                        let cursor_idx = output
+                                            .cursor_range
+                                            .map(|r| r.primary.index.0)
+                                            .unwrap_or_else(|| edit.draft.text.chars().count());
+                                        if let Some(new_cursor) = continue_list_on_newline(
+                                            &edit.prev_text,
+                                            &mut edit.draft.text,
+                                            edit.draft.list_mode,
+                                            cursor_idx,
+                                        ) {
+                                            edit.cursor_override = Some(new_cursor);
+                                        }
+                                    }
+
+                                    if let Some(cidx) = edit.cursor_override.take() {
+                                        let mut state = output.state;
+                                        state.cursor.set_char_range(Some(
+                                            egui::text::CCursorRange::one(
+                                                egui::text::CCursor::new(cidx),
+                                            ),
+                                        ));
+                                        state.store(&ctx, output.response.id);
+                                        ctx.memory_mut(|m| m.request_focus(output.response.id));
+                                        edit.needs_focus = false;
+                                    } else if edit.needs_focus {
+                                        output.response.request_focus();
+                                        edit.needs_focus = false;
+                                    }
+                                });
+
+                            edit.prev_text = edit.draft.text.clone();
+                            edit.draft.size = measure_text_page_size(&ctx, &edit.draft);
+                        }
+                    } else if !popup_open && !just_dismissed_edit {
+                        if let Some(cp) = ctx.input(|i| {
+                            if i.pointer.primary_pressed() {
+                                i.pointer.interact_pos()
+                            } else {
+                                None
+                            }
+                        }) {
+                            let tool_pill = self.toolbar_state.last_metrics.tool_pill_rect;
+                            let in_tool_pill =
+                                tool_pill.is_positive() && tool_pill.expand(4.0).contains(cp);
+                            if !in_tool_pill && paper_rect.contains(cp) {
+                                if let Some((hit_page, hit_obj)) =
+                                    self.text_object_at(paper_rect, cp)
+                                {
+                                    self.open_existing_text_edit(hit_page, hit_obj);
+                                } else if let Some(p_idx) = self.interactive_page_at(&ctx, cp) {
+                                    let local = self.page_local_for(cp, p_idx);
+                                    self.active_text_drag = Some((p_idx, local, local));
+                                }
+                            }
+                        }
+
+                        if let Some((p_idx, start_local, curr_local)) = self.active_text_drag {
+                            let (primary_down, primary_released, latest_pos) = ctx.input(|i| {
+                                (
+                                    i.pointer.primary_down(),
+                                    i.pointer.primary_released(),
+                                    i.pointer.latest_pos(),
+                                )
+                            });
+                            let updated_curr = latest_pos
+                                .map(|pos| self.page_local_for(pos, p_idx))
+                                .unwrap_or(curr_local);
+                            if primary_down && !primary_released {
+                                self.active_text_drag = Some((p_idx, start_local, updated_curr));
+                            } else {
+                                self.active_text_drag = None;
+                                let page_w = self.doc.paper_settings().page_width as f64;
+                                let dx_screen = (updated_curr.x - start_local.x).abs() * view.zoom;
+                                if dx_screen >= 16.0 {
+                                    let min_x = (start_local.x.min(updated_curr.x) as f64)
+                                        .clamp(12.0, (page_w - MIN_TEXT_BOX_WIDTH).max(12.0));
+                                    let drag_w = ((updated_curr.x - start_local.x).abs() as f64)
+                                        .max(MIN_TEXT_BOX_WIDTH)
+                                        .min((page_w - min_x - 12.0).max(MIN_TEXT_BOX_WIDTH));
+                                    let y = (start_local.y as f64).max(12.0);
+                                    self.open_new_text_edit(
+                                        p_idx,
+                                        egui::pos2(min_x as f32, y as f32),
+                                        drag_w,
+                                    );
+                                } else {
+                                    let x = (start_local.x as f64)
+                                        .clamp(12.0, (page_w - MIN_TEXT_BOX_WIDTH).max(12.0));
+                                    let w = DEFAULT_TEXT_BOX_WIDTH
+                                        .min((page_w - x - 12.0).max(MIN_TEXT_BOX_WIDTH));
+                                    let y = (start_local.y as f64).max(12.0);
+                                    self.open_new_text_edit(
+                                        p_idx,
+                                        egui::pos2(x as f32, y as f32),
+                                        w,
+                                    );
+                                }
+                            }
+                        } else if let Some(hp) = ctx.input(|i| i.pointer.hover_pos()) {
+                            let tool_pill = self.toolbar_state.last_metrics.tool_pill_rect;
+                            let in_tool_pill =
+                                tool_pill.is_positive() && tool_pill.expand(4.0).contains(hp);
+                            if !in_tool_pill && self.interactive_page_at(&ctx, hp).is_some() {
+                                ctx.set_cursor_icon(egui::CursorIcon::Text);
                             }
                         }
                     }
@@ -2621,6 +3139,8 @@ mod tests {
             active: None,
             active_eraser: None,
             active_shape: None,
+            active_text_edit: None,
+            active_text_drag: None,
             lasso_state: LassoState::default(),
             drawing_page_index: None,
             static_cache: None,
@@ -3703,5 +4223,293 @@ mod tests {
         app2.load_document_from(tmp.clone());
         let _ = std::fs::remove_file(tmp);
         assert_eq!(app2.doc.pages()[0].shapes.len(), 18);
+    }
+
+    #[test]
+    fn test_text_box_create_style_edit_undo_redo_and_save_load() {
+        let ctx = egui::Context::default();
+        theme::setup_fonts(&ctx);
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let mut app = new_test_app(&ctx);
+        app.toolbar_state.active_tool = ActiveTool::Text;
+        app.toolbar_state.text_font_family = inknote_core::TextFontFamily::Serif;
+        app.toolbar_state.text_font_size = 24.0;
+        app.toolbar_state.text_bold = true;
+        app.toolbar_state.text_italic = true;
+        app.toolbar_state.text_align = inknote_core::TextAlign::Center;
+        app.toolbar_state.text_list_mode = inknote_core::TextListMode::Bullet;
+        app.toolbar_state.text_color = [180, 30, 40, 255];
+
+        app.open_new_text_edit(0, Pos2::new(100.0, 140.0), DEFAULT_TEXT_BOX_WIDTH);
+        {
+            let edit = app.active_text_edit.as_mut().unwrap();
+            assert_eq!(edit.draft.text, "• ");
+            edit.draft.text = "• Tiếng Việt, ắ ằ ẳ ẵ ặ ơ ư".to_string();
+        }
+        app.commit_active_text_edit(&ctx);
+        assert_eq!(app.doc.pages()[0].text_objects.len(), 1);
+        let first = app.doc.pages()[0].text_objects[0].clone();
+        assert_eq!(first.font_family, inknote_core::TextFontFamily::Serif);
+        assert_eq!(first.font_size, 24.0);
+        assert!(first.bold && first.italic);
+        assert_eq!(first.align, inknote_core::TextAlign::Center);
+        assert_eq!(first.list_mode, inknote_core::TextListMode::Bullet);
+
+        // Chỉnh sửa lại trong 1 bước UpdateText Undo
+        app.open_existing_text_edit(0, first.clone());
+        {
+            let edit = app.active_text_edit.as_mut().unwrap();
+            edit.draft.font_family = inknote_core::TextFontFamily::Mono;
+            edit.draft.align = inknote_core::TextAlign::Right;
+            edit.draft.list_mode = inknote_core::TextListMode::Numbered;
+            edit.draft.text = "1. Tiếng Việt, ắ ằ ẳ ẵ ặ ơ ư\n2. Công thức".to_string();
+        }
+        app.commit_active_text_edit(&ctx);
+        assert_eq!(app.doc.pages()[0].text_objects.len(), 1);
+        assert_eq!(
+            app.doc.pages()[0].text_objects[0].font_family,
+            inknote_core::TextFontFamily::Mono
+        );
+
+        // Undo x2 -> quay về AddText rồi trống; Redo x2 -> trở lại bản cập nhật
+        app.doc.undo();
+        assert_eq!(
+            app.doc.pages()[0].text_objects[0].text,
+            "• Tiếng Việt, ắ ằ ẳ ẵ ặ ơ ư"
+        );
+        assert_eq!(
+            app.doc.pages()[0].text_objects[0].font_family,
+            inknote_core::TextFontFamily::Serif
+        );
+        app.doc.undo();
+        assert_eq!(app.doc.pages()[0].text_objects.len(), 0);
+        app.doc.redo();
+        app.doc.redo();
+        assert_eq!(
+            app.doc.pages()[0].text_objects[0].text,
+            "1. Tiếng Việt, ắ ằ ẳ ẵ ặ ơ ư\n2. Công thức"
+        );
+
+        // Lưu & mở lại giữ nguyên mọi định dạng + Tiếng Việt
+        let tmp = std::env::temp_dir().join("inknote_test_text_box.inknote");
+        app.current_path = Some(tmp.clone());
+        assert!(app.save_document());
+        let mut app2 = new_test_app(&ctx);
+        app2.load_document_from(tmp.clone());
+        let _ = std::fs::remove_file(tmp);
+        assert_eq!(app2.doc.pages()[0].text_objects.len(), 1);
+        let loaded = &app2.doc.pages()[0].text_objects[0];
+        assert_eq!(loaded.text, "1. Tiếng Việt, ắ ằ ẳ ẵ ặ ơ ư\n2. Công thức");
+        assert_eq!(loaded.font_family, inknote_core::TextFontFamily::Mono);
+        assert_eq!(loaded.align, inknote_core::TextAlign::Right);
+        assert_eq!(loaded.list_mode, inknote_core::TextListMode::Numbered);
+        assert_eq!(loaded.color, [180, 30, 40, 255]);
+    }
+
+    #[test]
+    fn test_eraser_standard_and_stroke_never_erase_text_boxes() {
+        let ctx = egui::Context::default();
+        theme::setup_fonts(&ctx);
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let mut app = new_test_app(&ctx);
+        let paper = egui::Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 720.0));
+        app.paper_rect = Some(paper);
+
+        // Vẽ 2 nét bút đi ngang qua vùng hộp văn bản
+        let t0 = Instant::now();
+        app.toolbar_state.active_tool = ActiveTool::Pen;
+        app.pen_down(app.view.to_screen(paper, Pos2::new(120.0, 160.0)), 0.5, t0);
+        app.pen_down(
+            app.view.to_screen(paper, Pos2::new(300.0, 160.0)),
+            0.5,
+            t0 + std::time::Duration::from_millis(16),
+        );
+        app.pen_up(
+            app.view.to_screen(paper, Pos2::new(300.0, 160.0)),
+            0.5,
+            t0 + std::time::Duration::from_millis(32),
+        );
+
+        let t1 = t0 + std::time::Duration::from_millis(50);
+        app.pen_down(app.view.to_screen(paper, Pos2::new(120.0, 200.0)), 0.5, t1);
+        app.pen_down(
+            app.view.to_screen(paper, Pos2::new(300.0, 200.0)),
+            0.5,
+            t1 + std::time::Duration::from_millis(16),
+        );
+        app.pen_up(
+            app.view.to_screen(paper, Pos2::new(300.0, 200.0)),
+            0.5,
+            t1 + std::time::Duration::from_millis(32),
+        );
+        assert_eq!(app.doc.pages()[0].strokes.len(), 2);
+
+        // Thêm 1 hộp văn bản chồng đúng vùng đó
+        app.toolbar_state.active_tool = ActiveTool::Text;
+        app.open_new_text_edit(0, Pos2::new(140.0, 145.0), 220.0);
+        app.active_text_edit.as_mut().unwrap().draft.text =
+            "Văn bản không bị tẩy lướt qua".to_string();
+        app.commit_active_text_edit(&ctx);
+        assert_eq!(app.doc.pages()[0].text_objects.len(), 1);
+
+        // Tẩy thường (Standard) quét qua vùng chữ & giữa nét 1 -> cắt đứt đoạn nét 1 tại x=210, còn nét 2 và chữ
+        app.toolbar_state.active_tool = ActiveTool::Eraser;
+        app.toolbar_state.eraser_mode = toolbar::EraserMode::Standard;
+        let p_a = app.view.to_screen(paper, Pos2::new(200.0, 160.0));
+        app.eraser_down(p_a, 0);
+        app.eraser_move(app.view.to_screen(paper, Pos2::new(230.0, 160.0)));
+        app.eraser_up(app.view.to_screen(paper, Pos2::new(230.0, 160.0)));
+        let gap_aabb = parry2d_f64::bounding_volume::Aabb::new(
+            parry2d_f64::math::Vector2::new(212.0, 158.0),
+            parry2d_f64::math::Vector2::new(218.0, 162.0),
+        );
+        assert!(
+            !app.doc.pages()[0]
+                .strokes
+                .iter()
+                .any(|s| !s.path.hittest(&gap_aabb, 1.0).is_empty()),
+            "Standard eraser must carve a gap in stroke 1"
+        );
+        assert_eq!(app.doc.pages()[0].text_objects.len(), 1);
+
+        // Tẩy nét (Stroke) quét qua giữa chữ & nét 2 -> cả nét 2 bị xoá, hộp văn bản giữ nguyên 100%
+        app.toolbar_state.eraser_mode = toolbar::EraserMode::Stroke;
+        let p_b = app.view.to_screen(paper, Pos2::new(200.0, 200.0));
+        app.eraser_down(p_b, 0);
+        app.eraser_move(app.view.to_screen(paper, Pos2::new(230.0, 200.0)));
+        app.eraser_up(app.view.to_screen(paper, Pos2::new(230.0, 200.0)));
+        let stroke2_aabb = parry2d_f64::bounding_volume::Aabb::new(
+            parry2d_f64::math::Vector2::new(125.0, 196.0),
+            parry2d_f64::math::Vector2::new(295.0, 204.0),
+        );
+        assert!(
+            !app.doc.pages()[0]
+                .strokes
+                .iter()
+                .any(|s| !s.path.hittest(&stroke2_aabb, 2.0).is_empty()),
+            "Stroke eraser must remove entire stroke 2"
+        );
+        assert_eq!(app.doc.pages()[0].text_objects.len(), 1);
+    }
+
+    #[test]
+    fn test_lasso_select_filter_move_resize_delete_text_boxes() {
+        let ctx = egui::Context::default();
+        theme::setup_fonts(&ctx);
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let mut app = new_test_app(&ctx);
+        let paper = egui::Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 720.0));
+        app.paper_rect = Some(paper);
+
+        app.toolbar_state.active_tool = ActiveTool::Text;
+        app.toolbar_state.text_font_size = 18.0;
+        app.open_new_text_edit(0, Pos2::new(120.0, 150.0), 200.0);
+        app.active_text_edit.as_mut().unwrap().draft.text = "Di chuyển và phóng to".to_string();
+        app.commit_active_text_edit(&ctx);
+        let text_id = app.doc.pages()[0].text_objects[0].id;
+        let bbox = text_box::text_page_bbox(&app.doc.pages()[0].text_objects[0]);
+
+        // Tắt bộ lọc text_boxes -> không chọn được hộp văn bản
+        app.toolbar_state.active_tool = ActiveTool::Lasso;
+        app.toolbar_state.lasso_mode = toolbar::LassoMode::Rectangle;
+        app.toolbar_state.lasso_filter.text_boxes = false;
+        let r0 = app.view.to_screen(paper, bbox.min - vec2(15.0, 15.0));
+        let r1 = app.view.to_screen(paper, bbox.max + vec2(15.0, 15.0));
+        app.lasso_down(&ctx, r0);
+        app.lasso_move(r1);
+        app.lasso_up();
+        assert!(app.lasso_state.selection.is_none());
+
+        // Bật lại text_boxes -> chọn trúng hộp văn bản
+        app.toolbar_state.lasso_filter.text_boxes = true;
+        app.lasso_down(&ctx, r0);
+        app.lasso_move(r1);
+        app.lasso_up();
+        let sel = app.lasso_state.selection.as_ref().unwrap().clone();
+        assert_eq!(sel.text_ids, vec![text_id]);
+
+        // Di chuyển bằng Lasso
+        let inside = app.view.to_screen(paper, sel.bbox.center());
+        app.lasso_down(&ctx, inside);
+        app.lasso_move(inside + vec2(60.0, 40.0) * app.view.zoom);
+        app.lasso_up();
+        let moved = &app.doc.pages()[0].text_objects[0];
+        assert!((moved.pos[0] - 180.0).abs() < 1.0);
+        assert!((moved.pos[1] - 190.0).abs() < 1.0);
+
+        // Phóng to theo góc BottomRight -> scale cả width lẫn font_size
+        let sel_after_move = app.lasso_state.selection.as_ref().unwrap().clone();
+        let handle = app.view.to_screen(
+            paper,
+            lasso::corner_pos(sel_after_move.bbox, lasso::ResizeCorner::BottomRight),
+        );
+        let prev_w = app.doc.pages()[0].text_objects[0].size[0];
+        let prev_fs = app.doc.pages()[0].text_objects[0].font_size;
+        app.lasso_down(&ctx, handle);
+        app.lasso_move(
+            handle
+                + vec2(
+                    sel_after_move.bbox.width() * 0.5,
+                    sel_after_move.bbox.height() * 0.5,
+                ) * app.view.zoom,
+        );
+        app.lasso_up();
+        let resized = &app.doc.pages()[0].text_objects[0];
+        assert!(resized.size[0] > prev_w * 1.25);
+        assert!(resized.font_size > prev_fs * 1.25);
+
+        // Xoá qua Lasso (1 bước Undo) -> Undo khôi phục nguyên vẹn
+        app.delete_lasso_selection();
+        assert_eq!(app.doc.pages()[0].text_objects.len(), 0);
+        app.doc.undo();
+        assert_eq!(app.doc.pages()[0].text_objects.len(), 1);
+    }
+
+    #[test]
+    fn test_text_toolbar_layout_fits_1200x800() {
+        let ctx = egui::Context::default();
+        theme::setup_fonts(&ctx);
+        let mut app = new_test_app(&ctx);
+        app.toolbar_state.active_tool = ActiveTool::Text;
+        let file_status = autosave::FileStatusInfo {
+            file_name: "Untitled",
+            is_saved: true,
+            has_path: false,
+            is_draft_saved: false,
+            autosaved_notice: None,
+            has_error: false,
+        };
+        let mut raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 800.0))),
+            ..Default::default()
+        };
+        for _ in 0..3 {
+            let mut settings = app.doc.paper_settings().clone();
+            let _ = ctx.run_ui(raw.take(), |ui| {
+                let _ = show_toolbars(
+                    ui,
+                    &app.theme,
+                    &mut app.toolbar_state,
+                    &mut app.brush_config,
+                    &mut settings,
+                    &file_status,
+                    (1, 1),
+                    "test",
+                );
+            });
+        }
+        let m = app.toolbar_state.last_metrics;
+        assert!(m.tool_pill_rect.is_positive());
+        assert!(
+            (m.tool_pill_rect.center().x - 600.0).abs() <= 2.0,
+            "pill_rect center={} != 600",
+            m.tool_pill_rect.center().x
+        );
+        assert!(
+            m.tool_pill_rect.width() <= 1160.0,
+            "Text toolbar quá rộng tại 1200px: width={}",
+            m.tool_pill_rect.width()
+        );
+        assert!(m.tool_pill_rect.top() > m.nav_outer_rect.bottom());
     }
 }
