@@ -1,7 +1,7 @@
 # memory.md – Bộ nhớ trạng thái dự án InkNote
 
 ## Mục tiêu hiện tại
-- Hoàn thiện và chốt kiểm thử **Bước 2.2**: Paper Settings (P1) – hỗ trợ 2 chế độ Canvas (`Paper` và `Whiteboard`), khổ giấy tiêu chuẩn (`A4`, `A5`), xoay (`Portrait`, `Landscape`), 4 kiểu template giấy (Plain, Dotted, Grid, Lined), cỡ ô và đường lề 2 bên (hồng pastel).
+- Chuẩn bị thực hiện **Bước 2.3: Auto-save (P1)** – tự động lưu ra file tạm rồi atomic rename đè lên file chính sau 2–3s kể từ khi có thay đổi (nét vẽ, cấu hình giấy, xoá trang) đối với tài liệu đã có đường dẫn lưu.
 
 ## Đã hoàn thành (kèm tên file đã tạo/sửa)
 - **Bước 0 – Spike (Thử nghiệm kỹ thuật)** (`commit fb30599`):
@@ -31,14 +31,14 @@
   - Tích hợp 3 nút Save, Open, New trong menu More (icon 3 chấm) trên toolbar.
   - Hộp thoại Modal hỏi lưu thay đổi (`Save changes?`) khi mở file khác hoặc tạo mới lúc có nét vẽ chưa lưu.
   - Cập nhật tiêu đề cửa sổ kèm dấu hoa thị `*` khi tài liệu bị sửa đổi chưa lưu.
-- **Bước 2.2 – Paper Settings (P1)** (`commit 5c76800`, `ed09af0`, `28c5765`, `414d853`, `0927a84`):
+- **Bước 2.2 – Paper Settings (P1)** (`commit 5c76800`, `ed09af0`, `28c5765`, `414d853`, `0927a84`, tag `step-2.2-ok` — người dùng xác nhận test OK):
   - `crates/inknote-core/src/lib.rs`: Bổ sung `CanvasMode` (Paper/Whiteboard), `PaperSize` (A4/A5), `PaperOrientation` (Portrait/Landscape), mở rộng `PaperSettings`.
   - `crates/inknote-app/src/icons.rs`: Viết hàm vẽ nền `draw_paper` và tính khung tờ giấy `paper_sheet_rect`. Chế độ Paper có viền và đổ bóng mềm (drop shadow), có vạch lề hồng pastel; chế độ Whiteboard trải phẳng tràn màn hình 100% không có vạch lề.
   - `crates/inknote-app/src/toolbar.rs`: Thêm cụm cấu hình Paper Settings vào menu More `...` (Canvas Mode, Paper Format, Template, Spacing, Margins). Cấu hình `PopupCloseBehavior::CloseOnClickOutside` cho tất cả pop-up để không bị tự tắt khi bấm chuột bên trong.
   - `crates/inknote-app/src/main.rs`: Tự động căn giữa tờ giấy A4/A5 khi mở và khi bấm `Ctrl+0`; `drawable_rect` chỉ cho phép vẽ trên tờ giấy ở chế độ Paper (không vẽ lem ra bàn xám); clip nét vẽ gọn gàng trong trang; lưu thiết lập mặc định vào `%APPDATA%/InkNote/default_paper.json`.
 
 ## Đang làm dở
-- Chờ người dùng kiểm thử lần cuối Bước 2.2 để gắn tag `step-2.2-ok`.
+- Không có task nào dở dang. Bước 2.2 đã hoàn thành và gắn tag `step-2.2-ok`. Sẵn sàng bắt tay ngay vào Bước 2.3 (Auto-save).
 
 ## Quyết định đã chốt và lý do (không bàn lại)
 - **Bỏ hoàn toàn bản cũ (Electron/Flutter/web)**: viết mới 100% bằng Rust cho Windows.
@@ -69,14 +69,13 @@
 - Nút bấm phụ trên thân bút / đầu tẩy phía sau bút Wacom: chưa kiểm tra `egui` có nhận riêng được không (để sau).
 
 ## Việc tiếp theo (xếp theo thứ tự ưu tiên)
-1. Chốt kiểm thử Bước 2.2 và gắn tag `step-2.2-ok`.
-2. **Bước 2.3**: **Auto-save**: tự động lưu ra file tạm rồi atomic rename đè lên file chính sau 2–3s kể từ khi có thay đổi.
-3. **Bước 3 (3.1 → 3.2)**: Nhiều trang & Thanh thumbnail trang (P1).
-4. **Bước 4 (4.1 → 4.5)**: Công thức LaTeX kiểu Xournal++ (`inknote-latex`, Live Preview, chèn/double-click sửa, lưu file).
-5. **Bước 5 (5.1 → 5.4)**: Tẩy (2 chế độ + Pop-up nâng cao, chỉ xoá nét bút), Lasso, Hình học, Văn bản.
-6. **Bước 6 (6.1 → 6.2)**: Chèn ảnh + nút dán ảnh từ clipboard, giữ ảnh sắc nét theo zoom.
-7. **Bước 7 (7.1 → 7.4)**: Màn hình Library (P3), Trash, xuất PDF/Ảnh, `README.md`.
+1. **Bước 2.3: Auto-save (P1)**: Tự động lưu sau 2–3s debounce khi có thay đổi (vẽ, xoá, đổi template/khổ giấy), dùng atomic save (.tmp rename).
+2. **Bước 3 (3.1 → 3.2)**: Nhiều trang & Thanh thumbnail trang (P1).
+3. **Bước 4 (4.1 → 4.5)**: Công thức LaTeX kiểu Xournal++ (`inknote-latex`, Live Preview, chèn/double-click sửa, lưu file).
+4. **Bước 5 (5.1 → 5.4)**: Tẩy (2 chế độ + Pop-up nâng cao, chỉ xoá nét bút), Lasso, Hình học, Văn bản.
+5. **Bước 6 (6.1 → 6.2)**: Chèn ảnh + nút dán ảnh từ clipboard, giữ ảnh sắc nét theo zoom.
+6. **Bước 7 (7.1 → 7.4)**: Màn hình Library (P3), Trash, xuất PDF/Ảnh, `README.md`.
 
 ## Cập nhật lần cuối
-- **Ngày**: 2026-11-12
+- **Ngày**: 2026-11-13
 - **Model đã dùng**: Gemini (Antigravity IDE)

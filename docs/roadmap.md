@@ -36,7 +36,7 @@
 | Bước | Việc | Trạng thái | Test thủ công | Rollback |
 |---|---|---|---|---|
 | 2.1 | **Thiết kế định dạng file & Lưu/mở file (`Ctrl+S`)**: file lưu có **số phiên bản (`format_version`)**, danh sách **kiểu đối tượng** (nét bút, hình học, văn bản, ảnh, LaTeX) và **thumbnail trang đầu** (phục vụ màn hình Library P3) | ✅ Xong (`step-2.1-ok`) | Vẽ vài nét, bấm Lưu, tắt app, mở lại file: nội dung còn nguyên; kiểm tra file có đủ `format_version` và dữ liệu thumbnail trang đầu | `git revert 98a04fd` |
-| 2.2 | **Paper settings (P1)**: mở từ menu dấu ba chấm trên toolbar; chọn kiểu giấy (trắng trơn, chấm, kẻ ô, kẻ dòng), chỉnh cỡ ô, bật/tắt và chỉnh vị trí **margin lines 2 bên** | ⏳ Chưa làm | Đổi qua lại các kiểu giấy, chỉnh cỡ ô và lề 2 bên: trang giấy cập nhật ngay; lưu và mở lại vẫn giữ cài đặt | `git revert <commit 2.2>` |
+| 2.2 | **Paper settings (P1)**: mở từ menu dấu ba chấm trên toolbar; chọn kiểu giấy (trắng trơn, chấm, kẻ ô, kẻ dòng), chỉnh cỡ ô, bật/tắt và chỉnh vị trí **margin lines 2 bên** | ✅ Xong (`step-2.2-ok`) | Đổi qua lại các kiểu giấy, chỉnh cỡ ô và lề 2 bên: trang giấy cập nhật ngay; lưu và mở lại vẫn giữ cài đặt | `git revert <commit 2.2>` |
 | 2.3 | **Auto-save**: tự động lưu ra file tạm rồi đổi tên đè lên file chính sau vài giây kể từ khi có thay đổi | ⏳ Chưa làm | Vẽ thêm nét, đợi vài giây, tắt ngang app bằng Task Manager, mở lại: không mất dữ liệu | `git revert <commit 2.3>` |
 
 ---
