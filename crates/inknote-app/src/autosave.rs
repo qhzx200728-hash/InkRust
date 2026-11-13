@@ -17,6 +17,7 @@ pub const AUTOSAVE_NOTICE_DURATION: Duration = Duration::from_secs(3);
 struct InFlightSave {
     job_id: u64,
     saved_rev: u64,
+    is_draft: bool,
     rx: Receiver<Result<(), String>>,
 }
 
@@ -26,12 +27,16 @@ pub struct FileStatusInfo<'a> {
     pub file_name: &'a str,
     pub is_saved: bool,
     pub has_path: bool,
+    pub is_draft_saved: bool,
     pub autosaved_notice: Option<&'static str>,
     pub has_error: bool,
 }
 
 /// Bộ điều phối Auto-save chạy ở luồng nền để không làm khựng nét viết.
 pub struct AutoSaveState {
+    draft_path: Option<PathBuf>,
+    draft_saved_rev: Option<u64>,
+    has_restored_draft: bool,
     last_tracked_rev: u64,
     last_change_at: Option<Instant>,
     in_flight: Option<InFlightSave>,
@@ -43,7 +48,19 @@ pub struct AutoSaveState {
 
 impl AutoSaveState {
     pub fn new(initial_rev: u64) -> Self {
+        Self::new_inner(initial_rev, None)
+    }
+
+    /// Tạo AutoSaveState có đường dẫn bản nháp tạm khi người dùng chưa chọn file `.inknote`.
+    pub fn with_draft_path(initial_rev: u64, draft_path: PathBuf) -> Self {
+        Self::new_inner(initial_rev, Some(draft_path))
+    }
+
+    fn new_inner(initial_rev: u64, draft_path: Option<PathBuf>) -> Self {
         Self {
+            draft_path,
+            draft_saved_rev: None,
+            has_restored_draft: false,
             last_tracked_rev: initial_rev,
             last_change_at: None,
             in_flight: None,
@@ -54,6 +71,33 @@ impl AutoSaveState {
         }
     }
 
+    /// Đánh dấu bản nháp đã được khôi phục lúc khởi động sau sự cố.
+    pub fn mark_restored_draft(&mut self, rev: u64) {
+        self.last_tracked_rev = rev;
+        self.draft_saved_rev = Some(rev);
+        self.has_restored_draft = true;
+    }
+
+    /// Có bản nháp tạm nào của ghi chú chưa lưu file chính thức hay không.
+    pub fn has_draft(&self) -> bool {
+        self.draft_saved_rev.is_some() || self.has_restored_draft
+    }
+
+    fn delete_draft_file(&mut self) {
+        self.draft_saved_rev = None;
+        self.has_restored_draft = false;
+        if let Some(path) = &self.draft_path {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    /// Xoá bản nháp tạm và huỷ kết quả các lượt lưu nền cũ nếu có.
+    pub fn delete_draft(&mut self) {
+        self.min_valid_job_id = self.next_job_id;
+        self.last_autosaved_notice_at = None;
+        self.delete_draft_file();
+    }
+
     /// Đặt lại trạng thái theo dõi khi mở file mới hoặc tạo ghi chú mới.
     pub fn reset(&mut self, current_rev: u64) {
         self.min_valid_job_id = self.next_job_id;
@@ -61,6 +105,8 @@ impl AutoSaveState {
         self.last_change_at = None;
         self.last_autosaved_notice_at = None;
         self.last_error = None;
+        self.draft_saved_rev = None;
+        self.has_restored_draft = false;
     }
 
     /// Ghi nhận người dùng vừa lưu thủ công thành công (không bật thông báo auto-save).
@@ -70,6 +116,7 @@ impl AutoSaveState {
         self.last_change_at = None;
         self.last_autosaved_notice_at = None;
         self.last_error = None;
+        self.delete_draft_file();
     }
 
     /// Kiểm tra kết quả luồng nền và kích hoạt auto-save nếu đã quá thời gian debounce.
@@ -90,10 +137,19 @@ impl AutoSaveState {
             self.last_error = None;
         }
 
-        let Some(path) = current_path else {
-            return;
+        let (target_path, is_draft, needs_save) = match current_path {
+            Some(path) => (path.clone(), false, doc.is_dirty()),
+            None => match &self.draft_path {
+                Some(draft) => (
+                    draft.clone(),
+                    true,
+                    doc.is_dirty() && self.draft_saved_rev != Some(rev),
+                ),
+                None => return,
+            },
         };
-        if !doc.is_dirty() || is_drawing || self.in_flight.is_some() {
+
+        if !needs_save || is_drawing || self.in_flight.is_some() {
             return;
         }
 
@@ -105,12 +161,11 @@ impl AutoSaveState {
         let job_id = self.next_job_id;
         self.next_job_id += 1;
         let snapshot = doc.to_file();
-        let path_clone = path.clone();
         let (tx, rx) = mpsc::channel();
 
         thread::spawn(move || {
             let res = snapshot
-                .save_to_path(&path_clone)
+                .save_to_path(&target_path)
                 .map_err(|e| e.to_string());
             let _ = tx.send(res);
         });
@@ -118,6 +173,7 @@ impl AutoSaveState {
         self.in_flight = Some(InFlightSave {
             job_id,
             saved_rev: rev,
+            is_draft,
             rx,
         });
     }
@@ -134,12 +190,22 @@ impl AutoSaveState {
                 }
                 match result {
                     Ok(()) => {
-                        doc.mark_saved_at(job.saved_rev);
                         self.last_error = None;
-                        if !doc.is_dirty() {
-                            self.last_change_at = None;
-                            // Chỉ hiện thông báo "Auto-saved" 3s khi mọi thay đổi đã được tự lưu sạch
-                            self.last_autosaved_notice_at = Some(now);
+                        if job.is_draft {
+                            self.draft_saved_rev = Some(job.saved_rev);
+                            if doc.revision() == job.saved_rev {
+                                self.last_change_at = None;
+                                // Hiện thông báo "Auto-saved" 3s cả khi tự lưu bản nháp
+                                self.last_autosaved_notice_at = Some(now);
+                            }
+                        } else {
+                            doc.mark_saved_at(job.saved_rev);
+                            self.delete_draft_file();
+                            if !doc.is_dirty() {
+                                self.last_change_at = None;
+                                // Chỉ hiện thông báo "Auto-saved" 3s khi mọi thay đổi đã được tự lưu sạch
+                                self.last_autosaved_notice_at = Some(now);
+                            }
                         }
                     }
                     Err(err) => {
@@ -158,11 +224,11 @@ impl AutoSaveState {
         }
     }
 
-    /// Đợi luồng nền đang chạy (nếu có) và lưu nốt thay đổi cuối trước khi đóng app.
+    /// Đợi luồng nền đang chạy (nếu có) và lưu nốt thay đổi cuối trước khi đóng app (chỉ khi đã có file).
     pub fn flush_on_exit(&mut self, doc: &mut Document, current_path: Option<&PathBuf>) {
         if let Some(job) = self.in_flight.take() {
             if let Ok(Ok(())) = job.rx.recv() {
-                if job.job_id >= self.min_valid_job_id {
+                if job.job_id >= self.min_valid_job_id && !job.is_draft {
                     doc.mark_saved_at(job.saved_rev);
                 }
             }
@@ -179,9 +245,22 @@ impl AutoSaveState {
         }
     }
 
+    fn is_up_to_date_for_target(&self, doc: &Document, current_path: Option<&PathBuf>) -> bool {
+        if current_path.is_some() {
+            !doc.is_dirty()
+        } else {
+            self.draft_saved_rev == Some(doc.revision())
+        }
+    }
+
     /// Thông báo đã lưu chỉ hiện trong 3 giây sau mỗi lần tự lưu thành công.
-    pub fn autosaved_notice(&self, doc: &Document, now: Instant) -> Option<&'static str> {
-        if doc.is_dirty() {
+    pub fn autosaved_notice(
+        &self,
+        doc: &Document,
+        current_path: Option<&PathBuf>,
+        now: Instant,
+    ) -> Option<&'static str> {
+        if !self.is_up_to_date_for_target(doc, current_path) {
             return None;
         }
         let saved_at = self.last_autosaved_notice_at?;
@@ -202,11 +281,15 @@ impl AutoSaveState {
     ) -> FileStatusInfo<'a> {
         let has_path = current_path.is_some();
         let is_saved = has_path && !doc.is_dirty();
+        let is_draft_saved = !has_path
+            && (self.draft_saved_rev == Some(doc.revision())
+                || (!doc.is_dirty() && self.has_restored_draft));
         FileStatusInfo {
             file_name,
             is_saved,
             has_path,
-            autosaved_notice: self.autosaved_notice(doc, now),
+            is_draft_saved,
+            autosaved_notice: self.autosaved_notice(doc, current_path, now),
             has_error: self.last_error.is_some(),
         }
     }
@@ -221,14 +304,20 @@ impl AutoSaveState {
         if self.in_flight.is_some() {
             return Some(Duration::from_millis(50));
         }
-        if current_path.is_some() && doc.is_dirty() {
+        let rev = doc.revision();
+        let needs_debounce = if current_path.is_some() {
+            doc.is_dirty()
+        } else {
+            self.draft_path.is_some() && doc.is_dirty() && self.draft_saved_rev != Some(rev)
+        };
+        if needs_debounce {
             if let Some(changed_at) = self.last_change_at {
                 let elapsed = now.saturating_duration_since(changed_at);
                 let rem = AUTOSAVE_DEBOUNCE.saturating_sub(elapsed);
                 return Some(rem.max(Duration::from_millis(20)));
             }
         }
-        if !doc.is_dirty() {
+        if self.is_up_to_date_for_target(doc, current_path) {
             if let Some(saved_at) = self.last_autosaved_notice_at {
                 let elapsed = now.saturating_duration_since(saved_at);
                 if elapsed < AUTOSAVE_NOTICE_DURATION {
@@ -246,7 +335,7 @@ impl AutoSaveState {
 mod tests {
     use super::*;
     use inknote_core::{Command, DocumentFile, PaperPattern, Stroke};
-    use inknote_pen::{PenPath, Style, penpath::Element};
+    use inknote_pen::{penpath::Element, PenPath, Style};
     use parry2d_f64::math::Vector2;
 
     fn add_test_stroke(doc: &mut Document) {
@@ -259,9 +348,14 @@ mod tests {
         }));
     }
 
-    fn wait_until_idle(state: &mut AutoSaveState, doc: &mut Document, path: &PathBuf, t: Instant) {
+    fn wait_until_idle(
+        state: &mut AutoSaveState,
+        doc: &mut Document,
+        path: Option<&PathBuf>,
+        t: Instant,
+    ) {
         for _ in 0..100 {
-            state.poll_and_maybe_save(doc, Some(path), false, t);
+            state.poll_and_maybe_save(doc, path, false, t);
             if state.in_flight.is_none() {
                 return;
             }
@@ -283,7 +377,7 @@ mod tests {
         let mut state = AutoSaveState::new(doc.revision());
 
         // Mới mở file: chưa tự lưu lần nào nên không hiện thông báo "Auto-saved"
-        assert_eq!(state.autosaved_notice(&doc, t0), None);
+        assert_eq!(state.autosaved_notice(&doc, Some(&temp_file), t0), None);
 
         add_test_stroke(&mut doc);
         assert!(doc.is_dirty());
@@ -307,7 +401,7 @@ mod tests {
         state.poll_and_maybe_save(&mut doc, Some(&temp_file), false, t_save);
         assert!(state.in_flight.is_some());
 
-        wait_until_idle(&mut state, &mut doc, &temp_file, t_save);
+        wait_until_idle(&mut state, &mut doc, Some(&temp_file), t_save);
         assert!(!doc.is_dirty());
 
         // Trong 3 giây sau khi tự lưu: hiện "Auto-saved" và chấm xanh
@@ -356,7 +450,12 @@ mod tests {
 
         // Có đường dẫn nhưng đang vẽ dở -> hoãn lưu
         doc.to_file().save_to_path(&temp_file).unwrap();
-        state.poll_and_maybe_save(&mut doc, Some(&temp_file), true, t0 + Duration::from_secs(6));
+        state.poll_and_maybe_save(
+            &mut doc,
+            Some(&temp_file),
+            true,
+            t0 + Duration::from_secs(6),
+        );
         assert!(state.in_flight.is_none());
 
         // Nhấc bút -> lưu ngay vì đã quá debounce
@@ -364,10 +463,45 @@ mod tests {
         state.poll_and_maybe_save(&mut doc, Some(&temp_file), false, t_done);
         assert!(state.in_flight.is_some());
 
-        wait_until_idle(&mut state, &mut doc, &temp_file, t_done);
+        wait_until_idle(&mut state, &mut doc, Some(&temp_file), t_done);
         assert!(!doc.is_dirty());
 
         let _ = std::fs::remove_file(temp_file);
+    }
+
+    #[test]
+    fn autosave_saves_untitled_draft_and_deletes_on_discard() {
+        let draft_file = std::env::temp_dir().join("test_autosave_untitled_draft.inknote");
+        let _ = std::fs::remove_file(&draft_file);
+
+        let mut doc = Document::new();
+        let t0 = Instant::now();
+        let mut state = AutoSaveState::with_draft_path(doc.revision(), draft_file.clone());
+
+        add_test_stroke(&mut doc);
+        assert!(doc.is_dirty());
+
+        // Đủ debounce -> tự động lưu vào bản nháp tạm, chấm vẫn đỏ (chưa chọn file chính thức)
+        let t_save = t0 + Duration::from_secs(3);
+        state.poll_and_maybe_save(&mut doc, None, false, t0);
+        state.poll_and_maybe_save(&mut doc, None, false, t_save);
+        wait_until_idle(&mut state, &mut doc, None, t_save);
+
+        assert!(draft_file.exists());
+        assert!(state.has_draft());
+        assert!(doc.is_dirty());
+        let st = state.file_status(&doc, "Untitled Note", None, t_save + Duration::from_secs(1));
+        assert!(!st.is_saved);
+        assert!(st.is_draft_saved);
+        assert_eq!(st.autosaved_notice, Some("Auto-saved"));
+
+        let loaded = DocumentFile::load_from_path(&draft_file).unwrap();
+        assert_eq!(loaded.pages[0].objects.len(), 1);
+
+        // Khi người dùng chọn Không lưu lúc tắt app -> xoá bản nháp tạm
+        state.delete_draft();
+        assert!(!draft_file.exists());
+        assert!(!state.has_draft());
     }
 
     #[test]
@@ -389,7 +523,7 @@ mod tests {
         state.poll_and_maybe_save(&mut doc, Some(&temp_file), false, t0);
         let t_save = t0 + Duration::from_secs(3);
         state.poll_and_maybe_save(&mut doc, Some(&temp_file), false, t_save);
-        wait_until_idle(&mut state, &mut doc, &temp_file, t_save);
+        wait_until_idle(&mut state, &mut doc, Some(&temp_file), t_save);
 
         assert!(!doc.is_dirty());
         let loaded = DocumentFile::load_from_path(&temp_file).unwrap();

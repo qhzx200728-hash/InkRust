@@ -240,6 +240,8 @@ fn draw_nav_file_status(
         "All changes saved"
     } else if status.has_path {
         "Unsaved changes"
+    } else if status.is_draft_saved {
+        "Draft auto-saved (not saved to .inknote file yet)"
     } else {
         "Not saved to file yet (Ctrl+S)"
     };

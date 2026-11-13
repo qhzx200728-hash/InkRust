@@ -113,6 +113,7 @@ impl StaticKey {
 enum UnsavedAction {
     NewNote,
     Open,
+    CloseApp,
 }
 
 fn default_paper_config_path() -> PathBuf {
@@ -122,6 +123,16 @@ fn default_paper_config_path() -> PathBuf {
             .join("default_paper.json")
     } else {
         PathBuf::from(".inknote_default_paper.json")
+    }
+}
+
+fn default_draft_path() -> PathBuf {
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        PathBuf::from(appdata)
+            .join("InkNote")
+            .join("autosave_draft.inknote")
+    } else {
+        PathBuf::from(".inknote_autosave_draft.inknote")
     }
 }
 
@@ -155,6 +166,7 @@ struct InkNoteApp {
     // Đường dẫn file .inknote hiện tại đang mở/lưu (None nếu là ghi chú mới chưa lưu)
     current_path: Option<PathBuf>,
     confirm_unsaved: Option<UnsavedAction>,
+    allow_close: bool,
     autosave: AutoSaveState,
     // Bộ nhớ đệm lưới tam giác của từng nét (khoá = id nét), không thuộc dữ liệu trang
     batch_cache: HashMap<u64, CachedStroke>,
@@ -195,10 +207,29 @@ impl InkNoteApp {
         // Ctrl +/-/0 dùng để zoom TRANG, không zoom cả giao diện
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
         let default_paper = load_default_paper_settings();
+        let draft_path = default_draft_path();
+
         let mut doc = Document::new();
         *doc.paper_settings_mut() = default_paper.clone();
-        let initial_rev = doc.revision();
-        Self {
+        let mut restored_draft = false;
+        if draft_path.exists() {
+            match DocumentFile::load_from_path(&draft_path) {
+                Ok(file) => {
+                    doc = Document::from_file(file);
+                    restored_draft = true;
+                }
+                Err(_) => {
+                    let _ = std::fs::remove_file(&draft_path);
+                }
+            }
+        }
+
+        let mut autosave = AutoSaveState::with_draft_path(doc.revision(), draft_path);
+        if restored_draft {
+            autosave.mark_restored_draft(doc.revision());
+        }
+
+        let mut app = Self {
             theme: Theme::default(),
             toolbar_state: ToolbarState::default(),
             brush_config: BrushConfig::default(),
@@ -206,7 +237,8 @@ impl InkNoteApp {
             default_paper_settings: default_paper,
             current_path: None,
             confirm_unsaved: None,
-            autosave: AutoSaveState::new(initial_rev),
+            allow_close: false,
+            autosave,
             batch_cache: HashMap::new(),
             view: View::default(),
             confirm_clear: false,
@@ -231,7 +263,11 @@ impl InkNoteApp {
             cur_pressure: 0.0,
             last_up_pressure: 0.0,
             last_source: "Ready",
+        };
+        if restored_draft {
+            app.rebuild_batch_cache();
         }
+        app
     }
 }
 
@@ -478,22 +514,43 @@ impl InkNoteApp {
         self.doc.execute(Command::AddStrokes(list));
     }
 
-    /// Lưu ghi chú (nếu đã có đường dẫn thì lưu thẳng, chưa có thì mở hộp thoại Save As).
-    fn save_document(&mut self) {
-        if let Some(path) = self.current_path.clone() {
-            if let Err(e) = self.doc.to_file().save_to_path(&path) {
-                eprintln!("Lỗi khi lưu file {:?}: {e}", path);
-            } else {
-                self.doc.mark_saved();
-                self.autosave.note_manual_save(self.doc.revision());
+    /// Có thay đổi hoặc bản nháp chưa lưu thành file `.inknote` chính thức hay không.
+    fn needs_save_prompt(&self) -> bool {
+        self.doc.is_dirty() || (self.current_path.is_none() && self.autosave.has_draft())
+    }
+
+    /// Tái tạo lại bộ nhớ đệm lưới tam giác cho mọi nét trên tất cả trang.
+    fn rebuild_batch_cache(&mut self) {
+        self.batch_cache.clear();
+        for page in self.doc.pages() {
+            for s in &page.strokes {
+                self.render_cx.clear_batches();
+                s.path.draw_composed(&mut self.render_cx, &s.style);
+                let batches = std::mem::take(&mut self.render_cx.batches);
+                self.batch_cache.insert(s.id, CachedStroke::new(batches));
             }
-        } else {
-            self.save_document_as();
         }
     }
 
-    /// Mở hộp thoại chọn nơi lưu file .inknote mới.
-    fn save_document_as(&mut self) {
+    /// Lưu ghi chú (nếu đã có đường dẫn thì lưu thẳng, chưa có thì mở hộp thoại Save As).
+    /// Trả về `true` nếu đã lưu thành công.
+    fn save_document(&mut self) -> bool {
+        if let Some(path) = self.current_path.clone() {
+            if let Err(e) = self.doc.to_file().save_to_path(&path) {
+                eprintln!("Lỗi khi lưu file {:?}: {e}", path);
+                false
+            } else {
+                self.doc.mark_saved();
+                self.autosave.note_manual_save(self.doc.revision());
+                true
+            }
+        } else {
+            self.save_document_as()
+        }
+    }
+
+    /// Mở hộp thoại chọn nơi lưu file .inknote mới. Trả về `true` nếu người dùng chọn lưu và ghi thành công.
+    fn save_document_as(&mut self) -> bool {
         let default_name = format!("{}.inknote", self.doc.metadata().title);
         let path = rfd::FileDialog::new()
             .add_filter("InkNote (*.inknote)", &["inknote"])
@@ -505,11 +562,15 @@ impl InkNoteApp {
             }
             if let Err(e) = self.doc.to_file().save_to_path(&path) {
                 eprintln!("Lỗi khi lưu file {:?}: {e}", path);
+                false
             } else {
                 self.doc.mark_saved();
                 self.current_path = Some(path);
                 self.autosave.note_manual_save(self.doc.revision());
+                true
             }
+        } else {
+            false
         }
     }
 
@@ -520,20 +581,11 @@ impl InkNoteApp {
                 self.doc = Document::from_file(file);
                 self.current_path = Some(path);
                 self.autosave.reset(self.doc.revision());
-                self.batch_cache.clear();
                 self.static_cache = None;
                 self.active = None;
                 self.drawing_page_index = None;
                 self.pull_overscroll = 0.0;
-                // Tái tạo lại batch_cache cho các nét trên tất cả các trang vừa nạp
-                for page in self.doc.pages() {
-                    for s in &page.strokes {
-                        self.render_cx.clear_batches();
-                        s.path.draw_composed(&mut self.render_cx, &s.style);
-                        let batches = std::mem::take(&mut self.render_cx.batches);
-                        self.batch_cache.insert(s.id, CachedStroke::new(batches));
-                    }
-                }
+                self.rebuild_batch_cache();
             }
             Err(e) => {
                 eprintln!("Lỗi khi mở file: {e}");
@@ -543,7 +595,7 @@ impl InkNoteApp {
 
     /// Bắt đầu quy trình mở file (hỏi xác nhận nếu có thay đổi chưa lưu).
     fn trigger_open(&mut self) {
-        if self.doc.is_dirty() {
+        if self.needs_save_prompt() {
             self.confirm_unsaved = Some(UnsavedAction::Open);
         } else if let Some(path) = rfd::FileDialog::new()
             .add_filter("InkNote (*.inknote)", &["inknote"])
@@ -555,7 +607,7 @@ impl InkNoteApp {
 
     /// Bắt đầu quy trình tạo ghi chú mới.
     fn trigger_new(&mut self) {
-        if self.doc.is_dirty() {
+        if self.needs_save_prompt() {
             self.confirm_unsaved = Some(UnsavedAction::NewNote);
         } else {
             self.new_document();
@@ -878,6 +930,14 @@ impl eframe::App for InkNoteApp {
         }
         self.prev_frame_t = frame_t;
 
+        // Khi người dùng tắt app mà chưa lưu ra file .inknote chính thức -> chặn tắt để hỏi xác nhận
+        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close {
+            if self.current_path.is_none() && self.needs_save_prompt() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.confirm_unsaved = Some(UnsavedAction::CloseApp);
+            }
+        }
+
         // Cập nhật trạng thái auto-save trước khi vẽ tiêu đề & thanh công cụ để chấm xanh/đỏ & thông báo tức thì
         let autosave_now = Instant::now();
         self.autosave.poll_and_maybe_save(
@@ -895,7 +955,7 @@ impl eframe::App for InkNoteApp {
                 .unwrap_or("untitled.inknote"),
             None => self.doc.metadata().title.as_str(),
         };
-        let dirty_mark = if self.doc.is_dirty() { " *" } else { "" };
+        let dirty_mark = if self.needs_save_prompt() { " *" } else { "" };
         let full_title = format!("InkNote - {}{}", doc_title, dirty_mark);
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(full_title));
 
@@ -1054,23 +1114,33 @@ impl eframe::App for InkNoteApp {
             }
         }
 
-        // Hộp xác nhận lưu thay đổi trước khi mở file khác hoặc tạo mới
+        // Hộp xác nhận lưu thay đổi trước khi mở file khác, tạo mới hoặc tắt app khi chưa lưu file
         if let Some(action) = self.confirm_unsaved {
             let mut do_save = false;
             let mut do_discard = false;
             let mut cancel = false;
+            let (title, body, save_btn_label) = match action {
+                UnsavedAction::CloseApp => (
+                    "Save before closing?",
+                    "This note hasn't been saved to a file yet. Do you want to save it before deleting the temporary draft and closing?",
+                    "Save",
+                ),
+                UnsavedAction::Open | UnsavedAction::NewNote => (
+                    "Save changes?",
+                    "You have unsaved changes in this note. Do you want to save before proceeding?",
+                    "Save & Continue",
+                ),
+            };
             #[allow(deprecated)]
             let modal =
                 egui::Modal::new(egui::Id::new("confirm_unsaved_changes")).show(&ctx, |ui| {
-                    ui.set_width(320.0);
-                    ui.heading("Save changes?");
+                    ui.set_width(340.0);
+                    ui.heading(title);
                     ui.add_space(4.0);
-                    ui.label(
-                    "You have unsaved changes in this note. Do you want to save before proceeding?",
-                );
+                    ui.label(body);
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Save & Continue").clicked() {
+                        if ui.button(save_btn_label).clicked() {
                             do_save = true;
                         }
                         if ui.button("Don't Save").clicked() {
@@ -1082,21 +1152,28 @@ impl eframe::App for InkNoteApp {
                     });
                 });
             if do_save {
-                self.save_document();
+                let saved = self.save_document();
                 self.confirm_unsaved = None;
-                match action {
-                    UnsavedAction::Open => {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("InkNote (*.inknote)", &["inknote"])
-                            .pick_file()
-                        {
-                            self.load_document_from(path);
+                if saved {
+                    match action {
+                        UnsavedAction::Open => {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("InkNote (*.inknote)", &["inknote"])
+                                .pick_file()
+                            {
+                                self.load_document_from(path);
+                            }
+                        }
+                        UnsavedAction::NewNote => self.new_document(),
+                        UnsavedAction::CloseApp => {
+                            self.allow_close = true;
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
                     }
-                    UnsavedAction::NewNote => self.new_document(),
                 }
             } else if do_discard {
                 self.confirm_unsaved = None;
+                self.autosave.delete_draft();
                 match action {
                     UnsavedAction::Open => {
                         if let Some(path) = rfd::FileDialog::new()
@@ -1107,6 +1184,10 @@ impl eframe::App for InkNoteApp {
                         }
                     }
                     UnsavedAction::NewNote => self.new_document(),
+                    UnsavedAction::CloseApp => {
+                        self.allow_close = true;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
                 }
             } else if cancel || modal.should_close() {
                 self.confirm_unsaved = None;
@@ -1491,6 +1572,7 @@ mod tests {
             default_paper_settings: PaperSettings::default(),
             current_path: None,
             confirm_unsaved: None,
+            allow_close: false,
             autosave: AutoSaveState::new(0),
             batch_cache: HashMap::new(),
             view: View::default(),
@@ -1758,6 +1840,7 @@ mod tests {
                         file_name: "VeryLongLectureNotesFileName2026.inknote",
                         is_saved: true,
                         has_path: true,
+                        is_draft_saved: false,
                         autosaved_notice: Some("Auto-saved"),
                         has_error: false,
                     };
