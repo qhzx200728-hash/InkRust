@@ -74,7 +74,7 @@ impl Default for Theme {
             nav_button_rounding: 7,
             nav_status_saved_dot: Color32::from_rgb(74, 222, 128),
             nav_status_unsaved_dot: Color32::from_rgb(248, 113, 113),
-            nav_status_notice_fg: Color32::from_rgb(187, 247, 208),
+            nav_status_notice_fg: Color32::WHITE,
 
             // Thanh tuỳ chọn công cụ nền tối bo tròn
             tool_strip_bg: Color32::from_rgb(236, 239, 244),
