@@ -1200,6 +1200,11 @@ pub fn show_toolbars(
         (ideal_center_x - 240.0).max(safe_left)
     };
 
+    if state.read_only {
+        state.last_metrics.tool_pill_rect = Rect::NOTHING;
+        return actions;
+    }
+
     let area_resp = egui::Area::new(pill_id)
         .order(egui::Order::Foreground)
         .interactable(true)
@@ -1211,18 +1216,6 @@ pub fn show_toolbars(
                     ui.horizontal(|ui| {
                         ui.set_min_height(theme.tool_row_height);
                         ui.spacing_mut().item_spacing.x = 6.0;
-
-                        if state.read_only {
-                            ui.label(
-                                RichText::new("Read-Only Mode is active — drag canvas to scroll/pan")
-                                    .size(theme.font_size_body)
-                                    .color(theme.tool_text_fg),
-                            );
-                            if ui.small_button("Resume Drawing").clicked() {
-                                state.read_only = false;
-                            }
-                            return;
-                        }
 
                         match state.active_tool {
                             ActiveTool::Pen => {

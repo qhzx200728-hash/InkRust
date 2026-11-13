@@ -6080,6 +6080,7 @@ mod tests {
             out.textures_delta.clear();
         };
         run_frame(&mut app, vec![]);
+        assert_eq!(app.toolbar_state.last_metrics.tool_pill_rect, Rect::NOTHING);
 
         let paper = app.paper_rect.expect("paper rect");
         let press_pos = paper.center();
