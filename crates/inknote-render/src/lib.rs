@@ -12,9 +12,9 @@ use std::ops::RangeBounds;
 
 use kurbo::{Affine, PathEl, Point, Rect, Shape, Size};
 use lyon_tessellation::{
-    BuffersBuilder, FillOptions, FillRule, FillTessellator, FillVertex, LineCap as LyonCap,
-    LineJoin as LyonJoin, StrokeOptions, StrokeTessellator, StrokeVertex, VertexBuffers,
-    math::point as lyon_point, path::Path as LyonPath,
+    math::point as lyon_point, path::Path as LyonPath, BuffersBuilder, FillOptions, FillRule,
+    FillTessellator, FillVertex, LineCap as LyonCap, LineJoin as LyonJoin, StrokeOptions,
+    StrokeTessellator, StrokeVertex, VertexBuffers,
 };
 use piet::{
     Color, Error, FixedGradient, FontFamily, HitTestPoint, HitTestPosition, Image, ImageFormat,
@@ -77,7 +77,7 @@ impl CairoRenderContext {
             lyon_point(tp.x as f32, tp.y as f32)
         };
 
-        for el in shape.path_elements(0.5) {
+        for el in shape.path_elements(0.1) {
             match el {
                 PathEl::MoveTo(p) => {
                     if subpath_open {
@@ -133,7 +133,7 @@ impl CairoRenderContext {
         let mut tessellator = FillTessellator::new();
         let options = FillOptions::default()
             .with_fill_rule(rule)
-            .with_tolerance(0.5);
+            .with_tolerance(0.1);
 
         if tessellator
             .tessellate_path(
@@ -172,7 +172,7 @@ impl CairoRenderContext {
         let mut tessellator = StrokeTessellator::new();
         let mut options = StrokeOptions::default()
             .with_line_width(width as f32)
-            .with_tolerance(0.5);
+            .with_tolerance(0.1);
 
         if let Some(st) = style {
             options = options.with_line_cap(match st.line_cap {

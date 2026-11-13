@@ -2461,6 +2461,8 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("InkNote")
             .with_inner_size([1200.0, 800.0]),
+        // Bật khử răng cưa phần cứng 4x MSAA để đường biên lưới tam giác của nét bút mịn mượt
+        multisampling: 4,
         wgpu_options,
         ..Default::default()
     };
