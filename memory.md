@@ -1,8 +1,8 @@
 # memory.md – Bộ nhớ trạng thái dự án InkNote
 
 ## Mục tiêu hiện tại
-- Vừa hoàn thành và gắn tag **`step-6.2-ok`** (**Bước 6.2: Giữ ảnh sắc nét theo mức zoom & Kiểm tra tổng hợp với Tẩy**).
-- Đang chuyển sang **Bước 7.1 – Giao diện Library (P3)** theo `docs/roadmap.md`.
+- Vừa hoàn thành và gắn tag **`step-7.1-ok`** (**Bước 7.1: Giao diện Library (P3)**, mở thẳng vào Library khi khởi động bình thường).
+- Đang chuyển sang **Bước 7.2 – Quản lý thư mục, Menu thẻ & Thùng rác (Trash – P3)** theo `docs/roadmap.md`.
 
 ## Đã hoàn thành (kèm tên file đã tạo/sửa)
 - **Bước 0 – Spike (Thử nghiệm kỹ thuật)** (`commit fb30599`):
@@ -73,8 +73,12 @@
   - `crates/inknote-app/src/image_box.rs`: Lưu nguyên `ImageObject.bytes`, đọc động giới hạn GPU `max_texture_side` (`clamp(512, 8192)`), bật mipmap `TextureOptions::LINEAR.with_mipmap_mode(Some(TextureFilter::Linear))`, dùng `FilterType::Lanczos3` cho ảnh quá cỡ và tự nâng cấp texture nếu giới hạn GPU tăng.
   - `crates/inknote-app/src/thumbnails.rs` & `main.rs`: Hiển thị ảnh trang trong thanh thumbnail Pages (bên dưới nét bút) và kiểm thử tích hợp ở zoom 300% xác nhận cả `Standard` và `Stroke` Eraser chỉ xoá nét bút, giữ nguyên LaTeX/Hình/Text/Ảnh.
 
+- **Bước 7.1 – Giao diện Library (P3)** (`commit cf8f320`, `1aa3dff`, tag `step-7.1-ok` — người dùng xác nhận test OK):
+  - `crates/inknote-core/src/library.rs` & `lib.rs`: Thêm `LibraryStore` quản lý thư mục & file `.inknote` trong `Documents`/`Trash`, cache quét theo `(mtime, size)`, tìm kiếm đệ quy theo tên tiếng Việt đủ dấu, tạo thư mục/ghi chú, lưu ghi chú chưa đặt tên khi về Home; bổ sung `DocumentMetadata.is_favorite`.
+  - `crates/inknote-app/src/library_view.rs`, `theme.rs`, `icons.rs`, `thumbnails.rs`, `toolbar.rs`, `main.rs`: Giao diện Library (Sidebar ~18% `Documents`/`Trash` + logo InkNote; thanh trên `←`, breadcrumb, `+ New Folder`, `+ New Note`, ô tìm kiếm có `X`, bánh răng `⚙` giấy mặc định; lưới ~5 cột chung thư mục & ghi chú kèm thumbnail trang đầu sắc nét); nút Home về Library và mở thẳng vào Library khi khởi động bình thường.
+
 ## Đang làm dở
-- Chuẩn bị thực hiện **Bước 7.1 – Giao diện Library (P3)**. Đã gắn tag `step-6.2-ok` và đẩy lên GitHub `origin/main`.
+- Chuẩn bị thực hiện **Bước 7.2 – Quản lý thư mục, Menu thẻ & Thùng rác (Trash – P3)**. Đã gắn tag `step-7.1-ok` và đẩy lên GitHub `origin/main`.
 
 ## Quyết định đã chốt và lý do (không bàn lại)
 - **Bỏ hoàn toàn bản cũ (Electron/Flutter/web)**: viết mới 100% bằng Rust cho Windows.
