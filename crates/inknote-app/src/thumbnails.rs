@@ -232,8 +232,10 @@ fn draw_close_x(painter: &egui::Painter, center: Pos2, color: Color32) {
     );
 }
 
+const POPUP_MENU_WIDTH: f32 = 172.0;
+
 fn popup_menu_item(ui: &mut Ui, label: &str, text_color: Color32, enabled: bool) -> bool {
-    let desired = vec2(ui.available_width().max(168.0), 30.0);
+    let desired = vec2(POPUP_MENU_WIDTH, 30.0);
     let (rect, resp) = ui.allocate_exact_size(
         desired,
         if enabled {
@@ -468,7 +470,7 @@ pub fn show_thumbnail_panel(
                             .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
                             .frame(popup_frame)
                             .show(|ui| {
-                                ui.set_min_width(176.0);
+                                ui.set_width(POPUP_MENU_WIDTH);
                                 let normal_fg = Color32::from_rgb(32, 36, 44);
                                 let danger_fg = Color32::from_rgb(225, 76, 56);
 
@@ -487,7 +489,7 @@ pub fn show_thumbnail_panel(
 
                                 ui.add_space(4.0);
                                 let (sep_rect, _) = ui.allocate_exact_size(
-                                    vec2(ui.available_width(), 1.0),
+                                    vec2(POPUP_MENU_WIDTH, 1.0),
                                     Sense::hover(),
                                 );
                                 ui.painter().line_segment(
