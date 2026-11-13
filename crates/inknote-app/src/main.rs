@@ -164,6 +164,12 @@ fn save_default_paper_settings(settings: &PaperSettings) {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum LatexTarget {
+    New { page_index: usize, pos: [f64; 2] },
+    Edit { page_index: usize, obj_id: u64 },
+}
+
 struct InkNoteApp {
     theme: Theme,
     toolbar_state: ToolbarState,
@@ -180,7 +186,7 @@ struct InkNoteApp {
     batch_cache: HashMap<u64, CachedStroke>,
     thumb_cache: ThumbCache,
     svg_cache: SvgTextureCache,
-    pending_latex_pos: Option<(usize, [f64; 2])>,
+    pending_latex_target: Option<LatexTarget>,
     latex_dialog: LatexDialogState,
     view: View,
     confirm_clear: Option<Vec<usize>>,
@@ -254,7 +260,7 @@ impl InkNoteApp {
             batch_cache: HashMap::new(),
             thumb_cache: ThumbCache::default(),
             svg_cache: SvgTextureCache::default(),
-            pending_latex_pos: None,
+            pending_latex_target: None,
             latex_dialog: LatexDialogState::default(),
             view: View::default(),
             confirm_clear: None,
@@ -373,6 +379,44 @@ impl InkNoteApp {
             return None;
         }
         self.interactive_page_at(ctx, pos)
+    }
+
+    /// Tìm công thức LaTeX nằm dưới con trỏ màn hình `screen_pos` (nếu có).
+    fn latex_object_at(
+        &self,
+        paper_rect: egui::Rect,
+        screen_pos: egui::Pos2,
+    ) -> Option<(usize, u64, String)> {
+        if !paper_rect.contains(screen_pos) {
+            return None;
+        }
+        for page_idx in 0..self.doc.page_count() {
+            let page = &self.doc.pages()[page_idx];
+            if page.latex_objects.is_empty() {
+                continue;
+            }
+            let sheet = self.page_screen_rect(paper_rect, page_idx);
+            if !sheet.intersects(paper_rect) {
+                continue;
+            }
+            let origin = self.page_origin(paper_rect, page_idx);
+            for obj in page.latex_objects.iter().rev() {
+                let top_left = origin
+                    + egui::vec2(
+                        obj.pos[0] as f32 * self.view.zoom,
+                        obj.pos[1] as f32 * self.view.zoom,
+                    );
+                let size = egui::vec2(
+                    obj.size[0] as f32 * self.view.zoom,
+                    obj.size[1] as f32 * self.view.zoom,
+                );
+                let rect = egui::Rect::from_min_size(top_left, size).expand(4.0);
+                if rect.contains(screen_pos) {
+                    return Some((page_idx, obj.id, obj.source.clone()));
+                }
+            }
+        }
+        None
     }
 
     /// Đổi toạ độ màn hình → toạ độ cục bộ của trang đang viết.
@@ -1163,7 +1207,7 @@ impl InkNoteApp {
             }
         }
 
-        // Hộp thoại LaTeX & Live Preview (Bước 4.2 & 4.3)
+        // Hộp thoại LaTeX & Live Preview (Bước 4.2, 4.3 & 4.4)
         let latex_dialog_was_open = self.latex_dialog.open;
         match self
             .latex_dialog
@@ -1171,30 +1215,59 @@ impl InkNoteApp {
         {
             LatexDialogAction::None => {}
             LatexDialogAction::Cancel => {
-                self.pending_latex_pos = None;
+                self.pending_latex_target = None;
             }
-            LatexDialogAction::Confirm { source, svg } => {
-                let id = self.doc.alloc_id();
-                let (w, h) = match self.svg_cache.get_or_render(&ctx, id, &svg, self.view.zoom) {
-                    Ok((_, logical)) => (
-                        logical.x as f64 * LATEX_DISPLAY_SCALE as f64,
-                        logical.y as f64 * LATEX_DISPLAY_SCALE as f64,
-                    ),
-                    Err(_) => (120.0, 40.0),
-                };
-                let (page_index, pos) = self
-                    .pending_latex_pos
-                    .take()
-                    .unwrap_or_else(|| (self.doc.active_page_index(), [100.0, 120.0]));
-                let obj = LatexObject {
-                    id,
-                    source,
-                    pos,
-                    size: [w, h],
-                    svg_cache: Some(svg),
-                };
-                self.doc.execute(Command::AddLatex { page_index, obj });
-            }
+            LatexDialogAction::Confirm { source, svg } => match self.pending_latex_target.take() {
+                Some(LatexTarget::Edit { page_index, obj_id }) => {
+                    self.doc.execute(Command::UpdateLatex {
+                        page_index,
+                        obj_id,
+                        new_source: source,
+                        new_svg_cache: Some(svg),
+                    });
+                }
+                Some(LatexTarget::New { page_index, pos }) => {
+                    let id = self.doc.alloc_id();
+                    let (w, h) = match self.svg_cache.get_or_render(&ctx, id, &svg, self.view.zoom)
+                    {
+                        Ok((_, logical)) => (
+                            logical.x as f64 * LATEX_DISPLAY_SCALE as f64,
+                            logical.y as f64 * LATEX_DISPLAY_SCALE as f64,
+                        ),
+                        Err(_) => (120.0, 40.0),
+                    };
+                    let obj = LatexObject {
+                        id,
+                        source,
+                        pos,
+                        size: [w, h],
+                        svg_cache: Some(svg),
+                    };
+                    self.doc.execute(Command::AddLatex { page_index, obj });
+                }
+                None => {
+                    let id = self.doc.alloc_id();
+                    let (w, h) = match self.svg_cache.get_or_render(&ctx, id, &svg, self.view.zoom)
+                    {
+                        Ok((_, logical)) => (
+                            logical.x as f64 * LATEX_DISPLAY_SCALE as f64,
+                            logical.y as f64 * LATEX_DISPLAY_SCALE as f64,
+                        ),
+                        Err(_) => (120.0, 40.0),
+                    };
+                    let obj = LatexObject {
+                        id,
+                        source,
+                        pos: [100.0, 120.0],
+                        size: [w, h],
+                        svg_cache: Some(svg),
+                    };
+                    self.doc.execute(Command::AddLatex {
+                        page_index: self.doc.active_page_index(),
+                        obj,
+                    });
+                }
+            },
         }
 
         // Hộp xác nhận lưu thay đổi trước khi mở file khác, tạo mới hoặc tắt app khi chưa lưu file
@@ -1617,6 +1690,16 @@ impl InkNoteApp {
                     }
                 }
 
+                let latex_tool_ready = !latex_dialog_was_open
+                    && !self.latex_dialog.open
+                    && self.toolbar_state.active_tool == ActiveTool::Latex;
+                let hovered_latex = if latex_tool_ready {
+                    ctx.input(|i| i.pointer.hover_pos())
+                        .and_then(|hp| self.latex_object_at(paper_rect, hp))
+                } else {
+                    None
+                };
+
                 // 4d. Vẽ toàn bộ đối tượng LaTeX trên các trang đang hiển thị
                 for page_idx in 0..page_count {
                     let page = &self.doc.pages()[page_idx];
@@ -1652,35 +1735,68 @@ impl InkNoteApp {
                                 egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
                                 egui::Color32::WHITE,
                             );
+                            if hovered_latex
+                                .as_ref()
+                                .is_some_and(|(p, id, _)| *p == page_idx && *id == obj.id)
+                            {
+                                page_painter.rect_stroke(
+                                    rect.expand(4.0),
+                                    egui::CornerRadius::same(4),
+                                    egui::Stroke::new(1.5, self.theme.nav_bar_bg),
+                                    egui::StrokeKind::Outside,
+                                );
+                            }
                         }
                     }
                 }
 
-                // 4e. Công cụ LaTeX: click vào vị trí bất kỳ trên trang để mở hộp thoại đặt công thức tại đó
-                if !latex_dialog_was_open
-                    && !self.latex_dialog.open
-                    && self.toolbar_state.active_tool == ActiveTool::Latex
-                {
-                    let (hover_pos, primary_clicked, interact_pos) = ctx.input(|i| {
-                        (
-                            i.pointer.hover_pos(),
-                            i.pointer.primary_clicked(),
-                            i.pointer.interact_pos(),
-                        )
-                    });
-                    if let Some(hp) = hover_pos {
+                // 4e. Công cụ LaTeX:
+                // - Nhấp đúp (double-click) lên công thức đã có -> mở lại hộp thoại sửa code cũ
+                // - Click lên vùng trống của trang -> mở hộp thoại chèn công thức mới tại vị trí click
+                if latex_tool_ready {
+                    let (hover_pos, double_clicked, primary_clicked, interact_pos) =
+                        ctx.input(|i| {
+                            (
+                                i.pointer.hover_pos(),
+                                i.pointer.button_double_clicked(egui::PointerButton::Primary),
+                                i.pointer.primary_clicked(),
+                                i.pointer.interact_pos(),
+                            )
+                        });
+                    if hovered_latex.is_some() {
+                        ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+                    } else if let Some(hp) = hover_pos {
                         if self.interactive_page_at(&ctx, hp).is_some() {
                             ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
                         }
                     }
-                    if primary_clicked {
+
+                    if double_clicked {
+                        if let Some(cp) = interact_pos.or(hover_pos) {
+                            if self.interactive_page_at(&ctx, cp).is_some() {
+                                if let Some((p_idx, obj_id, old_source)) =
+                                    self.latex_object_at(paper_rect, cp)
+                                {
+                                    self.pending_latex_target = Some(LatexTarget::Edit {
+                                        page_index: p_idx,
+                                        obj_id,
+                                    });
+                                    self.latex_dialog.open_with(&old_source, &ctx);
+                                }
+                            }
+                        }
+                    } else if primary_clicked {
                         if let Some(cp) = interact_pos.or(hover_pos) {
                             if let Some(p_idx) = self.interactive_page_at(&ctx, cp) {
-                                let origin = self.page_origin(paper_rect, p_idx);
-                                let local = (cp - origin) / view.zoom;
-                                self.pending_latex_pos =
-                                    Some((p_idx, [local.x as f64, local.y as f64]));
-                                self.latex_dialog.open_with("", &ctx);
+                                if self.latex_object_at(paper_rect, cp).is_none() {
+                                    let origin = self.page_origin(paper_rect, p_idx);
+                                    let local = (cp - origin) / view.zoom;
+                                    self.pending_latex_target = Some(LatexTarget::New {
+                                        page_index: p_idx,
+                                        pos: [local.x as f64, local.y as f64],
+                                    });
+                                    self.latex_dialog.open_with("", &ctx);
+                                }
                             }
                         }
                     }
@@ -1815,7 +1931,7 @@ mod tests {
             batch_cache: HashMap::new(),
             thumb_cache: ThumbCache::default(),
             svg_cache: SvgTextureCache::default(),
-            pending_latex_pos: None,
+            pending_latex_target: None,
             latex_dialog: LatexDialogState::default(),
             view: View::default(),
             confirm_clear: None,
@@ -2352,7 +2468,10 @@ mod tests {
         });
 
         // Mở hộp thoại tại vị trí click (200, 200)
-        app.pending_latex_pos = Some((0, [200.0, 200.0]));
+        app.pending_latex_target = Some(LatexTarget::New {
+            page_index: 0,
+            pos: [200.0, 200.0],
+        });
         app.latex_dialog.open_with("", &ctx);
         let _ = ctx.run_ui(raw.clone(), |ui| {
             app.run_app_ui(ui);

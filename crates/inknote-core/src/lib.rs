@@ -289,6 +289,13 @@ pub enum Command {
     DeletePage(usize),
     /// Chèn một đối tượng LaTeX vào trang tại vị trí `page_index` (1 bước undo).
     AddLatex { page_index: usize, obj: LatexObject },
+    /// Cập nhật `source` và `svg_cache` của `LatexObject` (giữ nguyên vị trí & kích thước, 1 bước undo).
+    UpdateLatex {
+        page_index: usize,
+        obj_id: u64,
+        new_source: String,
+        new_svg_cache: Option<String>,
+    },
 }
 
 /// Một trang trong bộ nhớ làm việc của `Document`.
@@ -331,6 +338,14 @@ enum Done {
     AddLatex {
         page_index: usize,
         obj: LatexObject,
+    },
+    UpdateLatex {
+        page_index: usize,
+        obj_id: u64,
+        old_source: String,
+        old_svg_cache: Option<String>,
+        new_source: String,
+        new_svg_cache: Option<String>,
     },
 }
 
@@ -634,6 +649,35 @@ impl Document {
                     obj,
                 }
             }
+            Command::UpdateLatex {
+                page_index,
+                obj_id,
+                new_source,
+                new_svg_cache,
+            } => {
+                let target_idx = page_index.min(self.pages.len().saturating_sub(1));
+                let Some(obj) = self.pages[target_idx]
+                    .latex_objects
+                    .iter_mut()
+                    .find(|o| o.id == obj_id)
+                else {
+                    return;
+                };
+                if obj.source == new_source && obj.svg_cache == new_svg_cache {
+                    return;
+                }
+                let old_source = std::mem::replace(&mut obj.source, new_source.clone());
+                let old_svg_cache = std::mem::replace(&mut obj.svg_cache, new_svg_cache.clone());
+                self.active_page_idx = target_idx;
+                Done::UpdateLatex {
+                    page_index: target_idx,
+                    obj_id,
+                    old_source,
+                    old_svg_cache,
+                    new_source,
+                    new_svg_cache,
+                }
+            }
         };
         self.undo_stack.push(done);
         self.redo_stack.clear();
@@ -693,6 +737,23 @@ impl Document {
                 self.pages[*page_index].latex_objects.pop();
                 self.active_page_idx = *page_index;
             }
+            Done::UpdateLatex {
+                page_index,
+                obj_id,
+                old_source,
+                old_svg_cache,
+                ..
+            } => {
+                if let Some(obj) = self.pages[*page_index]
+                    .latex_objects
+                    .iter_mut()
+                    .find(|o| o.id == *obj_id)
+                {
+                    obj.source = old_source.clone();
+                    obj.svg_cache = old_svg_cache.clone();
+                }
+                self.active_page_idx = *page_index;
+            }
         }
         self.redo_stack.push(done);
         self.rev += 1;
@@ -737,6 +798,23 @@ impl Document {
             }
             Done::AddLatex { page_index, obj } => {
                 self.pages[*page_index].latex_objects.push(obj.clone());
+                self.active_page_idx = *page_index;
+            }
+            Done::UpdateLatex {
+                page_index,
+                obj_id,
+                new_source,
+                new_svg_cache,
+                ..
+            } => {
+                if let Some(obj) = self.pages[*page_index]
+                    .latex_objects
+                    .iter_mut()
+                    .find(|o| o.id == *obj_id)
+                {
+                    obj.source = new_source.clone();
+                    obj.svg_cache = new_svg_cache.clone();
+                }
                 self.active_page_idx = *page_index;
             }
         }
@@ -1179,5 +1257,42 @@ mod tests {
         assert!(d.redo());
         assert_eq!(d.pages()[0].latex_objects.len(), 1);
         assert_eq!(d.pages()[0].latex_objects[0].pos, [120.0, 240.0]);
+    }
+
+    #[test]
+    fn update_latex_preserves_pos_size_and_is_one_undo_step() {
+        let mut d = Document::new();
+        let id = d.alloc_id();
+        d.execute(Command::AddLatex {
+            page_index: 0,
+            obj: LatexObject {
+                id,
+                source: "a + b".to_string(),
+                pos: [150.0, 260.0],
+                size: [90.0, 30.0],
+                svg_cache: Some("<svg>old</svg>".to_string()),
+            },
+        });
+
+        d.execute(Command::UpdateLatex {
+            page_index: 0,
+            obj_id: id,
+            new_source: "a^2 + b^2".to_string(),
+            new_svg_cache: Some("<svg>new</svg>".to_string()),
+        });
+        let updated = &d.pages()[0].latex_objects[0];
+        assert_eq!(updated.source, "a^2 + b^2");
+        assert_eq!(updated.pos, [150.0, 260.0]);
+        assert_eq!(updated.size, [90.0, 30.0]);
+
+        assert!(d.undo());
+        let reverted = &d.pages()[0].latex_objects[0];
+        assert_eq!(reverted.source, "a + b");
+        assert_eq!(reverted.svg_cache.as_deref(), Some("<svg>old</svg>"));
+        assert_eq!(reverted.pos, [150.0, 260.0]);
+        assert_eq!(reverted.size, [90.0, 30.0]);
+
+        assert!(d.redo());
+        assert_eq!(d.pages()[0].latex_objects[0].source, "a^2 + b^2");
     }
 }
