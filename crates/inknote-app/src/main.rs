@@ -595,12 +595,18 @@ impl InkNoteApp {
     /// Tái tạo lại bộ nhớ đệm lưới tam giác cho mọi nét trên tất cả trang.
     fn rebuild_batch_cache(&mut self) {
         self.batch_cache.clear();
+        self.ensure_missing_batches();
+    }
+
+    fn ensure_missing_batches(&mut self) {
         for page in self.doc.pages() {
             for s in &page.strokes {
-                self.render_cx.clear_batches();
-                s.path.draw_composed(&mut self.render_cx, &s.style);
-                let batches = std::mem::take(&mut self.render_cx.batches);
-                self.batch_cache.insert(s.id, CachedStroke::new(batches));
+                if !self.batch_cache.contains_key(&s.id) {
+                    self.render_cx.clear_batches();
+                    s.path.draw_composed(&mut self.render_cx, &s.style);
+                    let batches = std::mem::take(&mut self.render_cx.batches);
+                    self.batch_cache.insert(s.id, CachedStroke::new(batches));
+                }
             }
         }
     }
@@ -774,7 +780,7 @@ impl InkNoteApp {
         );
         if let Some(cmd) = finish_eraser_to_command(eraser, &mut self.doc) {
             self.doc.execute(cmd);
-            self.rebuild_batch_cache();
+            self.ensure_missing_batches();
         }
         if self.toolbar_state.eraser_auto_deselect {
             self.toolbar_state.active_tool = ActiveTool::Pen;
@@ -1180,11 +1186,11 @@ impl InkNoteApp {
             };
         // Không hoàn tác / thao tác file / thêm trang khi đang kéo nét dở
         if self.active.is_none() {
-            if actions.undo_clicked || key_undo {
-                self.doc.undo();
+            if (actions.undo_clicked || key_undo) && self.doc.undo() {
+                self.ensure_missing_batches();
             }
-            if actions.redo_clicked || key_redo {
-                self.doc.redo();
+            if (actions.redo_clicked || key_redo) && self.doc.redo() {
+                self.ensure_missing_batches();
             }
             if actions.clear_clicked {
                 self.confirm_clear = Some(vec![self.doc.active_page_index()]);
@@ -2744,12 +2750,23 @@ mod tests {
         app.eraser_up(mid_screen);
 
         assert_eq!(app.doc.strokes().len(), 2);
+        assert!(app
+            .doc
+            .strokes()
+            .iter()
+            .all(|s| app.batch_cache.contains_key(&s.id)));
         assert_eq!(app.doc.pages()[0].latex_objects.len(), 1);
         assert_eq!(app.doc.pages()[0].latex_objects[0].id, latex_id);
 
-        // Undo 1 lần -> quay về đúng 1 nét gốc
+        // Undo 1 lần -> quay về đúng 1 nét gốc và batch_cache vẫn có nét đó
         assert!(app.doc.undo());
+        app.ensure_missing_batches();
         assert_eq!(app.doc.strokes().len(), 1);
+        assert!(app
+            .doc
+            .strokes()
+            .iter()
+            .all(|s| app.batch_cache.contains_key(&s.id)));
 
         // 2. Tẩy nét (Stroke) chạm vào nét -> xoá cả nét, LaTeX vẫn còn nguyên
         app.toolbar_state.eraser_mode = toolbar::EraserMode::Stroke;
