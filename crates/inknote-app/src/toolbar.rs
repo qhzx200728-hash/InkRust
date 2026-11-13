@@ -18,6 +18,7 @@ use inknote_pen::{
 
 use crate::{
     autosave::FileStatusInfo,
+    export::{ExportScope, PngScale},
     icons::{ToolIcon, draw_icon},
     shapes::{QUICK_SHAPE_KINDS, SHAPE_GROUPS, draw_shape_kind_icon, shape_kind_label},
     theme::{
@@ -67,6 +68,7 @@ pub struct ToolbarActions {
     pub text_list_mode_changed: bool,
     pub insert_image_file_clicked: bool,
     pub paste_image_clipboard_clicked: bool,
+    pub export_request: Option<ExportScope>,
 }
 
 /// Thông tin hình học thực tế của các khu vực trên thanh công cụ (dùng để kiểm chứng alignment)
@@ -148,6 +150,8 @@ pub struct ToolbarState {
     pub text_align: TextAlign,
     pub text_list_mode: TextListMode,
     pub text_color: [u8; 4],
+    pub export_png_scale: PngScale,
+    pub export_notice: Option<(String, std::time::Instant, bool)>,
     pub last_metrics: ToolbarLayoutMetrics,
     pub image_notice: Option<(String, std::time::Instant, bool)>,
 }
@@ -176,6 +180,8 @@ impl Default for ToolbarState {
             text_align: TextAlign::Left,
             text_list_mode: TextListMode::None,
             text_color: [20, 22, 25, 255],
+            export_png_scale: PngScale::X3,
+            export_notice: None,
             last_metrics: ToolbarLayoutMetrics::default(),
             image_notice: None,
         }
@@ -583,6 +589,7 @@ pub fn show_toolbars(
         text_list_mode_changed: false,
         insert_image_file_clicked: false,
         paste_image_clipboard_clicked: false,
+        export_request: None,
     };
 
     // =========================================================================
@@ -692,16 +699,27 @@ pub fn show_toolbars(
                         .inner_margin(egui::Margin::same(8))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                if ui.button("+ Add Page After").clicked() {
+                                if ui
+                                    .add_enabled(
+                                        !state.read_only,
+                                        egui::Button::new("+ Add Page After"),
+                                    )
+                                    .on_disabled_hover_text("Disabled in Read-Only Mode")
+                                    .clicked()
+                                {
                                     actions.add_page_clicked = true;
                                 }
-                                let can_delete = page_info.1 > 1;
+                                let can_delete = !state.read_only && page_info.1 > 1;
                                 if ui
                                     .add_enabled(
                                         can_delete,
                                         egui::Button::new("Delete Current Page"),
                                     )
-                                    .on_disabled_hover_text("A note must have at least 1 page")
+                                    .on_disabled_hover_text(if state.read_only {
+                                        "Disabled in Read-Only Mode"
+                                    } else {
+                                        "A note must have at least 1 page"
+                                    })
                                     .clicked()
                                 {
                                     actions.delete_page_clicked = true;
@@ -908,23 +926,144 @@ pub fn show_toolbars(
                         });
                 });
 
-            let _ = nav_icon_button(
+            let export_btn = nav_icon_button(
                 &mut right_ui,
                 theme,
                 ToolIcon::Export,
                 false,
-                "Export PDF / Image (Step 7.3 - P3)",
+                "Export PDF (Vector) / High-DPI PNG",
             );
-            if nav_icon_button(
-                &mut right_ui,
-                theme,
-                ToolIcon::AddPage,
-                false,
-                "Add Page After Current",
-            )
-            .clicked()
+            egui::Popup::from_toggle_button_response(&export_btn)
+                .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+                .frame(theme.dark_popup_frame(right_ui.style()))
+                .show(|ui| {
+                    ui.set_min_width(248.0);
+                    ui.label(
+                        RichText::new("Export PDF (Vector)")
+                            .size(theme.font_size_title)
+                            .strong()
+                            .color(theme.popup_header_fg),
+                    );
+                    ui.add_space(4.0);
+                    egui::Frame::new()
+                        .fill(theme.popup_section_bg)
+                        .corner_radius(CornerRadius::same(8))
+                        .inner_margin(egui::Margin::same(8))
+                        .show(ui, |ui| {
+                            if ui
+                                .add_sized(
+                                    [ui.available_width(), 28.0],
+                                    egui::Button::new(format!(
+                                        "Export All Pages (.pdf) — {} page{}",
+                                        page_info.1,
+                                        if page_info.1 == 1 { "" } else { "s" }
+                                    )),
+                                )
+                                .clicked()
+                            {
+                                actions.export_request = Some(ExportScope::PdfAllPages);
+                                ui.close();
+                            }
+                            ui.add_space(4.0);
+                            if ui
+                                .add_sized(
+                                    [ui.available_width(), 28.0],
+                                    egui::Button::new(format!(
+                                        "Export Current Page (.pdf) — Page {}",
+                                        page_info.0
+                                    )),
+                                )
+                                .clicked()
+                            {
+                                actions.export_request = Some(ExportScope::PdfCurrentPage);
+                                ui.close();
+                            }
+                        });
+
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new("Export PNG (High Quality)")
+                            .size(theme.font_size_title)
+                            .strong()
+                            .color(theme.popup_header_fg),
+                    );
+                    ui.add_space(4.0);
+                    egui::Frame::new()
+                        .fill(theme.popup_section_bg)
+                        .corner_radius(CornerRadius::same(8))
+                        .inner_margin(egui::Margin::same(8))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new("Quality:")
+                                        .size(theme.font_size_small)
+                                        .color(theme.tool_text_muted),
+                                );
+                                for scale in [PngScale::X3, PngScale::X4] {
+                                    if ui
+                                        .selectable_label(
+                                            state.export_png_scale == scale,
+                                            scale.dpi_label(),
+                                        )
+                                        .clicked()
+                                    {
+                                        state.export_png_scale = scale;
+                                    }
+                                }
+                            });
+                            ui.add_space(6.0);
+                            if ui
+                                .add_sized(
+                                    [ui.available_width(), 28.0],
+                                    egui::Button::new(format!(
+                                        "Export Current Page (.png) — Page {}",
+                                        page_info.0
+                                    )),
+                                )
+                                .clicked()
+                            {
+                                actions.export_request = Some(ExportScope::PngCurrentPage);
+                                ui.close();
+                            }
+                            ui.add_space(4.0);
+                            if ui
+                                .add_sized(
+                                    [ui.available_width(), 28.0],
+                                    egui::Button::new(format!(
+                                        "Export All Pages (.png) — {} file{}",
+                                        page_info.1,
+                                        if page_info.1 == 1 { "" } else { "s" }
+                                    )),
+                                )
+                                .clicked()
+                            {
+                                actions.export_request = Some(ExportScope::PngAllPages);
+                                ui.close();
+                            }
+                        });
+                });
+
+            if !state.read_only
+                && nav_icon_button(
+                    &mut right_ui,
+                    theme,
+                    ToolIcon::AddPage,
+                    false,
+                    "Add Page After Current",
+                )
+                .clicked()
             {
                 actions.add_page_clicked = true;
+            } else if state.read_only {
+                let _ = right_ui.add_enabled_ui(false, |ui| {
+                    nav_icon_button(
+                        ui,
+                        theme,
+                        ToolIcon::AddPage,
+                        false,
+                        "Disabled in Read-Only Mode",
+                    );
+                });
             }
             let right_rect = right_ui.min_rect();
 
@@ -984,24 +1123,46 @@ pub fn show_toolbars(
 
                     draw_vertical_divider(ui, nav_row_h, theme.nav_divider);
 
-                    if nav_icon_button(ui, theme, ToolIcon::Undo, false, "Undo (Ctrl+Z)").clicked()
-                    {
-                        actions.undo_clicked = true;
-                    }
-                    if nav_icon_button(
-                        ui,
-                        theme,
-                        ToolIcon::Redo,
-                        false,
-                        "Redo (Ctrl+Y / Ctrl+Shift+Z)",
-                    )
-                    .clicked()
-                    {
-                        actions.redo_clicked = true;
-                    }
-                    if nav_icon_button(ui, theme, ToolIcon::Trash, false, "Clear Page").clicked() {
-                        actions.clear_clicked = true;
-                    }
+                    ui.add_enabled_ui(!state.read_only, |ui| {
+                        let ro_tip = if state.read_only {
+                            Some("Disabled in Read-Only Mode")
+                        } else {
+                            None
+                        };
+                        if nav_icon_button(
+                            ui,
+                            theme,
+                            ToolIcon::Undo,
+                            false,
+                            ro_tip.unwrap_or("Undo (Ctrl+Z)"),
+                        )
+                        .clicked()
+                        {
+                            actions.undo_clicked = true;
+                        }
+                        if nav_icon_button(
+                            ui,
+                            theme,
+                            ToolIcon::Redo,
+                            false,
+                            ro_tip.unwrap_or("Redo (Ctrl+Y / Ctrl+Shift+Z)"),
+                        )
+                        .clicked()
+                        {
+                            actions.redo_clicked = true;
+                        }
+                        if nav_icon_button(
+                            ui,
+                            theme,
+                            ToolIcon::Trash,
+                            false,
+                            ro_tip.unwrap_or("Clear Page"),
+                        )
+                        .clicked()
+                        {
+                            actions.clear_clicked = true;
+                        }
+                    });
                 },
             );
 
@@ -1053,10 +1214,13 @@ pub fn show_toolbars(
 
                         if state.read_only {
                             ui.label(
-                                RichText::new("Read-Only Mode is active — click the eye icon or any tool to resume drawing")
+                                RichText::new("Read-Only Mode is active — drag canvas to scroll/pan")
                                     .size(theme.font_size_body)
                                     .color(theme.tool_text_fg),
                             );
+                            if ui.small_button("Resume Drawing").clicked() {
+                                state.read_only = false;
+                            }
                             return;
                         }
 

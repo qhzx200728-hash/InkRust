@@ -2069,6 +2069,7 @@ version = "0.1.0"
 dependencies = [
  "arboard",
  "eframe",
+ "flate2",
  "image",
  "inknote-core",
  "inknote-latex",
@@ -2077,6 +2078,7 @@ dependencies = [
  "kurbo 0.13.1",
  "parry2d-f64",
  "piet",
+ "resvg",
  "rfd",
  "serde_json",
 ]

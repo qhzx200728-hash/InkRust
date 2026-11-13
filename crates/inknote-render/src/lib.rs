@@ -12,15 +12,56 @@ use std::ops::RangeBounds;
 
 use kurbo::{Affine, PathEl, Point, Rect, Shape, Size};
 use lyon_tessellation::{
-    math::point as lyon_point, path::Path as LyonPath, BuffersBuilder, FillOptions, FillRule,
-    FillTessellator, FillVertex, LineCap as LyonCap, LineJoin as LyonJoin, StrokeOptions,
-    StrokeTessellator, StrokeVertex, VertexBuffers,
+    BuffersBuilder, FillOptions, FillRule, FillTessellator, FillVertex, LineCap as LyonCap,
+    LineJoin as LyonJoin, StrokeOptions, StrokeTessellator, StrokeVertex, VertexBuffers,
+    math::point as lyon_point, path::Path as LyonPath,
 };
 use piet::{
     Color, Error, FixedGradient, FontFamily, HitTestPoint, HitTestPosition, Image, ImageFormat,
     InterpolationMode, IntoBrush, LineCap, LineJoin, LineMetric, RenderContext, StrokeStyle, Text,
     TextAttribute, TextLayout, TextLayoutBuilder, TextStorage,
 };
+
+/// Quy tắc tô vùng kín cho dữ liệu vector xuất PDF/PNG.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorFillRule {
+    NonZero,
+    EvenOdd,
+}
+
+/// Kiểu đầu nét khi xuất vector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorLineCap {
+    Butt,
+    Round,
+    Square,
+}
+
+/// Kiểu nối góc nét khi xuất vector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorLineJoin {
+    Miter,
+    Round,
+    Bevel,
+}
+
+/// Lệnh vẽ vector giữ nguyên đường cong Bezier để xuất PDF/PNG siêu nét.
+#[derive(Debug, Clone)]
+pub enum VectorOp {
+    Fill {
+        elements: Vec<PathEl>,
+        color: [u8; 4],
+        rule: VectorFillRule,
+    },
+    Stroke {
+        elements: Vec<PathEl>,
+        color: [u8; 4],
+        width: f64,
+        cap: VectorLineCap,
+        join: VectorLineJoin,
+        miter_limit: f64,
+    },
+}
 
 /// Một mẻ lưới tam giác (mesh) đã chia nhỏ kèm màu RGBA.
 #[derive(Debug, Clone)]
@@ -48,6 +89,8 @@ pub struct RenderTextLayoutBuilder;
 #[derive(Default)]
 pub struct CairoRenderContext {
     pub batches: Vec<DrawBatch>,
+    pub record_vectors: bool,
+    pub vector_ops: Vec<VectorOp>,
     transform_stack: Vec<Affine>,
     current_transform: Affine,
     text: RenderText,
@@ -64,8 +107,30 @@ impl CairoRenderContext {
         Self::default()
     }
 
+    pub fn new_vector_recorder() -> Self {
+        Self {
+            record_vectors: true,
+            ..Self::default()
+        }
+    }
+
     pub fn clear_batches(&mut self) {
         self.batches.clear();
+        self.vector_ops.clear();
+    }
+
+    fn transformed_path_elements(&self, shape: &impl Shape) -> Vec<PathEl> {
+        let t = self.current_transform;
+        shape
+            .path_elements(0.05)
+            .map(|el| match el {
+                PathEl::MoveTo(p) => PathEl::MoveTo(t * p),
+                PathEl::LineTo(p) => PathEl::LineTo(t * p),
+                PathEl::QuadTo(p1, p2) => PathEl::QuadTo(t * p1, t * p2),
+                PathEl::CurveTo(p1, p2, p3) => PathEl::CurveTo(t * p1, t * p2, t * p3),
+                PathEl::ClosePath => PathEl::ClosePath,
+            })
+            .collect()
     }
 
     fn kurbo_to_lyon(&self, shape: impl Shape) -> LyonPath {
@@ -128,6 +193,19 @@ impl CairoRenderContext {
         if rgba.3 == 0 {
             return;
         }
+        if self.record_vectors {
+            let elements = self.transformed_path_elements(&shape);
+            if !elements.is_empty() {
+                self.vector_ops.push(VectorOp::Fill {
+                    elements,
+                    color: [rgba.0, rgba.1, rgba.2, rgba.3],
+                    rule: match rule {
+                        FillRule::NonZero => VectorFillRule::NonZero,
+                        FillRule::EvenOdd => VectorFillRule::EvenOdd,
+                    },
+                });
+            }
+        }
         let path = self.kurbo_to_lyon(shape);
         let mut geometry: VertexBuffers<[f32; 2], u32> = VertexBuffers::new();
         let mut tessellator = FillTessellator::new();
@@ -166,6 +244,30 @@ impl CairoRenderContext {
         let rgba = brush.color.as_rgba8();
         if rgba.3 == 0 || width <= 0.0 {
             return;
+        }
+        if self.record_vectors {
+            let elements = self.transformed_path_elements(&shape);
+            if !elements.is_empty() {
+                let cap = style.map_or(VectorLineCap::Butt, |st| match st.line_cap {
+                    LineCap::Butt => VectorLineCap::Butt,
+                    LineCap::Round => VectorLineCap::Round,
+                    LineCap::Square => VectorLineCap::Square,
+                });
+                let (join, miter_limit) =
+                    style.map_or((VectorLineJoin::Miter, 10.0), |st| match st.line_join {
+                        LineJoin::Miter { limit } => (VectorLineJoin::Miter, limit),
+                        LineJoin::Round => (VectorLineJoin::Round, 10.0),
+                        LineJoin::Bevel => (VectorLineJoin::Bevel, 10.0),
+                    });
+                self.vector_ops.push(VectorOp::Stroke {
+                    elements,
+                    color: [rgba.0, rgba.1, rgba.2, rgba.3],
+                    width,
+                    cap,
+                    join,
+                    miter_limit,
+                });
+            }
         }
         let path = self.kurbo_to_lyon(shape);
         let mut geometry: VertexBuffers<[f32; 2], u32> = VertexBuffers::new();
@@ -234,6 +336,7 @@ impl RenderContext for CairoRenderContext {
 
     fn clear(&mut self, _region: impl Into<Option<Rect>>, _color: Color) {
         self.batches.clear();
+        self.vector_ops.clear();
     }
 
     fn stroke(&mut self, shape: impl Shape, brush: &impl IntoBrush<Self>, width: f64) {

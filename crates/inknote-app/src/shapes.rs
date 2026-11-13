@@ -326,7 +326,12 @@ fn arrow_head_points(
     Some([w1, tip, w2])
 }
 
-fn shape_arrow_heads(kind: ShapeKind, start: Pos2, end: Pos2, stroke_width: f64) -> Vec<[Pos2; 3]> {
+pub fn shape_arrow_heads(
+    kind: ShapeKind,
+    start: Pos2,
+    end: Pos2,
+    stroke_width: f64,
+) -> Vec<[Pos2; 3]> {
     let mut heads = Vec::new();
     match kind {
         ShapeKind::Arrow => {

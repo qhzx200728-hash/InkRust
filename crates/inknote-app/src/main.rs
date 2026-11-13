@@ -5,6 +5,7 @@
 
 mod autosave;
 mod eraser;
+mod export;
 mod icons;
 mod image_box;
 mod lasso;
@@ -43,6 +44,7 @@ use parry2d_f64::math::Vector2;
 use crate::{
     autosave::AutoSaveState,
     eraser::{ActiveEraser, apply_eraser_sweep, finish_eraser_to_command},
+    export::{ExportScope, export_pages_to_pdf_file, export_pages_to_png_files},
     icons::{draw_paper, paper_sheet_rect},
     image_box::{
         ImageTextureCache, LoadedImageData, compute_default_image_page_size,
@@ -677,7 +679,7 @@ impl InkNoteApp {
         if dy < 0.0 && self.view.pan.y <= min_pan_y + 1.0 {
             let overflow = (min_pan_y - self.view.pan.y).max(-dy);
             self.view.pan.y = min_pan_y;
-            if now >= self.pull_cooldown_until {
+            if !self.toolbar_state.read_only && now >= self.pull_cooldown_until {
                 self.pull_overscroll += overflow;
                 self.last_pull_at = now;
                 if self.pull_overscroll >= PULL_TO_ADD_THRESHOLD {
@@ -688,6 +690,8 @@ impl InkNoteApp {
                     self.scroll_to_page(self.doc.active_page_index());
                     return true;
                 }
+            } else {
+                self.pull_overscroll = 0.0;
             }
             return false;
         }
@@ -1320,6 +1324,125 @@ impl InkNoteApp {
             Instant::now(),
             false,
         ));
+    }
+
+    /// Trả về tên tệp hợp lệ mặc định cho hộp thoại Export.
+    fn export_base_name(&self) -> String {
+        let raw = self
+            .current_path
+            .as_ref()
+            .and_then(|p| p.file_stem())
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| self.doc.metadata().title.as_str());
+        let cleaned: String = raw
+            .chars()
+            .map(|c| {
+                if matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                    '_'
+                } else {
+                    c
+                }
+            })
+            .collect();
+        let trimmed = cleaned.trim();
+        if trimmed.is_empty() {
+            "InkNote".to_string()
+        } else {
+            trimmed.to_string()
+        }
+    }
+
+    /// Thực hiện hộp thoại chọn nơi lưu và xuất PDF nhiều trang hoặc PNG chất lượng cao.
+    fn handle_export_request(&mut self, scope: ExportScope) {
+        let page_count = self.doc.page_count().max(1);
+        let active_idx = self.doc.active_page_index().min(page_count - 1);
+        let base = self.export_base_name();
+
+        match scope {
+            ExportScope::PdfAllPages | ExportScope::PdfCurrentPage => {
+                let page_indices: Vec<usize> = match scope {
+                    ExportScope::PdfAllPages => (0..page_count).collect(),
+                    _ => vec![active_idx],
+                };
+                let default_name = if page_indices.len() == 1 && page_count > 1 {
+                    format!("{base}_page_{}.pdf", active_idx + 1)
+                } else {
+                    format!("{base}.pdf")
+                };
+                let Some(path) = rfd::FileDialog::new()
+                    .add_filter("PDF Document (*.pdf)", &["pdf"])
+                    .set_file_name(&default_name)
+                    .save_file()
+                else {
+                    return;
+                };
+                match export_pages_to_pdf_file(&self.doc, &page_indices, &self.theme, &path) {
+                    Ok(saved) => {
+                        let name = saved
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("export.pdf");
+                        self.toolbar_state.export_notice = Some((
+                            format!(
+                                "Exported PDF ({} page{}) -> {}",
+                                page_indices.len(),
+                                if page_indices.len() == 1 { "" } else { "s" },
+                                name
+                            ),
+                            Instant::now(),
+                            false,
+                        ));
+                    }
+                    Err(err) => {
+                        self.toolbar_state.export_notice =
+                            Some((format!("Export failed: {err}"), Instant::now(), true));
+                    }
+                }
+            }
+            ExportScope::PngCurrentPage | ExportScope::PngAllPages => {
+                let page_indices: Vec<usize> = match scope {
+                    ExportScope::PngAllPages => (0..page_count).collect(),
+                    _ => vec![active_idx],
+                };
+                let default_name = if page_indices.len() == 1 && page_count > 1 {
+                    format!("{base}_page_{}.png", active_idx + 1)
+                } else {
+                    format!("{base}.png")
+                };
+                let Some(path) = rfd::FileDialog::new()
+                    .add_filter("PNG Image (*.png)", &["png"])
+                    .set_file_name(&default_name)
+                    .save_file()
+                else {
+                    return;
+                };
+                let scale = self.toolbar_state.export_png_scale;
+                match export_pages_to_png_files(&self.doc, &page_indices, &self.theme, scale, &path)
+                {
+                    Ok(saved_paths) => {
+                        let summary = if saved_paths.len() == 1 {
+                            let name = saved_paths[0]
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("export.png");
+                            format!("Exported PNG ({}) -> {}", scale.dpi_label(), name)
+                        } else {
+                            format!(
+                                "Exported {} PNG files ({})",
+                                saved_paths.len(),
+                                scale.dpi_label()
+                            )
+                        };
+                        self.toolbar_state.export_notice = Some((summary, Instant::now(), false));
+                    }
+                    Err(err) => {
+                        self.toolbar_state.export_notice =
+                            Some((format!("Export failed: {err}"), Instant::now(), true));
+                    }
+                }
+            }
+        }
     }
 
     fn handle_open_image_file(&mut self) {
@@ -1975,6 +2098,12 @@ impl InkNoteApp {
             self.commit_active_text_edit(&ctx);
             self.active_text_drag = None;
         }
+        if self.toolbar_state.read_only {
+            self.lasso_state.clear();
+            self.active = None;
+            self.active_eraser = None;
+            self.active_shape = None;
+        }
         if actions.text_style_changed || actions.text_list_mode_changed {
             let new_style = self.current_text_style_from_toolbar();
             if let Some(edit) = &mut self.active_text_edit {
@@ -2057,53 +2186,55 @@ impl InkNoteApp {
             && self.active_shape.is_none()
             && !self.lasso_state.is_active()
         {
-            if actions.undo_clicked || key_undo {
-                self.commit_active_text_edit(&ctx);
-                if self.doc.undo() {
-                    self.lasso_state.clear();
-                    self.rebuild_batch_cache();
+            if !self.toolbar_state.read_only {
+                if actions.undo_clicked || key_undo {
+                    self.commit_active_text_edit(&ctx);
+                    if self.doc.undo() {
+                        self.lasso_state.clear();
+                        self.rebuild_batch_cache();
+                    }
                 }
-            }
-            if actions.redo_clicked || key_redo {
-                self.commit_active_text_edit(&ctx);
-                if self.doc.redo() {
-                    self.lasso_state.clear();
-                    self.rebuild_batch_cache();
+                if actions.redo_clicked || key_redo {
+                    self.commit_active_text_edit(&ctx);
+                    if self.doc.redo() {
+                        self.lasso_state.clear();
+                        self.rebuild_batch_cache();
+                    }
                 }
-            }
-            let key_delete = !ctx.egui_wants_keyboard_input()
-                && ctx.input(|i| {
-                    i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)
-                });
-            if actions.delete_selection_clicked || key_delete {
-                self.delete_lasso_selection();
-            }
-            if actions.clear_clicked {
-                self.commit_active_text_edit(&ctx);
-                self.confirm_clear = Some(vec![self.doc.active_page_index()]);
-            }
-            if actions.add_page_clicked {
-                self.commit_active_text_edit(&ctx);
-                self.add_page_after_current();
-            }
-            if actions.delete_page_clicked && self.doc.page_count() > 1 {
-                self.commit_active_text_edit(&ctx);
-                self.confirm_delete_page = Some(vec![self.doc.active_page_index()]);
-            }
-            let _ = actions.latex_clicked;
-            if actions.insert_image_file_clicked {
-                self.commit_active_text_edit(&ctx);
-                self.handle_open_image_file();
-            }
-            if actions.paste_image_clipboard_clicked {
-                self.commit_active_text_edit(&ctx);
-                self.handle_paste_image_clipboard(true);
-            } else if let Some(color_img) = paste_image_event {
-                self.commit_active_text_edit(&ctx);
-                self.handle_paste_egui_image(&color_img);
-            } else if paste_text_event || key_paste_v {
-                self.commit_active_text_edit(&ctx);
-                self.handle_paste_image_clipboard(false);
+                let key_delete = !ctx.egui_wants_keyboard_input()
+                    && ctx.input(|i| {
+                        i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)
+                    });
+                if actions.delete_selection_clicked || key_delete {
+                    self.delete_lasso_selection();
+                }
+                if actions.clear_clicked {
+                    self.commit_active_text_edit(&ctx);
+                    self.confirm_clear = Some(vec![self.doc.active_page_index()]);
+                }
+                if actions.add_page_clicked {
+                    self.commit_active_text_edit(&ctx);
+                    self.add_page_after_current();
+                }
+                if actions.delete_page_clicked && self.doc.page_count() > 1 {
+                    self.commit_active_text_edit(&ctx);
+                    self.confirm_delete_page = Some(vec![self.doc.active_page_index()]);
+                }
+                let _ = actions.latex_clicked;
+                if actions.insert_image_file_clicked {
+                    self.commit_active_text_edit(&ctx);
+                    self.handle_open_image_file();
+                }
+                if actions.paste_image_clipboard_clicked {
+                    self.commit_active_text_edit(&ctx);
+                    self.handle_paste_image_clipboard(true);
+                } else if let Some(color_img) = paste_image_event {
+                    self.commit_active_text_edit(&ctx);
+                    self.handle_paste_egui_image(&color_img);
+                } else if paste_text_event || key_paste_v {
+                    self.commit_active_text_edit(&ctx);
+                    self.handle_paste_image_clipboard(false);
+                }
             }
             if key_pgup && self.doc.active_page_index() > 0 {
                 let target = self.doc.active_page_index() - 1;
@@ -2118,6 +2249,10 @@ impl InkNoteApp {
             if actions.home_clicked {
                 self.return_to_library(&ctx);
                 return;
+            }
+            if let Some(scope) = actions.export_request {
+                self.commit_active_text_edit(&ctx);
+                self.handle_export_request(scope);
             }
             if actions.save_clicked || key_save {
                 self.commit_active_text_edit(&ctx);
@@ -2384,22 +2519,25 @@ impl InkNoteApp {
 
         // Zoom / kéo trang & cuộn dọc nhiều trang (+ trigger kéo đáy tạo trang mới)
         if let Some(paper) = self.paper_rect {
-            let (hover, zoom_delta, scroll, middle, space_drag, ptr_delta, keys) = ctx.input(|i| {
-                let cmd = i.modifiers.command;
-                (
-                    i.pointer.hover_pos(),
-                    i.zoom_delta(),
-                    i.smooth_scroll_delta,
-                    i.pointer.middle_down(),
-                    i.key_down(egui::Key::Space) && i.pointer.primary_down(),
-                    i.pointer.delta(),
+            let (hover, zoom_delta, scroll, middle, space_drag, primary_down, ptr_delta, keys) =
+                ctx.input(|i| {
+                    let cmd = i.modifiers.command;
                     (
-                        cmd && i.key_pressed(egui::Key::Num0),
-                        cmd && (i.key_pressed(egui::Key::Equals) || i.key_pressed(egui::Key::Plus)),
-                        cmd && i.key_pressed(egui::Key::Minus),
-                    ),
-                )
-            });
+                        i.pointer.hover_pos(),
+                        i.zoom_delta(),
+                        i.smooth_scroll_delta,
+                        i.pointer.middle_down(),
+                        i.key_down(egui::Key::Space) && i.pointer.primary_down(),
+                        i.pointer.primary_down(),
+                        i.pointer.delta(),
+                        (
+                            cmd && i.key_pressed(egui::Key::Num0),
+                            cmd && (i.key_pressed(egui::Key::Equals)
+                                || i.key_pressed(egui::Key::Plus)),
+                            cmd && i.key_pressed(egui::Key::Minus),
+                        ),
+                    )
+                });
             let blocked = egui::Popup::is_any_open(&ctx)
                 || self.confirm_clear.is_some()
                 || self.confirm_delete_page.is_some()
@@ -2433,6 +2571,13 @@ impl InkNoteApp {
                     paper.contains(*h)
                         && !self.toolbar_state.last_metrics.tool_pill_rect.contains(*h)
                 }) {
+                    if self.toolbar_state.read_only {
+                        ctx.set_cursor_icon(if primary_down {
+                            egui::CursorIcon::Grabbing
+                        } else {
+                            egui::CursorIcon::Grab
+                        });
+                    }
                     if zoom_delta != 1.0 {
                         self.view.zoom_at(paper, h, zoom_delta);
                         scrolled_or_panned = true;
@@ -2442,7 +2587,8 @@ impl InkNoteApp {
                         dy_total += scroll.y;
                         scrolled_or_panned = true;
                     }
-                    if (middle || space_drag) && ptr_delta != egui::Vec2::ZERO {
+                    let read_only_drag = self.toolbar_state.read_only && primary_down;
+                    if (middle || space_drag || read_only_drag) && ptr_delta != egui::Vec2::ZERO {
                         self.view.pan += ptr_delta;
                         dy_total += ptr_delta.y;
                         scrolled_or_panned = true;
@@ -2464,7 +2610,10 @@ impl InkNoteApp {
         }
 
         // F9: thêm 2000 nét mẫu để test hiệu năng
-        if self.active.is_none() && ctx.input(|i| i.key_pressed(egui::Key::F9)) {
+        if !self.toolbar_state.read_only
+            && self.active.is_none()
+            && ctx.input(|i| i.key_pressed(egui::Key::F9))
+        {
             self.add_sample_strokes(2000);
         }
 
@@ -2508,17 +2657,19 @@ impl InkNoteApp {
                         self.doc.set_active_page_index(idx);
                         self.scroll_to_page(idx);
                     }
-                    ThumbnailAction::AddPageBefore(idx) => {
+                    ThumbnailAction::AddPageBefore(idx) if !self.toolbar_state.read_only => {
                         self.doc.execute(Command::InsertPageBefore(idx));
                         let new_idx = self.doc.active_page_index();
                         self.scroll_to_page(new_idx);
                     }
-                    ThumbnailAction::AddPageAfter(idx) => {
+                    ThumbnailAction::AddPageAfter(idx) if !self.toolbar_state.read_only => {
                         self.doc.execute(Command::InsertPageAfter(idx));
                         let new_idx = self.doc.active_page_index();
                         self.scroll_to_page(new_idx);
                     }
-                    ThumbnailAction::DuplicatePages(mut indices) => {
+                    ThumbnailAction::DuplicatePages(mut indices)
+                        if !self.toolbar_state.read_only =>
+                    {
                         indices.sort_unstable();
                         indices.dedup();
                         for &idx in indices.iter().rev() {
@@ -2536,21 +2687,22 @@ impl InkNoteApp {
                         self.thumb_cache.clear_selection();
                         self.scroll_to_page(self.doc.active_page_index());
                     }
-                    ThumbnailAction::MovePage { from, to } => {
+                    ThumbnailAction::MovePage { from, to } if !self.toolbar_state.read_only => {
                         self.doc.execute(Command::MovePage { from, to });
                         let cur = self.doc.active_page_index();
                         self.scroll_to_page(cur);
                     }
-                    ThumbnailAction::ClearPages(indices) => {
+                    ThumbnailAction::ClearPages(indices) if !self.toolbar_state.read_only => {
                         if !indices.is_empty() {
                             self.confirm_clear = Some(indices);
                         }
                     }
-                    ThumbnailAction::DeletePages(indices) => {
+                    ThumbnailAction::DeletePages(indices) if !self.toolbar_state.read_only => {
                         if !indices.is_empty() && self.doc.page_count() > indices.len() {
                             self.confirm_delete_page = Some(indices);
                         }
                     }
+                    _ => {}
                 }
             }
         }
@@ -3025,6 +3177,7 @@ impl InkNoteApp {
 
                 let latex_tool_ready = !latex_dialog_was_open
                     && !self.latex_dialog.open
+                    && !self.toolbar_state.read_only
                     && self.toolbar_state.active_tool == ActiveTool::Latex;
                 let hovered_latex = if latex_tool_ready {
                     ctx.input(|i| i.pointer.hover_pos())
@@ -3542,7 +3695,7 @@ impl InkNoteApp {
                                 egui::FontId::proportional(self.theme.font_size_small),
                                 self.theme.tool_text_fg,
                             );
-                        } else {
+                        } else if !self.toolbar_state.read_only {
                             hint_painter.text(
                                 hint_pos,
                                 egui::Align2::CENTER_CENTER,
@@ -3574,6 +3727,45 @@ impl InkNoteApp {
                     egui::FontId::proportional(self.theme.font_size_small),
                     self.theme.tool_text_muted,
                 );
+
+                // Thông báo kết quả xuất PDF/PNG góc dưới-phải (tự ẩn sau 4 giây)
+                if let Some((msg, at, is_err)) = self.toolbar_state.export_notice.clone() {
+                    if now.duration_since(at) < Duration::from_secs(4) {
+                        let bg = if is_err {
+                            egui::Color32::from_rgb(153, 27, 27)
+                        } else {
+                            self.theme.tool_bar_pill_bg
+                        };
+                        let fg = if is_err {
+                            egui::Color32::from_rgb(254, 226, 226)
+                        } else {
+                            egui::Color32::from_rgb(134, 239, 172)
+                        };
+                        #[allow(deprecated)]
+                        egui::Area::new(egui::Id::new("export_status_toast"))
+                            .order(egui::Order::Foreground)
+                            .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-18.0, -18.0))
+                            .show(&ctx, |ui| {
+                                egui::Frame::new()
+                                    .fill(bg)
+                                    .corner_radius(egui::CornerRadius::same(10))
+                                    .stroke(egui::Stroke::new(
+                                        1.0,
+                                        self.theme.tool_bar_pill_stroke,
+                                    ))
+                                    .inner_margin(egui::Margin::symmetric(12, 8))
+                                    .show(ui, |ui| {
+                                        ui.label(
+                                            egui::RichText::new(msg)
+                                                .size(self.theme.font_size_body)
+                                                .color(fg),
+                                        );
+                                    });
+                            });
+                    } else {
+                        self.toolbar_state.export_notice = None;
+                    }
+                }
             });
 
         // Chỉ hẹn vẽ lại khi có bộ đếm auto-save, thông báo 3s hoặc hiệu ứng hồi lực kéo trang
@@ -5716,6 +5908,28 @@ mod tests {
             app.library.card_menu_width_last
         );
 
+        // Kiểm tra khung menu chuột phải của thư mục co gọn vừa đủ (không bị kéo dài ngang màn hình)
+        let folder_path = app
+            .library
+            .store
+            .resolve_folder(LibrarySection::Documents, &[])
+            .join(&folder);
+        app.library
+            .open_card_menu_for_test(folder_path, &folder, true);
+        let mut out_menu = ctx.run_ui(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 800.0))),
+                ..Default::default()
+            },
+            |ui| app.run_app_ui(ui),
+        );
+        out_menu.textures_delta.clear();
+        assert!(
+            (130.0..=210.0).contains(&app.library.card_menu_width_last),
+            "Unexpected wide card menu width: {}",
+            app.library.card_menu_width_last
+        );
+
         // Đổi tên, nhân bản và chuyển ghi chú trong thư mục con vào Trash -> Khôi phục -> Xoá vĩnh viễn -> Dọn thùng rác
         let note_renamed = app
             .library
@@ -5769,5 +5983,210 @@ mod tests {
         assert_eq!(app.library.store.trash_item_count(), 2);
         app.library.store.empty_trash().unwrap();
         assert_eq!(app.library.store.trash_item_count(), 0);
+    }
+
+    #[test]
+    fn test_step_7_3_export_pdf_png_and_read_only_mode() {
+        use crate::export::{PngScale, export_pages_to_pdf_file, export_pages_to_png_files};
+        use eframe::egui::{Modifiers, PointerButton, Pos2, RawInput, Rect, vec2};
+        use inknote_core::{
+            Command, LatexObject, ShapeKind, ShapeObject, Stroke, TextAlign, TextFontFamily,
+            TextListMode, TextObject,
+        };
+        use parry2d_f64::math::Vector2;
+
+        let dir = std::env::temp_dir().join(format!(
+            "inknote_step_7_3_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let ctx = egui::Context::default();
+        let mut app = new_test_app(&ctx);
+
+        // Tạo 2 trang có đủ nét bút, hình học, văn bản tiếng Việt và công thức LaTeX
+        let p0 = Element::new(Vector2::new(120.0, 140.0), 0.8);
+        let p1 = Element::new(Vector2::new(300.0, 220.0), 0.9);
+        let s_id = app.doc.alloc_id();
+        app.doc.execute(Command::AddStrokes(vec![Stroke {
+            id: s_id,
+            path: PenPath::new_w_segments(p0, vec![Segment::LineTo { end: p1 }]),
+            style: app.brush_config.style_for_current_options(),
+        }]));
+        let sh_id = app.doc.alloc_id();
+        app.doc.execute(Command::AddShape {
+            page_index: 0,
+            obj: ShapeObject {
+                id: sh_id,
+                kind: ShapeKind::Rectangle,
+                start: [140.0, 260.0],
+                end: [320.0, 360.0],
+                stroke_width: 2.5,
+                color: [16, 185, 129, 255],
+                dashed: false,
+            },
+        });
+        let tx_id = app.doc.alloc_id();
+        app.doc.execute(Command::AddText {
+            page_index: 0,
+            obj: TextObject {
+                id: tx_id,
+                pos: [140.0, 400.0],
+                size: [360.0, 60.0],
+                text: "Chú thích Tiếng Việt".to_string(),
+                font_family: TextFontFamily::Sans,
+                font_size: 18.0,
+                bold: false,
+                italic: false,
+                align: TextAlign::Left,
+                list_mode: TextListMode::None,
+                color: [20, 22, 25, 255],
+            },
+        });
+        let lx_id = app.doc.alloc_id();
+        app.doc.execute(Command::AddLatex {
+            page_index: 0,
+            obj: LatexObject {
+                id: lx_id,
+                pos: [140.0, 500.0],
+                size: [120.0, 50.0],
+                source: "E=mc^2".to_string(),
+                svg_cache: Some(
+                    "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"60\" height=\"25\" viewBox=\"0 0 60 25\">\
+                     <rect x=\"2\" y=\"2\" width=\"56\" height=\"21\" fill=\"#111827\"/></svg>"
+                        .to_string(),
+                ),
+            },
+        });
+        app.doc.execute(Command::InsertPageAfter(0));
+        app.doc.set_active_page_index(0);
+        app.rebuild_batch_cache();
+
+        // 1. Bật Read-Only Mode: khoá vẽ/xoá/thêm trang, cho phép pan/zoom/chuyển trang
+        app.toolbar_state.read_only = true;
+        app.toolbar_state.active_tool = ActiveTool::Pen;
+        let run_frame = |app: &mut InkNoteApp, events: Vec<egui::Event>| {
+            let mut out = ctx.run_ui(
+                RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 800.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| app.run_app_ui(ui),
+            );
+            out.textures_delta.clear();
+        };
+        run_frame(&mut app, vec![]);
+
+        let paper = app.paper_rect.expect("paper rect");
+        let press_pos = paper.center();
+        let drag_pos = press_pos + vec2(40.0, 30.0);
+        let initial_pan = app.view.pan;
+        run_frame(
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(press_pos),
+                egui::Event::PointerButton {
+                    pos: press_pos,
+                    button: PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Modifiers::NONE,
+                },
+            ],
+        );
+        run_frame(&mut app, vec![egui::Event::PointerMoved(drag_pos)]);
+        run_frame(
+            &mut app,
+            vec![egui::Event::PointerButton {
+                pos: drag_pos,
+                button: PointerButton::Primary,
+                pressed: false,
+                modifiers: Modifiers::NONE,
+            }],
+        );
+        // Không vẽ thêm nét mới và không đổi số trang khi ở chế độ chỉ đọc
+        assert_eq!(app.doc.pages()[0].strokes.len(), 1);
+        assert_eq!(app.doc.page_count(), 2);
+        // Kéo chuột trên nền canvas ở chế độ Read-Only sẽ cuộn/di chuyển trang
+        assert!(
+            (app.view.pan - initial_pan).length() > 10.0,
+            "expected read-only primary drag to pan viewport, before={initial_pan:?}, after={:?}",
+            app.view.pan
+        );
+
+        // Không thêm trang khi kéo quá đáy trong Read-Only Mode
+        app.view.pan.y = -9999.0;
+        app.pull_overscroll = 100.0;
+        let added = app.apply_pan_limits_and_pull_trigger(paper, -200.0, std::time::Instant::now());
+        assert!(!added);
+        assert_eq!(app.doc.page_count(), 2);
+
+        // Chuyển trang bằng PageDown & Zoom bằng trackpad/pinch hoặc Ctrl+= vẫn hoạt động trong Read-Only Mode
+        let zoom_before = app.view.zoom;
+        run_frame(
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(paper.center()),
+                egui::Event::Key {
+                    key: egui::Key::PageDown,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::NONE,
+                },
+                egui::Event::Zoom(1.25),
+            ],
+        );
+        assert_eq!(app.doc.active_page_index(), 1);
+        assert!(app.view.zoom > zoom_before);
+
+        // Undo / Delete bị khoá trong Read-Only Mode
+        run_frame(
+            &mut app,
+            vec![
+                egui::Event::Key {
+                    key: egui::Key::Z,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::CTRL | Modifiers::COMMAND,
+                },
+                egui::Event::Key {
+                    key: egui::Key::Delete,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::NONE,
+                },
+            ],
+        );
+        assert_eq!(app.doc.page_count(), 2);
+        assert_eq!(app.doc.pages()[0].strokes.len(), 1);
+
+        // 2. Xuất PDF nhiều trang và PNG 3x vẫn chạy bình thường (kể cả trong Read-Only Mode)
+        let pdf_path = dir.join("note_export.pdf");
+        let saved_pdf = export_pages_to_pdf_file(&app.doc, &[0, 1], &app.theme, &pdf_path).unwrap();
+        assert!(saved_pdf.exists());
+        let pdf_bytes = std::fs::read(&saved_pdf).unwrap();
+        assert!(pdf_bytes.starts_with(b"%PDF-1.4\n"));
+        assert!(String::from_utf8_lossy(&pdf_bytes).contains("/Count 2"));
+
+        let png_base = dir.join("note_pages.png");
+        let saved_pngs =
+            export_pages_to_png_files(&app.doc, &[0, 1], &app.theme, PngScale::X3, &png_base)
+                .unwrap();
+        assert_eq!(saved_pngs.len(), 2);
+        assert!(saved_pngs[0].exists());
+        assert!(saved_pngs[1].exists());
+        let img0 = image::open(&saved_pngs[0]).unwrap();
+        assert_eq!(
+            img0.width(),
+            (app.doc.paper_settings().page_width * 3.0).ceil() as u32
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
