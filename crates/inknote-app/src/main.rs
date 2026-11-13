@@ -3387,7 +3387,6 @@ mod tests {
 
         let kinds = [
             inknote_core::ShapeKind::Line,
-            inknote_core::ShapeKind::Curve,
             inknote_core::ShapeKind::Arrow,
             inknote_core::ShapeKind::Rectangle,
             inknote_core::ShapeKind::RoundedRect,
@@ -3410,16 +3409,15 @@ mod tests {
             app.shape_up(e, false);
         }
 
-        assert_eq!(app.doc.pages()[0].shapes.len(), 8);
-        assert!(app.doc.pages()[0].shapes[1].control.is_some()); // Curve có control point
+        assert_eq!(app.doc.pages()[0].shapes.len(), 7);
         assert!(app.doc.pages()[0].shapes[1].dashed);
 
         assert!(app.doc.undo());
-        assert_eq!(app.doc.pages()[0].shapes.len(), 7);
+        assert_eq!(app.doc.pages()[0].shapes.len(), 6);
         assert!(app.doc.redo());
-        assert_eq!(app.doc.pages()[0].shapes.len(), 8);
+        assert_eq!(app.doc.pages()[0].shapes.len(), 7);
 
-        // Kiểm tra lưu và mở lại file giữ nguyên toàn bộ 8 hình học
+        // Kiểm tra lưu và mở lại file giữ nguyên toàn bộ 7 hình học
         let tmp = std::env::temp_dir().join("inknote_test_shapes_roundtrip.inknote");
         app.current_path = Some(tmp.clone());
         assert!(app.save_document());
@@ -3427,9 +3425,9 @@ mod tests {
         let mut app2 = new_test_app(&ctx);
         app2.load_document_from(tmp.clone());
         let _ = std::fs::remove_file(tmp);
-        assert_eq!(app2.doc.pages()[0].shapes.len(), 8);
+        assert_eq!(app2.doc.pages()[0].shapes.len(), 7);
         assert_eq!(
-            app2.doc.pages()[0].shapes[2].kind,
+            app2.doc.pages()[0].shapes[1].kind,
             inknote_core::ShapeKind::Arrow
         );
     }
@@ -3450,7 +3448,6 @@ mod tests {
                 kind: inknote_core::ShapeKind::Rectangle,
                 start: [150.0, 150.0],
                 end: [300.0, 260.0],
-                control: None,
                 color: [217, 48, 37, 255],
                 stroke_width: 3.0,
                 dashed: false,
@@ -3510,7 +3507,6 @@ mod tests {
                 kind: inknote_core::ShapeKind::Diamond,
                 start: [120.0, 120.0],
                 end: [200.0, 200.0],
-                control: None,
                 color: [20, 22, 25, 255],
                 stroke_width: 2.5,
                 dashed: false,
@@ -3577,7 +3573,6 @@ mod tests {
                 inknote_core::ShapeKind::Line,
                 inknote_core::ShapeKind::Arrow,
                 inknote_core::ShapeKind::DoubleArrow,
-                inknote_core::ShapeKind::Curve,
             ] {
                 let end = shapes::constrain_shape_end(kind, start, target, true);
                 let d = end - start;
@@ -3607,12 +3602,8 @@ mod tests {
             Pos2::new(320.0, 240.0),
             true,
         );
-        let (tri_pts, closed) = shapes::shape_outline_points(
-            inknote_core::ShapeKind::Triangle,
-            start,
-            eq_end,
-            None,
-        );
+        let (tri_pts, closed) =
+            shapes::shape_outline_points(inknote_core::ShapeKind::Triangle, start, eq_end);
         assert!(closed);
         assert_eq!(tri_pts.len(), 3);
         let s01 = tri_pts[0].distance(tri_pts[1]);
@@ -3637,7 +3628,7 @@ mod tests {
             inknote_core::ShapeKind::Octagon,
         ] {
             let end = shapes::constrain_shape_end(kind, start, Pos2::new(330.0, 250.0), true);
-            let (pts, closed) = shapes::shape_outline_points(kind, start, end, None);
+            let (pts, closed) = shapes::shape_outline_points(kind, start, end);
             assert!(closed);
             let first_side = pts[0].distance(pts[1]);
             for i in 0..pts.len() {
@@ -3651,7 +3642,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extended_19_shapes_draw_lasso_and_roundtrip() {
+    fn test_extended_18_shapes_draw_lasso_and_roundtrip() {
         let ctx = egui::Context::default();
         let mut app = new_test_app(&ctx);
         let paper = egui::Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 720.0));
@@ -3662,7 +3653,7 @@ mod tests {
             .iter()
             .flat_map(|(_, list)| list.iter().copied())
             .collect();
-        assert_eq!(all_kinds.len(), 19);
+        assert_eq!(all_kinds.len(), 18);
 
         for (idx, kind) in all_kinds.iter().copied().enumerate() {
             app.toolbar_state.shape_kind = kind;
@@ -3673,47 +3664,44 @@ mod tests {
             app.shape_down(&ctx, app.view.to_screen(paper, p0));
             app.shape_up(app.view.to_screen(paper, p1), false);
         }
-        assert_eq!(app.doc.pages()[0].shapes.len(), 19);
+        assert_eq!(app.doc.pages()[0].shapes.len(), 18);
 
         // Kiểm tra khác biệt hình học giữa 3 hình thang
         let (trap_pts, _) = shapes::shape_outline_points(
             inknote_core::ShapeKind::Trapezoid,
             Pos2::ZERO,
             Pos2::new(100.0, 60.0),
-            None,
         );
         let (rtrap_pts, _) = shapes::shape_outline_points(
             inknote_core::ShapeKind::RightTrapezoid,
             Pos2::ZERO,
             Pos2::new(100.0, 60.0),
-            None,
         );
         let (itrap_pts, _) = shapes::shape_outline_points(
             inknote_core::ShapeKind::IsoscelesTrapezoid,
             Pos2::ZERO,
             Pos2::new(100.0, 60.0),
-            None,
         );
         assert!((rtrap_pts[0].x - rtrap_pts[3].x).abs() < 1e-3); // Cạnh trái thẳng đứng
         assert!((itrap_pts[0].distance(itrap_pts[3]) - itrap_pts[1].distance(itrap_pts[2])).abs() < 1e-3); // 2 cạnh bên bằng nhau
         assert!((trap_pts[0].distance(trap_pts[3]) - trap_pts[1].distance(trap_pts[2])).abs() > 5.0); // Hình thang thường lệch rõ
 
-        // Lasso quét toàn bộ 19 hình -> chọn đủ 19 hình
+        // Lasso quét toàn bộ 18 hình -> chọn đủ 18 hình
         app.toolbar_state.active_tool = ActiveTool::Lasso;
         app.toolbar_state.lasso_mode = toolbar::LassoMode::Rectangle;
         app.lasso_down(&ctx, app.view.to_screen(paper, Pos2::new(20.0, 20.0)));
         app.lasso_move(app.view.to_screen(paper, Pos2::new(700.0, 500.0)));
         app.lasso_up();
         let sel = app.lasso_state.selection.as_ref().unwrap();
-        assert_eq!(sel.shape_ids.len(), 19);
+        assert_eq!(sel.shape_ids.len(), 18);
 
-        // Lưu & mở lại toàn bộ 19 loại hình giữ nguyên
-        let tmp = std::env::temp_dir().join("inknote_test_19_shapes.inknote");
+        // Lưu & mở lại toàn bộ 18 loại hình giữ nguyên
+        let tmp = std::env::temp_dir().join("inknote_test_18_shapes.inknote");
         app.current_path = Some(tmp.clone());
         assert!(app.save_document());
         let mut app2 = new_test_app(&ctx);
         app2.load_document_from(tmp.clone());
         let _ = std::fs::remove_file(tmp);
-        assert_eq!(app2.doc.pages()[0].shapes.len(), 19);
+        assert_eq!(app2.doc.pages()[0].shapes.len(), 18);
     }
 }

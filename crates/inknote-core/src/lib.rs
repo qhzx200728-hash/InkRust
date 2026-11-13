@@ -198,7 +198,6 @@ pub struct LatexObject {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ShapeKind {
     Line,
-    Curve,
     Rectangle,
     Circle,
     Triangle,
@@ -219,16 +218,13 @@ pub enum ShapeKind {
 }
 
 /// Đối tượng hình học vector trên trang.
-/// - `start`, `end`: 2 điểm đầu mút (với `Line`/`Curve`/`Arrow`) hoặc 2 góc đối của khung bao hình.
-/// - `control`: điểm điều khiển Bézier bậc hai dành cho `Curve` (nếu `None`, tự tính độ cong mặc định).
+/// - `start`, `end`: 2 điểm đầu mút (với `Line`/`Arrow`/`DoubleArrow`) hoặc 2 góc đối của khung bao hình.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ShapeObject {
     pub id: u64,
     pub kind: ShapeKind,
     pub start: [f64; 2],
     pub end: [f64; 2],
-    #[serde(default)]
-    pub control: Option<[f64; 2]>,
     pub color: [u8; 4],
     pub stroke_width: f64,
     #[serde(default)]
@@ -508,9 +504,6 @@ pub fn transform_latex(obj: &mut LatexObject, anchor: [f64; 2], scale: [f64; 2],
 pub fn transform_shape(obj: &mut ShapeObject, anchor: [f64; 2], scale: [f64; 2], delta: [f64; 2]) {
     obj.start = transform_xy(obj.start, anchor, scale, delta);
     obj.end = transform_xy(obj.end, anchor, scale, delta);
-    if let Some(c) = obj.control.as_mut() {
-        *c = transform_xy(*c, anchor, scale, delta);
-    }
 }
 
 /// Tài liệu nhiều trang + lịch sử Undo/Redo + trạng thái lưu file.
@@ -1920,10 +1913,9 @@ mod tests {
         let sh_id = d.alloc_id();
         let sh = ShapeObject {
             id: sh_id,
-            kind: ShapeKind::Curve,
+            kind: ShapeKind::Arrow,
             start: [40.0, 80.0],
             end: [200.0, 80.0],
-            control: Some([120.0, 30.0]),
             color: [25, 103, 210, 255],
             stroke_width: 3.0,
             dashed: true,
@@ -1952,7 +1944,6 @@ mod tests {
         });
         assert_eq!(d.pages()[0].shapes[0].start, [70.0, 100.0]);
         assert_eq!(d.pages()[0].shapes[0].end, [310.0, 100.0]);
-        assert_eq!(d.pages()[0].shapes[0].control, Some([190.0, 50.0]));
 
         assert!(d.undo());
         assert_eq!(d.pages()[0].shapes[0], sh);
@@ -1964,7 +1955,7 @@ mod tests {
         let parsed: DocumentFile = serde_json::from_str(&json).unwrap();
         let loaded = Document::from_file(parsed);
         assert_eq!(loaded.pages()[0].shapes.len(), 1);
-        assert_eq!(loaded.pages()[0].shapes[0].kind, ShapeKind::Curve);
+        assert_eq!(loaded.pages()[0].shapes[0].kind, ShapeKind::Arrow);
         assert!(loaded.pages()[0].shapes[0].dashed);
 
         // Eraser (EraseStrokes) không bao giờ chạm tới shapes

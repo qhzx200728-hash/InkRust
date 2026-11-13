@@ -1,5 +1,5 @@
 // Hình học cơ bản & mở rộng (Bước 5.3 - P2):
-// - Hỗ trợ 19 loại hình: đường thẳng/cong/mũi tên 1-2 chiều, khối cơ bản, tam giác (cân/đều/vuông/vuông cân),
+// - Hỗ trợ 18 loại hình: đường thẳng/mũi tên 1-2 chiều, khối cơ bản, tam giác (cân/đều/vuông/vuông cân),
 //   đa giác (ngũ/lục/thất/bát giác), và tứ giác (thoi, bình hành, hình thang thường/vuông/cân).
 // - Giữ Ctrl khi kéo để căn góc đặc trưng (0°, 30°, 45°, 60°, 90°, ...) hoặc hình đều chuẩn.
 
@@ -10,10 +10,9 @@ use inknote_core::{ShapeKind, ShapeObject};
 
 use crate::lasso::LassoInteraction;
 
-/// 7 hình hay dùng hiển thị trực tiếp trên thanh công cụ ngữ cảnh.
-pub const QUICK_SHAPE_KINDS: [ShapeKind; 7] = [
+/// 6 hình hay dùng hiển thị trực tiếp trên thanh công cụ ngữ cảnh.
+pub const QUICK_SHAPE_KINDS: [ShapeKind; 6] = [
     ShapeKind::Line,
-    ShapeKind::Curve,
     ShapeKind::Arrow,
     ShapeKind::DoubleArrow,
     ShapeKind::Rectangle,
@@ -21,16 +20,11 @@ pub const QUICK_SHAPE_KINDS: [ShapeKind; 7] = [
     ShapeKind::Triangle,
 ];
 
-/// Toàn bộ 19 loại hình chia nhóm rõ ràng trong Pop-up chọn hình.
+/// Toàn bộ 18 loại hình chia nhóm rõ ràng trong Pop-up chọn hình.
 pub const SHAPE_GROUPS: [(&str, &[ShapeKind]); 5] = [
     (
         "Lines & Arrows",
-        &[
-            ShapeKind::Line,
-            ShapeKind::Curve,
-            ShapeKind::Arrow,
-            ShapeKind::DoubleArrow,
-        ],
+        &[ShapeKind::Line, ShapeKind::Arrow, ShapeKind::DoubleArrow],
     ),
     (
         "Basic Shapes",
@@ -73,7 +67,6 @@ pub const SHAPE_GROUPS: [(&str, &[ShapeKind]); 5] = [
 pub fn shape_kind_label(kind: ShapeKind) -> &'static str {
     match kind {
         ShapeKind::Line => "Line (Ctrl: 0° / 30° / 45° / 60° / 90°)",
-        ShapeKind::Curve => "Curve (Ctrl: Snap 0° / 30° / 45° / 60° / 90°)",
         ShapeKind::Arrow => "Arrow (Ctrl: 0° / 30° / 45° / 60° / 90°)",
         ShapeKind::DoubleArrow => "Double Arrow (Ctrl: 0° / 30° / 45° / 60° / 90°)",
         ShapeKind::Rectangle => "Rectangle (Ctrl: Square)",
@@ -138,7 +131,7 @@ fn snap_characteristic_angle(start: Pos2, pos: Pos2) -> Pos2 {
 pub fn constrain_shape_end(kind: ShapeKind, start: Pos2, pos: Pos2, ctrl_held: bool) -> Pos2 {
     match kind {
         ShapeKind::RightIsoscelesTriangle => constrain_square(start, pos),
-        ShapeKind::Line | ShapeKind::Curve | ShapeKind::Arrow | ShapeKind::DoubleArrow => {
+        ShapeKind::Line | ShapeKind::Arrow | ShapeKind::DoubleArrow => {
             if ctrl_held {
                 snap_characteristic_angle(start, pos)
             } else {
@@ -179,22 +172,6 @@ pub fn constrain_shape_end(kind: ShapeKind, start: Pos2, pos: Pos2, ctrl_held: b
     }
 }
 
-/// Tính điểm điều khiển mặc định cho đường cong Bézier bậc hai từ 2 đầu mút.
-pub fn default_curve_control(start: Pos2, end: Pos2) -> Pos2 {
-    let d = end - start;
-    let len = d.length();
-    if len < 1e-3 {
-        return start;
-    }
-    let mid = start + d * 0.5;
-    let mut perp = vec2(d.y / len, -d.x / len);
-    if perp.y > 0.0 || (perp.y.abs() < 1e-4 && perp.x < 0.0) {
-        perp = -perp;
-    }
-    let offset = (len * 0.28).clamp(8.0, 96.0);
-    mid + perp * offset
-}
-
 /// Trạng thái kéo vẽ một hình học đang diễn ra trên trang (chưa thả bút/chuột).
 #[derive(Clone, Debug)]
 pub struct ActiveShapeDrag {
@@ -203,7 +180,6 @@ pub struct ActiveShapeDrag {
     pub start: Pos2,
     raw_current: Pos2,
     pub current: Pos2,
-    samples: Vec<Pos2>,
     pub color: [u8; 4],
     pub stroke_width: f64,
     pub dashed: bool,
@@ -224,7 +200,6 @@ impl ActiveShapeDrag {
             start,
             raw_current: start,
             current: start,
-            samples: vec![start],
             color,
             stroke_width,
             dashed,
@@ -234,61 +209,18 @@ impl ActiveShapeDrag {
     pub fn update(&mut self, page_pos: Pos2, ctrl_held: bool) {
         self.raw_current = page_pos;
         self.reapply_constraint(ctrl_held);
-        if self.kind == ShapeKind::Curve {
-            let constrained = self.current;
-            let should_push = self
-                .samples
-                .last()
-                .is_none_or(|p| p.distance_sq(constrained) >= 25.0);
-            if should_push && self.samples.len() < 128 {
-                self.samples.push(constrained);
-            }
-        }
     }
 
     pub fn reapply_constraint(&mut self, ctrl_held: bool) {
         self.current = constrain_shape_end(self.kind, self.start, self.raw_current, ctrl_held);
     }
 
-    fn effective_curve_control(&self) -> Pos2 {
-        let line = self.current - self.start;
-        let len_sq = line.length_sq();
-        if len_sq < 4.0 {
-            return default_curve_control(self.start, self.current);
-        }
-        let len = len_sq.sqrt();
-        let mut best_dist = 0.0f32;
-        let mut best_pt = self.start;
-        for &p in &self.samples {
-            let v = p - self.start;
-            let cross = (line.x * v.y - line.y * v.x).abs() / len;
-            let proj = (v.x * line.x + v.y * line.y) / len_sq;
-            if proj > 0.08 && proj < 0.92 && cross > best_dist {
-                best_dist = cross;
-                best_pt = p;
-            }
-        }
-        if best_dist >= 10.0 {
-            let mid = self.start + line * 0.5;
-            pos2(2.0 * best_pt.x - mid.x, 2.0 * best_pt.y - mid.y)
-        } else {
-            default_curve_control(self.start, self.current)
-        }
-    }
-
     pub fn to_preview_object(&self) -> ShapeObject {
-        let control = if self.kind == ShapeKind::Curve {
-            let c = self.effective_curve_control();
-            Some([c.x as f64, c.y as f64])
-        } else {
-            None
-        };
         ShapeObject {
             id: 0,
             kind: self.kind,
             start: [self.start.x as f64, self.start.y as f64],
             end: [self.current.x as f64, self.current.y as f64],
-            control,
             color: self.color,
             stroke_width: self.stroke_width,
             dashed: self.dashed,
@@ -416,29 +348,11 @@ fn shape_arrow_heads(kind: ShapeKind, start: Pos2, end: Pos2, stroke_width: f64)
 }
 
 /// Tạo danh sách điểm viền (page-local) và cờ `closed` dùng chung cho render, bbox và Lasso.
-pub fn shape_outline_points(
-    kind: ShapeKind,
-    start: Pos2,
-    end: Pos2,
-    control: Option<Pos2>,
-) -> (Vec<Pos2>, bool) {
+pub fn shape_outline_points(kind: ShapeKind, start: Pos2, end: Pos2) -> (Vec<Pos2>, bool) {
     let rect = Rect::from_two_pos(start, end);
     let w = rect.width();
     match kind {
         ShapeKind::Line | ShapeKind::Arrow | ShapeKind::DoubleArrow => (vec![start, end], false),
-        ShapeKind::Curve => {
-            let c = control.unwrap_or_else(|| default_curve_control(start, end));
-            let steps = 32;
-            let mut pts = Vec::with_capacity(steps + 1);
-            for i in 0..=steps {
-                let t = i as f32 / steps as f32;
-                let omt = 1.0 - t;
-                let x = omt * omt * start.x + 2.0 * omt * t * c.x + t * t * end.x;
-                let y = omt * omt * start.y + 2.0 * omt * t * c.y + t * t * end.y;
-                pts.push(pos2(x, y));
-            }
-            (pts, false)
-        }
         ShapeKind::Rectangle => (
             vec![
                 rect.left_top(),
@@ -540,8 +454,7 @@ impl ClosedPolygonExt for Vec<Pos2> {
 pub fn shape_page_bbox(shape: &ShapeObject) -> Rect {
     let start = pos2(shape.start[0] as f32, shape.start[1] as f32);
     let end = pos2(shape.end[0] as f32, shape.end[1] as f32);
-    let control = shape.control.map(|c| pos2(c[0] as f32, c[1] as f32));
-    let (pts, _) = shape_outline_points(shape.kind, start, end, control);
+    let (pts, _) = shape_outline_points(shape.kind, start, end);
     let mut r = Rect::NOTHING;
     for p in pts {
         r.extend_with(p);
@@ -570,8 +483,7 @@ fn segments_intersect(a: Pos2, b: Pos2, c: Pos2, d: Pos2) -> bool {
 fn iter_shape_edges(shape: &ShapeObject) -> Vec<[Pos2; 2]> {
     let start = pos2(shape.start[0] as f32, shape.start[1] as f32);
     let end = pos2(shape.end[0] as f32, shape.end[1] as f32);
-    let control = shape.control.map(|c| pos2(c[0] as f32, c[1] as f32));
-    let (pts, closed) = shape_outline_points(shape.kind, start, end, control);
+    let (pts, closed) = shape_outline_points(shape.kind, start, end);
     let mut edges = Vec::with_capacity(pts.len() + 6);
     for w in pts.windows(2) {
         edges.push([w[0], w[1]]);
@@ -709,9 +621,6 @@ pub fn paint_shape(
         interaction,
     );
     let end = transform_point(pos2(shape.end[0] as f32, shape.end[1] as f32), interaction);
-    let control = shape
-        .control
-        .map(|c| transform_point(pos2(c[0] as f32, c[1] as f32), interaction));
 
     let color = Color32::from_rgba_unmultiplied(
         shape.color[0],
@@ -723,7 +632,7 @@ pub fn paint_shape(
     let stroke = Stroke::new(screen_width, color);
     let to_screen = |p: Pos2| origin + p.to_vec2() * zoom;
 
-    let (page_pts, closed) = shape_outline_points(shape.kind, start, end, control);
+    let (page_pts, closed) = shape_outline_points(shape.kind, start, end);
     let screen_pts: Vec<Pos2> = page_pts.into_iter().map(to_screen).collect();
 
     if shape.dashed {
@@ -795,15 +704,6 @@ pub fn draw_shape_kind_icon(painter: &Painter, rect: Rect, kind: ShapeKind, colo
         ShapeKind::Line => {
             painter.line_segment([pos2(c.x - s, c.y + s), pos2(c.x + s, c.y - s)], stroke);
         }
-        ShapeKind::Curve => {
-            let pts = [
-                pos2(c.x - s, c.y + s * 0.55),
-                pos2(c.x - s * 0.35, c.y - s * 0.75),
-                pos2(c.x + s * 0.35, c.y - s * 0.75),
-                pos2(c.x + s, c.y + s * 0.55),
-            ];
-            painter.add(egui::Shape::Path(PathShape::line(pts.to_vec(), stroke)));
-        }
         ShapeKind::Arrow => {
             let p0 = pos2(c.x - s, c.y + s * 0.85);
             let p1 = pos2(c.x + s, c.y - s * 0.85);
@@ -845,8 +745,7 @@ pub fn draw_shape_kind_icon(painter: &Painter, rect: Rect, kind: ShapeKind, colo
                 _ => vec2(s * 1.92, s * 1.42),
             };
             let icon_box = Rect::from_center_size(c, box_size);
-            let (pts, _) =
-                shape_outline_points(kind, icon_box.left_top(), icon_box.right_bottom(), None);
+            let (pts, _) = shape_outline_points(kind, icon_box.left_top(), icon_box.right_bottom());
             painter.add(egui::Shape::Path(PathShape::closed_line(pts, stroke)));
 
             if matches!(

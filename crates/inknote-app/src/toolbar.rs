@@ -1773,7 +1773,7 @@ fn all_shapes_toggle_chip(
         }
     }
     resp.on_hover_text(format!(
-        "All 19 Shapes — Current: {}",
+        "All 18 Shapes — Current: {}",
         shape_kind_label(active_kind)
     ))
 }
@@ -1782,7 +1782,7 @@ fn all_shapes_toggle_chip(
 fn show_shapes_contextual_options(ui: &mut Ui, theme: &Theme, state: &mut ToolbarState) {
     let row_h = theme.tool_row_height;
 
-    // 1. 7 nút chọn nhanh + nút mở Pop-up toàn bộ 19 loại hình
+    // 1. 6 nút chọn nhanh + nút mở Pop-up toàn bộ 18 loại hình
     for kind in QUICK_SHAPE_KINDS {
         if shape_kind_chip(ui, theme, kind, state.shape_kind == kind).clicked() {
             state.shape_kind = kind;
