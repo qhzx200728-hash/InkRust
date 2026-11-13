@@ -19,8 +19,10 @@ pub struct SvgTextureCache {
     entries: HashMap<u64, CachedSvgTexture>,
 }
 
+const LATEX_DISPLAY_SCALE: f32 = 1.6;
+
 impl SvgTextureCache {
-    /// Lấy hoặc rasterize lại SVG thành texture sắc nét theo `zoom * pixels_per_point`.
+    /// Lấy hoặc rasterize lại SVG thành texture sắc nét theo `zoom * pixels_per_point` (có supersample 2x).
     pub fn get_or_render(
         &mut self,
         ctx: &egui::Context,
@@ -29,9 +31,9 @@ impl SvgTextureCache {
         zoom: f32,
     ) -> Result<(egui::TextureId, egui::Vec2), LatexError> {
         let ppp = ctx.pixels_per_point();
-        let target_scale = (zoom * ppp).clamp(0.5, 8.0);
-        // Lượng tử hoá theo bước 0.25x để không rasterize lại liên tục khi zoom mượt
-        let bucket = (target_scale * 4.0).round().max(2.0) as u32;
+        let target_scale = (zoom * ppp * LATEX_DISPLAY_SCALE * 2.0).clamp(2.0, 12.0);
+        // Lượng tử hoá theo bước 0.5x để không rasterize lại liên tục khi zoom mượt
+        let bucket = (target_scale * 2.0).round().max(4.0) as u32;
 
         if let Some(entry) = self.entries.get(&id) {
             if entry.scale_bucket == bucket {
@@ -39,7 +41,7 @@ impl SvgTextureCache {
             }
         }
 
-        let render_scale = bucket as f32 / 4.0;
+        let render_scale = bucket as f32 / 2.0;
         let rendered = render_svg_to_rgba(svg, render_scale)?;
         let image = ColorImage::from_rgba_unmultiplied(
             [rendered.width_px as usize, rendered.height_px as usize],
@@ -133,8 +135,7 @@ impl LatexSmokeState {
             return;
         };
         if let Ok((tex_id, logical_size)) = cache.get_or_render(ctx, 1, svg, zoom) {
-            // Phóng kích thước hiển thị hợp lý trên trang (1.6x pt -> đơn vị trang)
-            let display_size = logical_size * 1.6 * zoom;
+            let display_size = logical_size * LATEX_DISPLAY_SCALE * zoom;
             let top_left = page_origin + egui::vec2(80.0 * zoom, 120.0 * zoom);
             let rect = Rect::from_min_size(top_left, display_size);
             painter.image(
@@ -146,4 +147,3 @@ impl LatexSmokeState {
         }
     }
 }
-
