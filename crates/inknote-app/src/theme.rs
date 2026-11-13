@@ -164,7 +164,7 @@ impl Default for Theme {
             lib_folder_back: Color32::from_rgb(37, 99, 235),
             lib_card_hover_bg: Color32::from_rgba_unmultiplied(24, 90, 188, 12),
             lib_card_rounding: 10,
-            lib_star_gold: Color32::from_rgb(245, 158, 11),
+            lib_star_gold: Color32::from_rgb(238, 28, 37),
             lib_danger_fg: Color32::from_rgb(220, 38, 38),
             lib_danger_bg: Color32::from_rgb(254, 242, 242),
 

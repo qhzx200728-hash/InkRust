@@ -411,40 +411,30 @@ pub fn draw_icon(painter: &Painter, rect: Rect, icon: ToolIcon, color: Color32) 
             painter.line_segment([pos2(c.x, c.y - arm), pos2(c.x, c.y + arm)], stroke);
         }
         ToolIcon::Star | ToolIcon::StarFilled => {
-            let mut pts = Vec::with_capacity(10);
-            let outer = s * 0.92;
-            let inner = s * 0.42;
-            for k in 0..10 {
-                let angle = -std::f32::consts::FRAC_PI_2 + (k as f32) * std::f32::consts::PI / 5.0;
-                let r = if k % 2 == 0 { outer } else { inner };
-                pts.push(pos2(c.x + r * angle.cos(), c.y + r * angle.sin()));
-            }
+            // Biểu tượng dải ruy-băng bookmark (Yêu thích)
+            let w = s * 0.62;
+            let top = c.y - s * 0.88;
+            let bot = c.y + s * 0.88;
+            let notch_y = c.y + s * 0.36;
+            let pts = [
+                pos2(c.x - w, top),
+                pos2(c.x + w, top),
+                pos2(c.x + w, bot),
+                pos2(c.x, notch_y),
+                pos2(c.x - w, bot),
+            ];
             if matches!(icon, ToolIcon::StarFilled) {
-                let mut tris = egui::epaint::Mesh::default();
-                let center_idx = tris.vertices.len() as u32;
-                tris.vertices.push(egui::epaint::Vertex {
-                    pos: c,
-                    uv: egui::epaint::WHITE_UV,
-                    color,
-                });
-                for p in &pts {
-                    tris.vertices.push(egui::epaint::Vertex {
-                        pos: *p,
-                        uv: egui::epaint::WHITE_UV,
-                        color,
-                    });
-                }
-                for i in 0..10u32 {
-                    let next = (i + 1) % 10;
-                    tris.indices.extend_from_slice(&[
-                        center_idx,
-                        center_idx + 1 + i,
-                        center_idx + 1 + next,
-                    ]);
-                }
-                painter.add(egui::Shape::mesh(tris));
+                // Hai phần đối xứng trái/phải ghép thành dải bookmark lõm đáy (lồi/lõm đều chính xác)
+                let left_half = vec![pts[0], pos2(c.x, top), pts[3], pts[4]];
+                let right_half = vec![pos2(c.x, top), pts[1], pts[2], pts[3]];
+                painter.add(egui::Shape::convex_polygon(left_half, color, Stroke::NONE));
+                painter.add(egui::Shape::convex_polygon(right_half, color, Stroke::NONE));
+                painter.add(egui::Shape::closed_line(
+                    pts.to_vec(),
+                    Stroke::new(1.3, Color32::from_rgb(24, 24, 28)),
+                ));
             } else {
-                painter.add(egui::Shape::closed_line(pts, stroke));
+                painter.add(egui::Shape::closed_line(pts.to_vec(), stroke));
             }
         }
         ToolIcon::Restore => {
@@ -476,6 +466,98 @@ pub fn draw_icon(painter: &Painter, rect: Rect, icon: ToolIcon, color: Color32) 
             painter.line_segment([p_m, p_r], stroke);
         }
     }
+}
+
+/// Vẽ huy hiệu bookmark đỏ có viền tối và vệt sáng nhẹ trên góc thẻ ghi chú yêu thích.
+pub fn draw_favorite_bookmark_badge(painter: &Painter, rect: Rect, red: Color32) {
+    let cx = rect.center().x;
+    let top = rect.top();
+    let bot = rect.bottom();
+    let notch_y = bot - rect.height() * 0.28;
+    let dark_red = Color32::from_rgb(176, 16, 24);
+    let outline = Color32::from_rgb(20, 22, 26);
+
+    // Bóng đổ nhẹ bên dưới ruy-băng
+    let shadow_offset = vec2(0.0, 1.5);
+    let shadow_col = Color32::from_rgba_unmultiplied(15, 23, 42, 36);
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            rect.left_top() + shadow_offset,
+            pos2(cx, top) + shadow_offset,
+            pos2(cx, notch_y) + shadow_offset,
+            rect.left_bottom() + shadow_offset,
+        ],
+        shadow_col,
+        Stroke::NONE,
+    ));
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            pos2(cx, top) + shadow_offset,
+            rect.right_top() + shadow_offset,
+            rect.right_bottom() + shadow_offset,
+            pos2(cx, notch_y) + shadow_offset,
+        ],
+        shadow_col,
+        Stroke::NONE,
+    ));
+
+    // Thân chính màu đỏ
+    let pts = [
+        rect.left_top(),
+        rect.right_top(),
+        rect.right_bottom(),
+        pos2(cx, notch_y),
+        rect.left_bottom(),
+    ];
+    painter.add(egui::Shape::convex_polygon(
+        vec![pts[0], pos2(cx, top), pts[3], pts[4]],
+        red,
+        Stroke::NONE,
+    ));
+    painter.add(egui::Shape::convex_polygon(
+        vec![pos2(cx, top), pts[1], pts[2], pts[3]],
+        red,
+        Stroke::NONE,
+    ));
+
+    // Vùng bóng đậm dọc đáy ruy-băng
+    let bevel = (rect.height() * 0.12).max(2.0);
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            pos2(rect.left(), bot - bevel),
+            pos2(cx, notch_y - bevel),
+            pos2(cx, notch_y),
+            pts[4],
+        ],
+        dark_red,
+        Stroke::NONE,
+    ));
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            pos2(cx, notch_y - bevel),
+            pos2(rect.right(), bot - bevel),
+            pts[2],
+            pos2(cx, notch_y),
+        ],
+        dark_red,
+        Stroke::NONE,
+    ));
+
+    // Vệt bóng sáng mỏng ở mép trên giống hình mẫu
+    let gloss_y = top + (rect.height() * 0.14).max(2.2);
+    painter.line_segment(
+        [
+            pos2(rect.left() + 2.5, gloss_y),
+            pos2(rect.right() - 2.5, gloss_y),
+        ],
+        Stroke::new(1.3, Color32::from_rgba_unmultiplied(255, 215, 218, 170)),
+    );
+
+    // Viền đen sắc nét bao quanh
+    painter.add(egui::Shape::closed_line(
+        pts.to_vec(),
+        Stroke::new(1.5, outline),
+    ));
 }
 
 /// Vẽ logo tự thiết kế cho Sidebar màn hình Library (cuốn sổ + nét mực xanh).

@@ -20,7 +20,10 @@ use inknote_pen::style::Composer;
 use inknote_render::CairoRenderContext;
 
 use crate::{
-    icons::{ToolIcon, draw_icon, draw_library_brand_logo, draw_library_folder_art},
+    icons::{
+        ToolIcon, draw_favorite_bookmark_badge, draw_icon, draw_library_brand_logo,
+        draw_library_folder_art,
+    },
     image_box::ImageTextureCache,
     svg_cache::SvgTextureCache,
     theme::Theme,
@@ -1103,23 +1106,11 @@ impl LibraryState {
         );
 
         if note.is_favorite {
-            let badge_center = pos2(paper_card_rect.right() - 13.0, paper_card_rect.top() + 13.0);
-            ui.painter().circle_filled(
-                badge_center,
-                9.5,
-                Color32::from_rgba_unmultiplied(255, 255, 255, 232),
+            let badge_rect = Rect::from_min_size(
+                pos2(paper_card_rect.right() - 23.0, paper_card_rect.top() - 2.0),
+                vec2(14.0, 21.0),
             );
-            ui.painter().circle_stroke(
-                badge_center,
-                9.5,
-                Stroke::new(0.75, Color32::from_rgba_unmultiplied(217, 119, 6, 90)),
-            );
-            draw_icon(
-                ui.painter(),
-                Rect::from_center_size(badge_center, vec2(12.0, 12.0)),
-                ToolIcon::StarFilled,
-                theme.lib_star_gold,
-            );
+            draw_favorite_bookmark_badge(ui.painter(), badge_rect, theme.lib_star_gold);
         }
     }
 
