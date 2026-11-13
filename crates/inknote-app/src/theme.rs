@@ -54,6 +54,10 @@ pub struct Theme {
     pub font_size_title: f32,
     pub font_size_body: f32,
     pub font_size_small: f32,
+
+    // 6. Màu chữ trạng thái trên nền sáng (canvas/bàn làm việc)
+    pub status_text_fg: Color32,
+    pub status_error_fg: Color32,
 }
 
 impl Default for Theme {
@@ -105,6 +109,10 @@ impl Default for Theme {
             font_size_title: 14.5,
             font_size_body: 13.0,
             font_size_small: 11.5,
+
+            // Màu chữ trạng thái trên nền sáng
+            status_text_fg: Color32::from_rgb(105, 112, 126),
+            status_error_fg: Color32::from_rgb(200, 56, 56),
         }
     }
 }

@@ -3,6 +3,7 @@
 // - Khu vực 2: Thanh tuỳ chọn công cụ (Contextual Tool Options Bar, nền tối bo tròn + Pop-up tối bo góc)
 // - Khu vực 3: Canvas chính với nền giấy chấm (Dotted Paper) và nét bút Rnote (`inknote-pen` + `inknote-render`)
 
+mod autosave;
 mod icons;
 mod theme;
 mod toolbar;
@@ -28,6 +29,7 @@ use inknote_render::{CairoRenderContext, DrawBatch};
 use parry2d_f64::math::Vector2;
 
 use crate::{
+    autosave::AutoSaveState,
     icons::{draw_paper, paper_sheet_rect},
     theme::Theme,
     toolbar::{ActiveTool, ToolbarState, show_toolbars},
@@ -136,6 +138,7 @@ struct InkNoteApp {
     // Đường dẫn file .inknote hiện tại đang mở/lưu (None nếu là ghi chú mới chưa lưu)
     current_path: Option<PathBuf>,
     confirm_unsaved: Option<UnsavedAction>,
+    autosave: AutoSaveState,
     // Bộ nhớ đệm lưới tam giác của từng nét (khoá = id nét), không thuộc dữ liệu trang
     batch_cache: HashMap<u64, CachedStroke>,
     view: View,
@@ -170,6 +173,7 @@ impl InkNoteApp {
         let default_paper = load_default_paper_settings();
         let mut doc = Document::new();
         *doc.paper_settings_mut() = default_paper.clone();
+        let initial_rev = doc.revision();
         Self {
             theme: Theme::default(),
             toolbar_state: ToolbarState::default(),
@@ -178,6 +182,7 @@ impl InkNoteApp {
             default_paper_settings: default_paper,
             current_path: None,
             confirm_unsaved: None,
+            autosave: AutoSaveState::new(initial_rev),
             batch_cache: HashMap::new(),
             view: View::default(),
             confirm_clear: false,
@@ -311,6 +316,8 @@ impl InkNoteApp {
                 eprintln!("Lỗi khi lưu file {:?}: {e}", path);
             } else {
                 self.doc.mark_saved();
+                self.autosave
+                    .note_manual_save(self.doc.revision(), Instant::now());
             }
         } else {
             self.save_document_as();
@@ -333,6 +340,8 @@ impl InkNoteApp {
             } else {
                 self.doc.mark_saved();
                 self.current_path = Some(path);
+                self.autosave
+                    .note_manual_save(self.doc.revision(), Instant::now());
             }
         }
     }
@@ -343,6 +352,7 @@ impl InkNoteApp {
             Ok(file) => {
                 self.doc = Document::from_file(file);
                 self.current_path = Some(path);
+                self.autosave.reset(self.doc.revision());
                 self.batch_cache.clear();
                 self.static_cache = None;
                 self.active = None;
@@ -386,6 +396,7 @@ impl InkNoteApp {
         self.doc = Document::new();
         *self.doc.paper_settings_mut() = self.default_paper_settings.clone();
         self.current_path = None;
+        self.autosave.reset(self.doc.revision());
         self.batch_cache.clear();
         self.static_cache = None;
         self.active = None;
@@ -685,8 +696,7 @@ impl eframe::App for InkNoteApp {
             &mut paper_settings,
             &wacom_status,
         );
-        if paper_settings != *self.doc.paper_settings() {
-            *self.doc.paper_settings_mut() = paper_settings.clone();
+        if self.doc.set_paper_settings(paper_settings.clone()) {
             self.default_paper_settings = paper_settings.clone();
             save_default_paper_settings(&paper_settings);
         }
@@ -844,7 +854,8 @@ impl eframe::App for InkNoteApp {
                 if keys.0 {
                     self.view.zoom = 1.0;
                     if self.doc.paper_settings().mode == CanvasMode::Paper {
-                        let centered_x = ((paper.width() - self.doc.paper_settings().page_width).max(0.0)) * 0.5;
+                        let centered_x =
+                            ((paper.width() - self.doc.paper_settings().page_width).max(0.0)) * 0.5;
                         self.view.pan = egui::vec2(centered_x, 24.0);
                     } else {
                         self.view.pan = egui::Vec2::ZERO;
@@ -872,6 +883,15 @@ impl eframe::App for InkNoteApp {
         if self.active.is_none() && ctx.input(|i| i.key_pressed(egui::Key::F9)) {
             self.add_sample_strokes(2000);
         }
+
+        // Auto-save: tự động lưu ngầm sau 2.5s kể từ thay đổi cuối cùng (nếu đã có đường dẫn)
+        let autosave_now = Instant::now();
+        self.autosave.poll_and_maybe_save(
+            &mut self.doc,
+            self.current_path.as_ref(),
+            self.active.is_some(),
+            autosave_now,
+        );
 
         // FPS (trung bình trượt)
         let now = Instant::now();
@@ -995,9 +1015,34 @@ impl eframe::App for InkNoteApp {
                     egui::FontId::proportional(self.theme.font_size_small),
                     self.theme.tool_text_muted,
                 );
+
+                // 7. Trạng thái lưu nhẹ nhàng ở góc dưới-phải
+                if let Some((status_text, is_error)) = self.autosave.status_label(
+                    &self.doc,
+                    self.current_path.as_ref(),
+                    autosave_now,
+                ) {
+                    let color = if is_error {
+                        self.theme.status_error_fg
+                    } else {
+                        self.theme.status_text_fg
+                    };
+                    ui.painter().with_clip_rect(paper_rect).text(
+                        paper_rect.right_bottom() + egui::vec2(-10.0, -8.0),
+                        egui::Align2::RIGHT_BOTTOM,
+                        status_text,
+                        egui::FontId::proportional(self.theme.font_size_small),
+                        color,
+                    );
+                }
             });
 
         ctx.request_repaint();
+    }
+
+    fn on_exit(&mut self) {
+        self.autosave
+            .flush_on_exit(&mut self.doc, self.current_path.as_ref());
     }
 }
 
@@ -1035,6 +1080,7 @@ mod tests {
             default_paper_settings: PaperSettings::default(),
             current_path: None,
             confirm_unsaved: None,
+            autosave: AutoSaveState::new(0),
             batch_cache: HashMap::new(),
             view: View::default(),
             confirm_clear: false,
@@ -1089,7 +1135,9 @@ mod tests {
         // Đổi sang Grid + bật Margins 2 bên + chuyển sang Paper A5 Landscape
         app.doc.paper_settings_mut().mode = CanvasMode::Paper;
         app.doc.paper_settings_mut().set_paper_size(PaperSize::A5);
-        app.doc.paper_settings_mut().set_orientation(PaperOrientation::Landscape);
+        app.doc
+            .paper_settings_mut()
+            .set_orientation(PaperOrientation::Landscape);
         app.doc.paper_settings_mut().pattern = PaperPattern::Grid;
         app.doc.paper_settings_mut().show_margins = true;
         app.doc.paper_settings_mut().left_margin = 100.0;
@@ -1104,7 +1152,10 @@ mod tests {
         app2.load_document_from(temp_file.clone());
         assert_eq!(app2.doc.paper_settings().mode, CanvasMode::Paper);
         assert_eq!(app2.doc.paper_settings().paper_size, PaperSize::A5);
-        assert_eq!(app2.doc.paper_settings().orientation, PaperOrientation::Landscape);
+        assert_eq!(
+            app2.doc.paper_settings().orientation,
+            PaperOrientation::Landscape
+        );
         assert_eq!(app2.doc.paper_settings().page_width, 840.0);
         assert_eq!(app2.doc.paper_settings().page_height, 594.0);
         assert_eq!(app2.doc.paper_settings().pattern, PaperPattern::Grid);

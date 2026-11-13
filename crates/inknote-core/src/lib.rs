@@ -218,16 +218,22 @@ impl DocumentFile {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
-        let tmp_path = path.with_extension("inknote.tmp");
-        std::fs::write(&tmp_path, json.as_bytes())?;
+        let tmp_name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(name) => format!(".{name}.tmp"),
+            None => ".inknote_save.tmp".to_string(),
+        };
+        let tmp_path = path.with_file_name(tmp_name);
 
-        if path.exists() {
-            let _ = std::fs::remove_file(path);
+        {
+            use std::io::Write;
+            let mut file = std::fs::File::create(&tmp_path)?;
+            file.write_all(json.as_bytes())?;
+            file.sync_all()?;
         }
+
         if let Err(e) = std::fs::rename(&tmp_path, path) {
-            std::fs::write(path, json.as_bytes())?;
             let _ = std::fs::remove_file(&tmp_path);
-            let _ = e;
+            return Err(e);
         }
         Ok(())
     }
@@ -301,6 +307,16 @@ impl Document {
         &mut self.paper_settings
     }
 
+    /// Cập nhật cài đặt nền giấy; nếu có thay đổi sẽ tăng `revision` để đánh dấu cần lưu.
+    pub fn set_paper_settings(&mut self, settings: PaperSettings) -> bool {
+        if self.paper_settings == settings {
+            return false;
+        }
+        self.paper_settings = settings;
+        self.rev += 1;
+        true
+    }
+
     /// Cấp id mới cho nét bút.
     pub fn alloc_id(&mut self) -> u64 {
         self.next_id += 1;
@@ -323,7 +339,15 @@ impl Document {
 
     /// Đánh dấu đã lưu thành công ở revision hiện tại.
     pub fn mark_saved(&mut self) {
-        self.saved_rev = self.rev;
+        self.mark_saved_at(self.rev);
+    }
+
+    /// Đánh dấu đã lưu thành công tại một mốc `rev` cụ thể (hữu ích khi lưu trên luồng nền).
+    pub fn mark_saved_at(&mut self, rev: u64) {
+        let clamped = rev.min(self.rev);
+        if clamped > self.saved_rev {
+            self.saved_rev = clamped;
+        }
         self.metadata.modified_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -584,5 +608,63 @@ mod tests {
         let res = DocumentFile::load_from_path(&file_path);
         assert!(res.is_err());
         let _ = std::fs::remove_file(file_path);
+    }
+
+    #[test]
+    fn paper_settings_change_marks_dirty() {
+        let mut d = Document::new();
+        assert!(!d.is_dirty());
+        let mut ps = d.paper_settings().clone();
+        assert!(!d.set_paper_settings(ps.clone()));
+        assert!(!d.is_dirty());
+
+        ps.pattern = PaperPattern::Lined;
+        assert!(d.set_paper_settings(ps));
+        assert!(d.is_dirty());
+    }
+
+    #[test]
+    fn mark_saved_at_preserves_dirty_when_newer_revision_exists() {
+        let mut d = Document::new();
+        let s1 = stroke(&mut d);
+        d.execute(Command::AddStroke(s1));
+        let rev1 = d.revision();
+
+        let s2 = stroke(&mut d);
+        d.execute(Command::AddStroke(s2));
+        let rev2 = d.revision();
+
+        d.mark_saved_at(rev1);
+        assert!(d.is_dirty());
+
+        d.mark_saved_at(rev2);
+        assert!(!d.is_dirty());
+    }
+
+    #[test]
+    fn save_to_path_atomic_overwrite_leaves_no_tmp_file() {
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join("test_atomic_overwrite.inknote");
+        let tmp_path = temp_dir.join(".test_atomic_overwrite.inknote.tmp");
+        let _ = std::fs::remove_file(&file_path);
+        let _ = std::fs::remove_file(&tmp_path);
+
+        let mut d = Document::new();
+        let s1 = stroke(&mut d);
+        d.execute(Command::AddStroke(s1));
+        d.to_file().save_to_path(&file_path).unwrap();
+        assert!(file_path.exists());
+        assert!(!tmp_path.exists());
+
+        let s2 = stroke(&mut d);
+        d.execute(Command::AddStroke(s2));
+        d.to_file().save_to_path(&file_path).unwrap();
+        assert!(file_path.exists());
+        assert!(!tmp_path.exists());
+
+        let loaded = DocumentFile::load_from_path(&file_path).unwrap();
+        assert_eq!(loaded.pages[0].objects.len(), 2);
+
+        let _ = std::fs::remove_file(&file_path);
     }
 }
