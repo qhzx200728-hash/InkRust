@@ -85,7 +85,7 @@ impl Default for ToolbarLayoutMetrics {
 pub struct ToolbarState {
     pub active_tool: ActiveTool,
     pub read_only: bool,
-    pub show_thumbnails_hint: bool,
+    pub show_thumbnails: bool,
     pub marker_alpha: f64,
     pub last_metrics: ToolbarLayoutMetrics,
 }
@@ -95,7 +95,7 @@ impl Default for ToolbarState {
         Self {
             active_tool: ActiveTool::Pen,
             read_only: false,
-            show_thumbnails_hint: false,
+            show_thumbnails: false,
             marker_alpha: 0.42,
             last_metrics: ToolbarLayoutMetrics::default(),
         }
@@ -534,12 +534,12 @@ pub fn show_toolbars(
                 &mut left_ui,
                 theme,
                 ToolIcon::Pages,
-                state.show_thumbnails_hint,
-                "Page Thumbnails (Step 3.2 - P1)",
+                state.show_thumbnails,
+                "Toggle Page Thumbnails",
             )
             .clicked()
             {
-                state.show_thumbnails_hint = !state.show_thumbnails_hint;
+                state.show_thumbnails = !state.show_thumbnails;
             }
             if nav_icon_button(
                 &mut left_ui,

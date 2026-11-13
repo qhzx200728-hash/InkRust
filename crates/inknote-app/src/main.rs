@@ -6,6 +6,7 @@
 mod autosave;
 mod icons;
 mod theme;
+mod thumbnails;
 mod toolbar;
 mod view;
 
@@ -32,6 +33,7 @@ use crate::{
     autosave::AutoSaveState,
     icons::{draw_paper, paper_sheet_rect},
     theme::Theme,
+    thumbnails::{append_batches_to_mesh, show_thumbnail_panel, ThumbCache, ThumbnailAction},
     toolbar::{show_toolbars, ActiveTool, ToolbarState},
     view::View,
 };
@@ -40,9 +42,9 @@ const PAGE_GAP: f32 = 28.0;
 const PULL_TO_ADD_THRESHOLD: f32 = 150.0;
 
 /// Lưới tam giác của 1 nét (toạ độ TRANG) + hộp bao để bỏ qua nét nằm ngoài màn hình.
-struct CachedStroke {
-    batches: Vec<DrawBatch>,
-    bbox: egui::Rect,
+pub struct CachedStroke {
+    pub batches: Vec<DrawBatch>,
+    pub bbox: egui::Rect,
 }
 
 impl CachedStroke {
@@ -170,9 +172,10 @@ struct InkNoteApp {
     autosave: AutoSaveState,
     // Bộ nhớ đệm lưới tam giác của từng nét (khoá = id nét), không thuộc dữ liệu trang
     batch_cache: HashMap<u64, CachedStroke>,
+    thumb_cache: ThumbCache,
     view: View,
     confirm_clear: bool,
-    confirm_delete_page: bool,
+    confirm_delete_page: Option<usize>,
     paint_ms: f32,
     fps: f32,
     last_frame: Instant,
@@ -240,9 +243,10 @@ impl InkNoteApp {
             allow_close: false,
             autosave,
             batch_cache: HashMap::new(),
+            thumb_cache: ThumbCache::default(),
             view: View::default(),
             confirm_clear: false,
-            confirm_delete_page: false,
+            confirm_delete_page: None,
             paint_ms: 0.0,
             fps: 0.0,
             last_frame: Instant::now(),
@@ -329,7 +333,7 @@ impl InkNoteApp {
         }
         if egui::Popup::is_any_open(ctx)
             || self.confirm_clear
-            || self.confirm_delete_page
+            || self.confirm_delete_page.is_some()
             || self.confirm_unsaved.is_some()
         {
             return None;
@@ -389,12 +393,11 @@ impl InkNoteApp {
         self.scroll_to_page(new_idx);
     }
 
-    fn delete_current_page(&mut self) {
-        if self.doc.page_count() <= 1 {
+    fn delete_page_at(&mut self, page_idx: usize) {
+        if self.doc.page_count() <= 1 || page_idx >= self.doc.page_count() {
             return;
         }
-        let idx = self.doc.active_page_index();
-        self.doc.execute(Command::DeletePage(idx));
+        self.doc.execute(Command::DeletePage(page_idx));
         let cur = self.doc.active_page_index();
         self.scroll_to_page(cur);
     }
@@ -581,6 +584,7 @@ impl InkNoteApp {
                 self.doc = Document::from_file(file);
                 self.current_path = Some(path);
                 self.autosave.reset(self.doc.revision());
+                self.thumb_cache.clear();
                 self.static_cache = None;
                 self.active = None;
                 self.drawing_page_index = None;
@@ -621,6 +625,7 @@ impl InkNoteApp {
         self.current_path = None;
         self.autosave.reset(self.doc.revision());
         self.batch_cache.clear();
+        self.thumb_cache.clear();
         self.static_cache = None;
         self.active = None;
         self.drawing_page_index = None;
@@ -738,22 +743,7 @@ impl InkNoteApp {
                 if !s_rect.intersects(cull_rect) {
                     continue;
                 }
-                for batch in &c.batches {
-                    if batch.indices.is_empty() || batch.vertices.is_empty() {
-                        continue;
-                    }
-                    let [r, g, b, a] = batch.color;
-                    let col = egui::Color32::from_rgba_unmultiplied(r, g, b, a);
-                    let base = mesh.vertices.len() as u32;
-                    mesh.vertices.extend(batch.vertices.iter().map(|&[x, y]| {
-                        egui::epaint::Vertex {
-                            pos: egui::pos2(origin.x + x * view.zoom, origin.y + y * view.zoom),
-                            uv: egui::epaint::WHITE_UV,
-                            color: col,
-                        }
-                    }));
-                    mesh.indices.extend(batch.indices.iter().map(|i| i + base));
-                }
+                append_batches_to_mesh(&c.batches, origin, view.zoom, &mut mesh);
             }
             if !mesh.is_empty() {
                 result.push((page_idx, std::sync::Arc::new(mesh)));
@@ -1023,7 +1013,7 @@ impl eframe::App for InkNoteApp {
                 self.add_page_after_current();
             }
             if actions.delete_page_clicked && self.doc.page_count() > 1 {
-                self.confirm_delete_page = true;
+                self.confirm_delete_page = Some(self.doc.active_page_index());
             }
             if key_pgup && self.doc.active_page_index() > 0 {
                 let target = self.doc.active_page_index() - 1;
@@ -1079,10 +1069,10 @@ impl eframe::App for InkNoteApp {
             }
         }
 
-        // Hộp xác nhận xoá trang hiện tại (xoá xong vẫn Undo được)
-        if self.confirm_delete_page {
-            let page_num = self.doc.active_page_index() + 1;
-            let can_delete = self.doc.page_count() > 1;
+        // Hộp xác nhận xoá trang được chọn (xoá xong vẫn Undo được)
+        if let Some(target_idx) = self.confirm_delete_page {
+            let page_num = target_idx + 1;
+            let can_delete = self.doc.page_count() > 1 && target_idx < self.doc.page_count();
             let mut do_delete = false;
             let mut cancel = false;
             #[allow(deprecated)]
@@ -1107,10 +1097,10 @@ impl eframe::App for InkNoteApp {
                 });
             });
             if do_delete && can_delete {
-                self.delete_current_page();
+                self.delete_page_at(target_idx);
             }
             if do_delete || cancel || !can_delete || modal.should_close() {
-                self.confirm_delete_page = false;
+                self.confirm_delete_page = None;
             }
         }
 
@@ -1226,7 +1216,7 @@ impl eframe::App for InkNoteApp {
             });
             let blocked = egui::Popup::is_any_open(&ctx)
                 || self.confirm_clear
-                || self.confirm_delete_page
+                || self.confirm_delete_page.is_some()
                 || self.confirm_unsaved.is_some();
             let mut scrolled_or_panned = false;
             let mut dy_total = 0.0_f32;
@@ -1286,6 +1276,45 @@ impl eframe::App for InkNoteApp {
         // F9: thêm 2000 nét mẫu để test hiệu năng
         if self.active.is_none() && ctx.input(|i| i.key_pressed(egui::Key::F9)) {
             self.add_sample_strokes(2000);
+        }
+
+        // Thanh thumbnail danh sách trang bên trái (bật/tắt bằng nút Danh sách trang)
+        if self.toolbar_state.show_thumbnails {
+            let panel_frame = egui::Frame::new()
+                .fill(self.theme.thumb_panel_bg)
+                .stroke(egui::Stroke::new(1.0, self.theme.thumb_panel_stroke))
+                .inner_margin(egui::Margin::symmetric(8, 6));
+            let mut thumb_action = ThumbnailAction::None;
+            egui::Panel::left("page_thumbnails_sidebar")
+                .resizable(false)
+                .exact_size(self.theme.thumb_panel_width)
+                .frame(panel_frame)
+                .show(ui, |ui| {
+                    thumb_action = show_thumbnail_panel(
+                        ui,
+                        &self.theme,
+                        &self.doc,
+                        &self.batch_cache,
+                        &mut self.thumb_cache,
+                    );
+                });
+            if self.active.is_none() {
+                match thumb_action {
+                    ThumbnailAction::None => {}
+                    ThumbnailAction::SelectPage(idx) => {
+                        self.doc.set_active_page_index(idx);
+                        self.scroll_to_page(idx);
+                    }
+                    ThumbnailAction::AddPage => {
+                        self.add_page_after_current();
+                    }
+                    ThumbnailAction::DeletePage(idx) => {
+                        if self.doc.page_count() > 1 {
+                            self.confirm_delete_page = Some(idx);
+                        }
+                    }
+                }
+            }
         }
 
         // Khu vực 3: Main Canvas (trang giấy chấm Dotted Paper)
@@ -1575,9 +1604,10 @@ mod tests {
             allow_close: false,
             autosave: AutoSaveState::new(0),
             batch_cache: HashMap::new(),
+            thumb_cache: ThumbCache::default(),
             view: View::default(),
             confirm_clear: false,
-            confirm_delete_page: false,
+            confirm_delete_page: None,
             paint_ms: 0.0,
             fps: 0.0,
             last_frame: Instant::now(),
@@ -1974,10 +2004,69 @@ mod tests {
         assert_eq!(app.doc.page_strokes(3).len(), 3);
 
         // Xoá trang mới chèn -> về lại 5 trang và Undo khôi phục lại 6 trang
-        app.delete_current_page();
+        let active_idx = app.doc.active_page_index();
+        app.delete_page_at(active_idx);
         assert_eq!(app.doc.page_count(), 5);
         assert!(app.doc.undo());
         assert_eq!(app.doc.page_count(), 6);
+    }
+
+    #[test]
+    fn test_thumbnail_panel_render_and_page_selection() {
+        let ctx = egui::Context::default();
+        let mut app = new_test_app(&ctx);
+        app.toolbar_state.show_thumbnails = true;
+
+        // Tạo 10 trang, mỗi trang có số nét khác nhau (trang i có i+1 nét)
+        for idx in 0..10 {
+            if idx > 0 {
+                app.add_page_after_current();
+            }
+            app.add_sample_strokes(idx + 1);
+        }
+        assert_eq!(app.doc.page_count(), 10);
+
+        // Chạy UI pass với sidebar thumbnail đang mở -> build cache thumbnail không lỗi
+        let mut out = ctx.run_ui(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 800.0))),
+                ..Default::default()
+            },
+            |ui| {
+                let panel_frame = egui::Frame::new().fill(app.theme.thumb_panel_bg);
+                egui::Panel::left("test_thumb_panel")
+                    .resizable(false)
+                    .exact_size(app.theme.thumb_panel_width)
+                    .frame(panel_frame)
+                    .show(ui, |ui| {
+                        let act = show_thumbnail_panel(
+                            ui,
+                            &app.theme,
+                            &app.doc,
+                            &app.batch_cache,
+                            &mut app.thumb_cache,
+                        );
+                        assert_eq!(act, ThumbnailAction::None);
+                    });
+                egui::CentralPanel::default().show(ui, |ui| {
+                    app.paper_rect = Some(ui.max_rect());
+                });
+            },
+        );
+        out.textures_delta.clear();
+
+        // Nhảy tới trang thứ 4 (index 3) như thao tác bấm thumbnail
+        let paper = app.paper_rect.unwrap();
+        app.doc.set_active_page_index(3);
+        app.scroll_to_page(3);
+        app.update_active_page_from_viewport(paper);
+        assert_eq!(app.doc.active_page_index(), 3);
+
+        // Xoá trang index 7 và kiểm tra số trang giảm còn 9 + Undo khôi phục về 10
+        app.delete_page_at(7);
+        assert_eq!(app.doc.page_count(), 9);
+        assert!(app.doc.undo());
+        assert_eq!(app.doc.page_count(), 10);
     }
 
     #[test]
