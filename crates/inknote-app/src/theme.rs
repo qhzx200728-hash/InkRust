@@ -63,7 +63,25 @@ pub struct Theme {
     pub thumb_label_fg: Color32,
     pub thumb_label_active_fg: Color32,
 
-    // 6. Cỡ chữ
+    // 6. Màn hình Library (Bước 7.1 - P3)
+    pub lib_sidebar_bg: Color32,
+    pub lib_sidebar_stroke: Color32,
+    pub lib_sidebar_selected_bg: Color32,
+    pub lib_sidebar_hover_bg: Color32,
+    pub lib_sidebar_active_fg: Color32,
+    pub lib_sidebar_fg: Color32,
+    pub lib_main_bg: Color32,
+    pub lib_title_fg: Color32,
+    pub lib_muted_fg: Color32,
+    pub lib_search_bg: Color32,
+    pub lib_search_stroke: Color32,
+    pub lib_folder_fill: Color32,
+    pub lib_folder_tab: Color32,
+    pub lib_folder_back: Color32,
+    pub lib_card_hover_bg: Color32,
+    pub lib_card_rounding: u8,
+
+    // 7. Cỡ chữ
     pub font_size_title: f32,
     pub font_size_body: f32,
     pub font_size_small: f32,
@@ -125,6 +143,24 @@ impl Default for Theme {
             thumb_card_border: Color32::from_rgb(204, 210, 220),
             thumb_label_fg: Color32::from_rgb(60, 66, 78),
             thumb_label_active_fg: Color32::from_rgb(24, 90, 188),
+
+            // Màn hình Library (Sidebar xám nhạt, mục chọn xanh nhạt bo góc, nền nội dung trắng)
+            lib_sidebar_bg: Color32::from_rgb(245, 246, 249),
+            lib_sidebar_stroke: Color32::from_rgb(228, 232, 238),
+            lib_sidebar_selected_bg: Color32::from_rgba_unmultiplied(24, 90, 188, 28),
+            lib_sidebar_hover_bg: Color32::from_rgba_unmultiplied(15, 23, 42, 10),
+            lib_sidebar_active_fg: Color32::from_rgb(24, 90, 188),
+            lib_sidebar_fg: Color32::from_rgb(56, 62, 74),
+            lib_main_bg: Color32::WHITE,
+            lib_title_fg: Color32::from_rgb(20, 24, 33),
+            lib_muted_fg: Color32::from_rgb(112, 120, 134),
+            lib_search_bg: Color32::from_rgb(241, 243, 247),
+            lib_search_stroke: Color32::from_rgb(218, 223, 232),
+            lib_folder_fill: Color32::from_rgb(96, 165, 250),
+            lib_folder_tab: Color32::from_rgb(59, 130, 246),
+            lib_folder_back: Color32::from_rgb(37, 99, 235),
+            lib_card_hover_bg: Color32::from_rgba_unmultiplied(24, 90, 188, 12),
+            lib_card_rounding: 10,
 
             // Cỡ chữ
             font_size_title: 14.5,

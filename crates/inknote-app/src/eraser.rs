@@ -7,12 +7,12 @@ use std::collections::{HashMap, HashSet};
 
 use eframe::egui;
 use inknote_core::{Command, Document, Stroke};
-use inknote_pen::{style::Composer, PenPath};
+use inknote_pen::{PenPath, style::Composer};
 use inknote_render::CairoRenderContext;
 use parry2d_f64::bounding_volume::Aabb;
 use parry2d_f64::math::Vector2;
 
-use crate::{toolbar::EraserMode, CachedStroke};
+use crate::{CachedStroke, toolbar::EraserMode};
 
 /// Trạng thái một lượt kéo tẩy đang diễn ra trên một trang.
 pub struct ActiveEraser {

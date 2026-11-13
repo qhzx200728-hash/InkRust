@@ -15,6 +15,9 @@ use inknote_render::DrawBatch;
 use crate::{
     CachedStroke,
     image_box::{ImageTextureCache, paint_image_object},
+    shapes::paint_shape,
+    svg_cache::SvgTextureCache,
+    text_box::paint_text_object,
     theme::Theme,
 };
 
@@ -406,6 +409,85 @@ fn draw_check_circle(
     }
 }
 
+/// Vẽ toàn bộ nội dung xem trước của 1 trang vào khung `card_rect` (dùng chung cho Pages sidebar và Library Grid).
+#[allow(clippy::too_many_arguments)]
+pub fn paint_page_thumbnail_preview(
+    ctx: &egui::Context,
+    painter: &egui::Painter,
+    card_rect: Rect,
+    settings: &PaperSettings,
+    page: &DocumentPage,
+    scale: f32,
+    theme: &Theme,
+    stroke_mesh: Option<&egui::epaint::Mesh>,
+    image_cache: &mut ImageTextureCache,
+    svg_cache: Option<(&mut SvgTextureCache, Option<u64>)>,
+) {
+    draw_thumbnail_paper_bg(painter, card_rect, settings, scale, theme);
+
+    let thumb_painter = painter.with_clip_rect(card_rect);
+
+    if !page.images.is_empty() {
+        for img in &page.images {
+            paint_image_object(
+                ctx,
+                &thumb_painter,
+                image_cache,
+                img,
+                card_rect.min,
+                scale,
+                None,
+            );
+        }
+    }
+
+    if let Some(cached_mesh) = stroke_mesh {
+        let mut translated = cached_mesh.clone();
+        let offset = card_rect.min.to_vec2();
+        for v in &mut translated.vertices {
+            v.pos += offset;
+        }
+        thumb_painter.add(egui::Shape::mesh(translated));
+    }
+
+    for sh in &page.shapes {
+        paint_shape(&thumb_painter, sh, card_rect.min, scale, None);
+    }
+
+    for txt in &page.text_objects {
+        paint_text_object(&thumb_painter, txt, card_rect.min, scale, None);
+    }
+
+    if let Some((svg_cache, note_hash)) = svg_cache {
+        for obj in &page.latex_objects {
+            let Some(svg) = obj.svg_cache.as_deref() else {
+                continue;
+            };
+            let tex_key = match note_hash {
+                Some(seed) => seed ^ obj.id.wrapping_mul(0x9E37_79B9_7F4A_7C15),
+                None => obj.id,
+            };
+            let top_left =
+                card_rect.min + vec2((obj.pos[0] as f32) * scale, (obj.pos[1] as f32) * scale);
+            let display_size = vec2(
+                ((obj.size[0] as f32) * scale).max(2.0),
+                ((obj.size[1] as f32) * scale).max(2.0),
+            );
+            if let Ok((tex_id, _)) =
+                svg_cache.get_or_render_for_display_size(ctx, tex_key, svg, display_size)
+            {
+                let rect = Rect::from_min_size(top_left, display_size);
+                thumb_painter.image(
+                    tex_id,
+                    rect,
+                    Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+            }
+        }
+    }
+}
+
 /// Vẽ thanh danh sách thumbnail các trang ở cạnh trái workspace (2 cột kiểu GoodNotes).
 pub fn show_thumbnail_panel(
     ui: &mut Ui,
@@ -414,6 +496,7 @@ pub fn show_thumbnail_panel(
     batch_cache: &HashMap<u64, CachedStroke>,
     thumb_cache: &mut ThumbCache,
     image_cache: &mut ImageTextureCache,
+    svg_cache: &mut SvgTextureCache,
 ) -> ThumbnailAction {
     let mut action = ThumbnailAction::None;
     let pages = doc.pages();
@@ -581,41 +664,20 @@ pub fn show_thumbnail_panel(
                                 CornerRadius::same(6),
                                 Color32::from_rgba_unmultiplied(15, 23, 42, 18),
                             );
-                            draw_thumbnail_paper_bg(
+                            let cached_mesh =
+                                build_or_get_thumb_mesh(page, scale, batch_cache, thumb_cache);
+                            paint_page_thumbnail_preview(
+                                ui.ctx(),
                                 ui.painter(),
                                 card_rect,
                                 settings,
+                                page,
                                 scale,
                                 theme,
+                                cached_mesh.as_deref(),
+                                image_cache,
+                                Some((svg_cache, None)),
                             );
-
-                            if !page.images.is_empty() {
-                                let thumb_painter = ui.painter().with_clip_rect(card_rect);
-                                for img in &page.images {
-                                    paint_image_object(
-                                        ui.ctx(),
-                                        &thumb_painter,
-                                        image_cache,
-                                        img,
-                                        card_rect.min,
-                                        scale,
-                                        None,
-                                    );
-                                }
-                            }
-
-                            if let Some(cached_mesh) =
-                                build_or_get_thumb_mesh(page, scale, batch_cache, thumb_cache)
-                            {
-                                let mut translated = (*cached_mesh).clone();
-                                let offset = card_rect.min.to_vec2();
-                                for v in &mut translated.vertices {
-                                    v.pos += offset;
-                                }
-                                ui.painter()
-                                    .with_clip_rect(card_rect)
-                                    .add(egui::Shape::mesh(translated));
-                            }
 
                             if is_drag_source {
                                 ui.painter().rect_filled(

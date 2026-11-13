@@ -52,6 +52,7 @@ impl ActiveTool {
 }
 
 pub struct ToolbarActions {
+    pub home_clicked: bool,
     pub undo_clicked: bool,
     pub redo_clicked: bool,
     pub clear_clicked: bool,
@@ -567,6 +568,7 @@ pub fn show_toolbars(
     wacom_status: &str,
 ) -> ToolbarActions {
     let mut actions = ToolbarActions {
+        home_clicked: false,
         undo_clicked: false,
         redo_clicked: false,
         clear_clicked: false,
@@ -601,16 +603,10 @@ pub fn show_toolbars(
                     .layout(Layout::left_to_right(Align::Center)),
             );
             left_ui.spacing_mut().item_spacing.x = 4.0;
-            if nav_icon_button(
-                &mut left_ui,
-                theme,
-                ToolIcon::Home,
-                false,
-                "Library (Step 7 - P3)",
-            )
-            .clicked()
+            if nav_icon_button(&mut left_ui, theme, ToolIcon::Home, false, "Library (Home)")
+                .clicked()
             {
-                // Sẽ chuyển về màn hình Library ở Bước 7.1
+                actions.home_clicked = true;
             }
             if nav_icon_button(
                 &mut left_ui,

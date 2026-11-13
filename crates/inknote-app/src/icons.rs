@@ -30,6 +30,13 @@ pub enum ToolIcon {
     Undo,
     Redo,
     Trash,
+    // Biểu tượng cho màn hình Library (Bước 7.1)
+    Documents,
+    BackArrow,
+    Search,
+    Settings,
+    FolderPlus,
+    NotePlus,
 }
 
 pub fn draw_icon(painter: &Painter, rect: Rect, icon: ToolIcon, color: Color32) {
@@ -306,17 +313,180 @@ pub fn draw_icon(painter: &Painter, rect: Rect, icon: ToolIcon, color: Color32) 
                 [pos2(c.x - s * 0.75, top_y), pos2(c.x + s * 0.75, top_y)],
                 stroke,
             );
+            painter.line_segment(
+                [
+                    pos2(c.x - s * 0.3, top_y - s * 0.28),
+                    pos2(c.x + s * 0.3, top_y - s * 0.28),
+                ],
+                stroke,
+            );
             let body = Rect::from_min_max(
                 pos2(c.x - s * 0.55, top_y),
                 pos2(c.x + s * 0.55, c.y + s * 0.82),
             );
             painter.rect_stroke(body, 1.5, stroke, egui::StrokeKind::Middle);
         }
+        ToolIcon::Documents => {
+            // Biểu tượng thư mục tài liệu (Sidebar Library)
+            let pts = [
+                pos2(c.x - s * 0.85, c.y - s * 0.58),
+                pos2(c.x - s * 0.22, c.y - s * 0.58),
+                pos2(c.x - s * 0.02, c.y - s * 0.32),
+                pos2(c.x + s * 0.85, c.y - s * 0.32),
+                pos2(c.x + s * 0.85, c.y + s * 0.65),
+                pos2(c.x - s * 0.85, c.y + s * 0.65),
+            ];
+            painter.add(egui::Shape::closed_line(pts.to_vec(), stroke));
+        }
+        ToolIcon::BackArrow => {
+            // Mũi tên quay lại (←)
+            let left = pos2(c.x - s * 0.72, c.y);
+            let right = pos2(c.x + s * 0.72, c.y);
+            painter.line_segment([left, right], stroke);
+            painter.line_segment([left, pos2(left.x + s * 0.52, c.y - s * 0.52)], stroke);
+            painter.line_segment([left, pos2(left.x + s * 0.52, c.y + s * 0.52)], stroke);
+        }
+        ToolIcon::Search => {
+            // Kính lúp tìm kiếm
+            let lens_c = pos2(c.x - s * 0.14, c.y - s * 0.14);
+            let r = s * 0.58;
+            painter.circle_stroke(lens_c, r, stroke);
+            let handle_start = lens_c + vec2(r * 0.72, r * 0.72);
+            let handle_end = pos2(c.x + s * 0.82, c.y + s * 0.82);
+            painter.line_segment([handle_start, handle_end], stroke);
+        }
+        ToolIcon::Settings => {
+            // Bánh răng cài đặt (Lucide-style)
+            painter.circle_stroke(c, s * 0.34, stroke);
+            let r_in = s * 0.66;
+            let r_out = s * 0.92;
+            for i in 0..8 {
+                let ang = (i as f32) * std::f32::consts::FRAC_PI_4;
+                let dir = vec2(ang.cos(), ang.sin());
+                painter.line_segment([c + dir * r_in, c + dir * r_out], stroke);
+            }
+            painter.circle_stroke(c, s * 0.64, stroke);
+        }
+        ToolIcon::FolderPlus => {
+            // Biểu tượng thư mục kèm dấu + nhỏ
+            let pts = [
+                pos2(c.x - s * 0.85, c.y - s * 0.58),
+                pos2(c.x - s * 0.22, c.y - s * 0.58),
+                pos2(c.x - s * 0.02, c.y - s * 0.32),
+                pos2(c.x + s * 0.85, c.y - s * 0.32),
+                pos2(c.x + s * 0.85, c.y + s * 0.65),
+                pos2(c.x - s * 0.85, c.y + s * 0.65),
+            ];
+            painter.add(egui::Shape::closed_line(pts.to_vec(), stroke));
+            let plus_c = pos2(c.x, c.y + s * 0.16);
+            let arm = s * 0.28;
+            painter.line_segment(
+                [
+                    pos2(plus_c.x - arm, plus_c.y),
+                    pos2(plus_c.x + arm, plus_c.y),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    pos2(plus_c.x, plus_c.y - arm),
+                    pos2(plus_c.x, plus_c.y + arm),
+                ],
+                stroke,
+            );
+        }
+        ToolIcon::NotePlus => {
+            // Biểu tượng trang giấy kèm dấu + nhỏ
+            let page_r = Rect::from_min_max(
+                pos2(c.x - s * 0.66, c.y - s * 0.82),
+                pos2(c.x + s * 0.66, c.y + s * 0.82),
+            );
+            painter.rect_stroke(page_r, 2.0, stroke, egui::StrokeKind::Middle);
+            let arm = s * 0.3;
+            painter.line_segment([pos2(c.x - arm, c.y), pos2(c.x + arm, c.y)], stroke);
+            painter.line_segment([pos2(c.x, c.y - arm), pos2(c.x, c.y + arm)], stroke);
+        }
     }
 }
 
-use inknote_core::{CanvasMode, PaperPattern, PaperSettings};
+/// Vẽ logo tự thiết kế cho Sidebar màn hình Library (cuốn sổ + nét mực xanh).
+pub fn draw_library_brand_logo(painter: &Painter, rect: Rect, accent: Color32) {
+    let badge = Rect::from_min_size(rect.min, vec2(rect.height(), rect.height()));
+    painter.rect_filled(badge, egui::CornerRadius::same(7), accent);
+    let c = badge.center();
+    let r = badge.width() * 0.28;
+    let pen_stroke = Stroke::new(1.8, Color32::WHITE);
+    // Ngòi bút & nét lượn chữ Ink
+    painter.line_segment(
+        [
+            pos2(c.x - r * 0.9, c.y + r * 0.85),
+            pos2(c.x + r * 0.75, c.y - r * 0.85),
+        ],
+        pen_stroke,
+    );
+    painter.circle_filled(pos2(c.x - r * 0.9, c.y + r * 0.85), 1.6, Color32::WHITE);
+    let wave = [
+        pos2(c.x - r * 0.4, c.y + r * 0.9),
+        pos2(c.x + r * 0.15, c.y + r * 0.55),
+        pos2(c.x + r * 0.85, c.y + r * 0.9),
+    ];
+    painter.line_segment([wave[0], wave[1]], pen_stroke);
+    painter.line_segment([wave[1], wave[2]], pen_stroke);
+}
+
+/// Vẽ icon thư mục vector cỡ lớn cho thẻ Grid View trong Library (không sao chép tài sản bên ngoài).
+pub fn draw_library_folder_art(painter: &Painter, slot_rect: Rect, theme: &Theme) {
+    let fw = (slot_rect.width() * 0.82).min(126.0);
+    let fh = fw * 0.74;
+    let folder = Rect::from_center_size(slot_rect.center(), vec2(fw, fh));
+
+    // Bóng đổ nhẹ bên dưới thư mục
+    painter.rect_filled(
+        folder.translate(vec2(0.0, 3.0)),
+        egui::CornerRadius::same(10),
+        Color32::from_rgba_unmultiplied(15, 23, 42, 22),
+    );
+
+    // Gáy trên & tai thư mục (folder tab)
+    let tab_w = fw * 0.42;
+    let tab_h = fh * 0.20;
+    let tab_rect = Rect::from_min_size(folder.min, vec2(tab_w, tab_h + 6.0));
+    painter.rect_filled(tab_rect, egui::CornerRadius::same(6), theme.lib_folder_tab);
+
+    let back_rect =
+        Rect::from_min_max(pos2(folder.left(), folder.top() + tab_h * 0.42), folder.max);
+    painter.rect_filled(
+        back_rect,
+        egui::CornerRadius::same(8),
+        theme.lib_folder_back,
+    );
+
+    // Lớp tờ giấy trắng nhú nhẹ bên trong tạo chiều sâu
+    let paper_peek = Rect::from_min_max(
+        pos2(folder.left() + fw * 0.08, folder.top() + fh * 0.16),
+        pos2(folder.right() - fw * 0.08, folder.top() + fh * 0.50),
+    );
+    painter.rect_filled(paper_peek, egui::CornerRadius::same(4), Color32::WHITE);
+
+    // Mặt trước thư mục bo góc mềm
+    let front_rect = Rect::from_min_max(pos2(folder.left(), folder.top() + fh * 0.24), folder.max);
+    painter.rect_filled(
+        front_rect,
+        egui::CornerRadius::same(9),
+        theme.lib_folder_fill,
+    );
+    // Đường highlight mảnh ở mép trên mặt trước
+    painter.line_segment(
+        [
+            pos2(front_rect.left() + 8.0, front_rect.top() + 1.5),
+            pos2(front_rect.right() - 8.0, front_rect.top() + 1.5),
+        ],
+        Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 110)),
+    );
+}
+
 use crate::theme::Theme;
+use inknote_core::{CanvasMode, PaperPattern, PaperSettings};
 
 /// Trả về khung chữ nhật của tờ giấy theo toạ độ màn hình (dành cho chế độ Paper).
 pub fn paper_sheet_rect(origin: Pos2, settings: &PaperSettings, zoom: f32) -> Rect {
@@ -382,7 +552,11 @@ pub fn draw_paper(
                 while y <= sheet_rect.bottom() {
                     let mut x = origin.x + first_x * step;
                     while x <= sheet_rect.right() {
-                        sheet_painter.circle_filled(Pos2::new(x, y), theme.paper_dot_radius, theme.paper_dot_color);
+                        sheet_painter.circle_filled(
+                            Pos2::new(x, y),
+                            theme.paper_dot_radius,
+                            theme.paper_dot_color,
+                        );
                         x += step;
                     }
                     y += step;
@@ -399,7 +573,10 @@ pub fn draw_paper(
                 let mut x = origin.x + first_x * step;
                 while x <= sheet_rect.right() {
                     sheet_painter.line_segment(
-                        [Pos2::new(x, sheet_rect.top()), Pos2::new(x, sheet_rect.bottom())],
+                        [
+                            Pos2::new(x, sheet_rect.top()),
+                            Pos2::new(x, sheet_rect.bottom()),
+                        ],
                         grid_stroke,
                     );
                     x += step;
@@ -409,7 +586,10 @@ pub fn draw_paper(
                 let mut y = origin.y + first_y * step;
                 while y <= sheet_rect.bottom() {
                     sheet_painter.line_segment(
-                        [Pos2::new(sheet_rect.left(), y), Pos2::new(sheet_rect.right(), y)],
+                        [
+                            Pos2::new(sheet_rect.left(), y),
+                            Pos2::new(sheet_rect.right(), y),
+                        ],
                         grid_stroke,
                     );
                     y += step;
@@ -426,7 +606,10 @@ pub fn draw_paper(
                 let mut y = origin.y + first_y * step;
                 while y <= sheet_rect.bottom() {
                     sheet_painter.line_segment(
-                        [Pos2::new(sheet_rect.left(), y), Pos2::new(sheet_rect.right(), y)],
+                        [
+                            Pos2::new(sheet_rect.left(), y),
+                            Pos2::new(sheet_rect.right(), y),
+                        ],
                         line_stroke,
                     );
                     y += step;
@@ -442,7 +625,10 @@ pub fn draw_paper(
         let left_x = origin.x + settings.left_margin * zoom;
         if left_x >= sheet_rect.left() && left_x <= sheet_rect.right() {
             sheet_painter.line_segment(
-                [Pos2::new(left_x, sheet_rect.top()), Pos2::new(left_x, sheet_rect.bottom())],
+                [
+                    Pos2::new(left_x, sheet_rect.top()),
+                    Pos2::new(left_x, sheet_rect.bottom()),
+                ],
                 margin_stroke,
             );
         }
@@ -450,7 +636,10 @@ pub fn draw_paper(
         let right_x = origin.x + (settings.page_width - settings.right_margin) * zoom;
         if right_x >= sheet_rect.left() && right_x <= sheet_rect.right() {
             sheet_painter.line_segment(
-                [Pos2::new(right_x, sheet_rect.top()), Pos2::new(right_x, sheet_rect.bottom())],
+                [
+                    Pos2::new(right_x, sheet_rect.top()),
+                    Pos2::new(right_x, sheet_rect.bottom()),
+                ],
                 margin_stroke,
             );
         }

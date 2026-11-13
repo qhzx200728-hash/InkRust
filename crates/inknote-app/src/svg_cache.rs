@@ -4,8 +4,8 @@ use std::collections::HashMap;
 
 use eframe::egui::{self, ColorImage, TextureHandle, TextureOptions};
 use inknote_latex::{
-    compute_clamped_svg_scale, render_svg_for_display_size, render_svg_to_rgba, LatexError,
-    RenderedSvg,
+    LatexError, RenderedSvg, compute_clamped_svg_scale, render_svg_for_display_size,
+    render_svg_to_rgba,
 };
 
 pub const LATEX_DISPLAY_SCALE: f32 = 1.6;

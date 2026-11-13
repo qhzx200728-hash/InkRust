@@ -9,6 +9,7 @@ mod icons;
 mod image_box;
 mod lasso;
 mod latex_dialog;
+mod library_view;
 mod shapes;
 mod svg_cache;
 mod text_box;
@@ -24,7 +25,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use inknote_core::{
     CanvasMode, Command, Document, DocumentFile, ImageObject, LatexObject, PaperSettings, Stroke,
-    TextObject,
+    TextObject, library::LibraryStore,
 };
 use inknote_pen::{
     Constraints, PenEvent, PenPath, Style,
@@ -53,6 +54,7 @@ use crate::{
         refresh_selection_bbox, select_in_freehand, select_in_rect, transformed_bbox,
     },
     latex_dialog::{LatexDialogAction, LatexDialogState},
+    library_view::{LibraryAction, LibraryState},
     shapes::{ActiveShapeDrag, paint_shape},
     svg_cache::{LATEX_DISPLAY_SCALE, SvgTextureCache},
     text_box::{
@@ -186,6 +188,12 @@ fn save_default_paper_settings(settings: &PaperSettings) {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AppScreen {
+    Editor,
+    Library,
+}
+
 #[derive(Clone, Copy, Debug)]
 enum LatexTarget {
     New { page_index: usize, pos: [f64; 2] },
@@ -193,6 +201,8 @@ enum LatexTarget {
 }
 
 struct InkNoteApp {
+    screen: AppScreen,
+    library: LibraryState,
     theme: Theme,
     toolbar_state: ToolbarState,
     brush_config: BrushConfig,
@@ -276,6 +286,8 @@ impl InkNoteApp {
         }
 
         let mut app = Self {
+            screen: AppScreen::Editor,
+            library: LibraryState::new(LibraryStore::open_default()),
             theme: Theme::default(),
             toolbar_state: ToolbarState::default(),
             brush_config: BrushConfig::default(),
@@ -761,6 +773,7 @@ impl InkNoteApp {
             } else {
                 self.doc.mark_saved();
                 self.autosave.note_manual_save(self.doc.revision());
+                self.library.invalidate_note_path(&path);
                 true
             }
         } else {
@@ -784,13 +797,33 @@ impl InkNoteApp {
                 false
             } else {
                 self.doc.mark_saved();
-                self.current_path = Some(path);
+                self.current_path = Some(path.clone());
                 self.autosave.note_manual_save(self.doc.revision());
+                self.library.invalidate_note_path(&path);
                 true
             }
         } else {
             false
         }
+    }
+
+    fn reset_editor_transient_state(&mut self) {
+        self.thumb_cache.clear();
+        self.svg_cache.clear();
+        self.image_cache.clear();
+        self.pending_latex_target = None;
+        self.latex_dialog.open = false;
+        self.static_cache = None;
+        self.active = None;
+        self.active_eraser = None;
+        self.active_shape = None;
+        self.active_text_edit = None;
+        self.active_text_drag = None;
+        self.lasso_state.clear();
+        self.drawing_page_index = None;
+        self.touch_active = false;
+        self.pull_overscroll = 0.0;
+        self.view = View::default();
     }
 
     /// Nạp dữ liệu từ file .inknote trên đĩa.
@@ -800,19 +833,7 @@ impl InkNoteApp {
                 self.doc = Document::from_file(file);
                 self.current_path = Some(path);
                 self.autosave.reset(self.doc.revision());
-                self.thumb_cache.clear();
-                self.svg_cache.clear();
-                self.image_cache.clear();
-                self.pending_latex_target = None;
-                self.static_cache = None;
-                self.active = None;
-                self.active_eraser = None;
-                self.active_shape = None;
-                self.active_text_edit = None;
-                self.active_text_drag = None;
-                self.lasso_state.clear();
-                self.drawing_page_index = None;
-                self.pull_overscroll = 0.0;
+                self.reset_editor_transient_state();
                 self.rebuild_batch_cache();
             }
             Err(e) => {
@@ -849,20 +870,69 @@ impl InkNoteApp {
         self.current_path = None;
         self.autosave.reset(self.doc.revision());
         self.batch_cache.clear();
-        self.thumb_cache.clear();
-        self.svg_cache.clear();
-        self.image_cache.clear();
-        self.pending_latex_target = None;
-        self.static_cache = None;
-        self.active = None;
-        self.active_eraser = None;
-        self.active_shape = None;
-        self.active_text_edit = None;
-        self.active_text_drag = None;
-        self.lasso_state.clear();
-        self.drawing_page_index = None;
-        self.pull_overscroll = 0.0;
-        self.view.pan = egui::Vec2::ZERO;
+        self.reset_editor_transient_state();
+    }
+
+    /// Quay về màn hình Library (lưu thay đổi đang mở để thumbnail trang đầu luôn cập nhật ngay).
+    fn return_to_library(&mut self, ctx: &egui::Context) {
+        self.commit_active_text_edit(ctx);
+        self.finish_active_stroke();
+
+        if let Some(path) = self.current_path.clone() {
+            if self.doc.is_dirty() {
+                if let Err(e) = self.doc.to_file().save_to_path(&path) {
+                    eprintln!("Lỗi khi lưu ghi chú trước khi về Library: {e}");
+                } else {
+                    self.doc.mark_saved();
+                    self.autosave.note_manual_save(self.doc.revision());
+                }
+            }
+            self.library.invalidate_note_path(&path);
+        } else if self.doc.has_content() || self.autosave.has_draft() {
+            match self
+                .library
+                .store
+                .save_untitled_into_folder(&self.library.rel_folder, &mut self.doc)
+            {
+                Ok(saved_path) => {
+                    self.current_path = Some(saved_path.clone());
+                    self.autosave.note_manual_save(self.doc.revision());
+                    self.library.invalidate_note_path(&saved_path);
+                }
+                Err(e) => {
+                    self.library.last_error = Some(format!("Failed to save note to library: {e}"));
+                }
+            }
+        } else {
+            self.autosave.delete_draft();
+        }
+
+        self.reset_editor_transient_state();
+        self.library.request_refresh();
+        self.screen = AppScreen::Library;
+    }
+
+    /// Tạo ghi chú mới ngay trong thư mục Library hiện tại rồi mở thẳng vào Note Editor.
+    fn create_note_in_library(&mut self, rel_folder: &[String], title: &str) {
+        match self
+            .library
+            .store
+            .create_note_file(rel_folder, title, &self.default_paper_settings)
+        {
+            Ok((path, doc)) => {
+                self.doc = doc;
+                self.current_path = Some(path.clone());
+                self.autosave.reset(self.doc.revision());
+                self.autosave.delete_draft();
+                self.batch_cache.clear();
+                self.reset_editor_transient_state();
+                self.library.invalidate_note_path(&path);
+                self.screen = AppScreen::Editor;
+            }
+            Err(e) => {
+                self.library.last_error = Some(format!("Could not create note: {e}"));
+            }
+        }
     }
 
     fn eraser_radius_page(&self) -> f32 {
@@ -1207,10 +1277,8 @@ impl InkNoteApp {
         let margin = 12.0;
         let pos = if settings.mode == CanvasMode::Paper {
             [
-                (center[0] - size[0] * 0.5)
-                    .clamp(margin, (page_w - size[0] - margin).max(margin)),
-                (center[1] - size[1] * 0.5)
-                    .clamp(margin, (page_h - size[1] - margin).max(margin)),
+                (center[0] - size[0] * 0.5).clamp(margin, (page_w - size[0] - margin).max(margin)),
+                (center[1] - size[1] * 0.5).clamp(margin, (page_h - size[1] - margin).max(margin)),
             ]
         } else {
             [center[0] - size[0] * 0.5, center[1] - size[1] * 0.5]
@@ -1602,10 +1670,57 @@ impl eframe::App for InkNoteApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.run_app_ui(ui);
     }
+
+    fn on_exit(&mut self) {
+        self.autosave
+            .flush_on_exit(&mut self.doc, self.current_path.as_ref());
+    }
 }
 
 impl InkNoteApp {
+    fn run_library_ui(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(
+            "InkNote - Library".to_string(),
+        ));
+        let act = self.library.show(
+            &ctx,
+            ui,
+            &self.theme,
+            &mut self.default_paper_settings,
+            &mut self.render_cx,
+        );
+        match act {
+            LibraryAction::None => {}
+            LibraryAction::OpenNote(path) => {
+                self.load_document_from(path);
+                self.screen = AppScreen::Editor;
+            }
+            LibraryAction::CreateNote { title, rel_folder } => {
+                self.create_note_in_library(&rel_folder, &title);
+            }
+            LibraryAction::CreateFolder { name, rel_folder } => {
+                match self.library.store.create_folder(&rel_folder, &name) {
+                    Ok(_) => {
+                        self.library.last_error = None;
+                        self.library.request_refresh();
+                    }
+                    Err(e) => {
+                        self.library.last_error = Some(format!("Could not create folder: {e}"));
+                    }
+                }
+            }
+            LibraryAction::DefaultPaperChanged => {
+                save_default_paper_settings(&self.default_paper_settings);
+            }
+        }
+    }
+
     fn run_app_ui(&mut self, ui: &mut egui::Ui) {
+        if self.screen == AppScreen::Library {
+            self.run_library_ui(ui);
+            return;
+        }
         let ctx = ui.ctx().clone();
         let (events, frame_t, ctrl_held) = ctx.input(|i| {
             (
@@ -1782,9 +1897,7 @@ impl InkNoteApp {
         self.autosave.poll_and_maybe_save(
             &mut self.doc,
             self.current_path.as_ref(),
-            self.active.is_some()
-                || self.active_shape.is_some()
-                || self.active_text_edit.is_some(),
+            self.active.is_some() || self.active_shape.is_some() || self.active_text_edit.is_some(),
             autosave_now,
         );
 
@@ -1992,6 +2105,10 @@ impl InkNoteApp {
                 let target = self.doc.active_page_index() + 1;
                 self.doc.set_active_page_index(target);
                 self.scroll_to_page(target);
+            }
+            if actions.home_clicked {
+                self.return_to_library(&ctx);
+                return;
             }
             if actions.save_clicked || key_save {
                 self.commit_active_text_edit(&ctx);
@@ -2366,13 +2483,11 @@ impl InkNoteApp {
                         &self.batch_cache,
                         &mut self.thumb_cache,
                         &mut self.image_cache,
+                        &mut self.svg_cache,
                     );
                 });
             if self.active.is_none() {
-                if !matches!(
-                    thumb_action,
-                    ThumbnailAction::None | ThumbnailAction::Close
-                ) {
+                if !matches!(thumb_action, ThumbnailAction::None | ThumbnailAction::Close) {
                     self.commit_active_text_edit(&ctx);
                 }
                 match thumb_action {
@@ -3462,11 +3577,6 @@ impl InkNoteApp {
             ctx.request_repaint_after(delay);
         }
     }
-
-    fn on_exit(&mut self) {
-        self.autosave
-            .flush_on_exit(&mut self.doc, self.current_path.as_ref());
-    }
 }
 
 fn main() -> eframe::Result {
@@ -3498,7 +3608,16 @@ mod tests {
 
     fn new_test_app(ctx: &egui::Context) -> InkNoteApp {
         theme::setup_fonts(ctx);
+        let test_lib_dir = std::env::temp_dir().join(format!(
+            "inknote_test_lib_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
         InkNoteApp {
+            screen: AppScreen::Editor,
+            library: LibraryState::new(LibraryStore::new(test_lib_dir)),
             theme: Theme::default(),
             toolbar_state: ToolbarState::default(),
             brush_config: BrushConfig::default(),
@@ -3972,6 +4091,7 @@ mod tests {
                             &app.batch_cache,
                             &mut app.thumb_cache,
                             &mut app.image_cache,
+                            &mut app.svg_cache,
                         );
                         assert_eq!(act, ThumbnailAction::None);
                     });
@@ -4588,8 +4708,13 @@ mod tests {
             Pos2::new(100.0, 60.0),
         );
         assert!((rtrap_pts[0].x - rtrap_pts[3].x).abs() < 1e-3); // Cạnh trái thẳng đứng
-        assert!((itrap_pts[0].distance(itrap_pts[3]) - itrap_pts[1].distance(itrap_pts[2])).abs() < 1e-3); // 2 cạnh bên bằng nhau
-        assert!((trap_pts[0].distance(trap_pts[3]) - trap_pts[1].distance(trap_pts[2])).abs() > 5.0); // Hình thang thường lệch rõ
+        assert!(
+            (itrap_pts[0].distance(itrap_pts[3]) - itrap_pts[1].distance(itrap_pts[2])).abs()
+                < 1e-3
+        ); // 2 cạnh bên bằng nhau
+        assert!(
+            (trap_pts[0].distance(trap_pts[3]) - trap_pts[1].distance(trap_pts[2])).abs() > 5.0
+        ); // Hình thang thường lệch rõ
 
         // Lasso quét toàn bộ 18 hình -> chọn đủ 18 hình
         app.toolbar_state.active_tool = ActiveTool::Lasso;
@@ -4931,8 +5056,11 @@ mod tests {
         // Di chuyển ảnh trực tiếp bằng Image tool (1 bước Undo)
         let origin = app.page_origin(paper, 0);
         let img0 = app.doc.pages()[0].images[0].clone();
-        let center_screen =
-            origin + vec2((img0.pos[0] + img0.size[0] * 0.5) as f32, (img0.pos[1] + img0.size[1] * 0.5) as f32) * app.view.zoom;
+        let center_screen = origin
+            + vec2(
+                (img0.pos[0] + img0.size[0] * 0.5) as f32,
+                (img0.pos[1] + img0.size[1] * 0.5) as f32,
+            ) * app.view.zoom;
         app.image_down(&ctx, center_screen);
         app.lasso_move(center_screen + vec2(40.0, 25.0) * app.view.zoom);
         app.lasso_up();
@@ -4947,7 +5075,8 @@ mod tests {
 
         // Kéo góc BottomRight phóng to giữ nguyên tỷ lệ (proportional resize)
         let sel = app.lasso_state.selection.as_ref().unwrap().clone();
-        let handle = origin + lasso::corner_pos(sel.bbox, ResizeCorner::BottomRight).to_vec2() * app.view.zoom;
+        let handle = origin
+            + lasso::corner_pos(sel.bbox, ResizeCorner::BottomRight).to_vec2() * app.view.zoom;
         let prev_w = app.doc.pages()[0].images[0].size[0];
         app.image_down(&ctx, handle);
         app.lasso_move(
@@ -5365,8 +5494,16 @@ mod tests {
             parry2d_f64::math::Vector2::new(325.0, 214.0),
         );
         let p0 = &app.doc.pages()[0];
-        assert!(!p0.strokes.iter().any(|s| !s.path.hittest(&gap_aabb, 1.0).is_empty()));
-        assert!(!p0.strokes.iter().any(|s| !s.path.hittest(&stroke2_aabb, 2.0).is_empty()));
+        assert!(
+            !p0.strokes
+                .iter()
+                .any(|s| !s.path.hittest(&gap_aabb, 1.0).is_empty())
+        );
+        assert!(
+            !p0.strokes
+                .iter()
+                .any(|s| !s.path.hittest(&stroke2_aabb, 2.0).is_empty())
+        );
         assert_eq!(p0.latex_objects.len(), 1);
         assert_eq!(p0.shapes.len(), 1);
         assert_eq!(p0.text_objects.len(), 1);
@@ -5379,5 +5516,120 @@ mod tests {
         assert!(app.doc.undo());
         assert!(app.doc.undo());
         assert_eq!(app.doc.pages()[0].strokes.len(), 2);
+    }
+
+    #[test]
+    fn test_step_7_1_library_navigation_folders_thumbnails_and_search() {
+        use inknote_core::library::{LibraryItem, LibrarySection};
+
+        let ctx = egui::Context::default();
+        let mut app = new_test_app(&ctx);
+        let root_dir = app.library.store.root_dir().to_path_buf();
+        struct CleanDir(PathBuf);
+        impl Drop for CleanDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _guard = CleanDir(root_dir);
+
+        // 1. Tạo vài thư mục và ghi chú (kèm tên tiếng Việt đủ dấu) trong Library
+        let folder_math = app
+            .library
+            .store
+            .create_folder(&[], "Toán Giải Tích ắ ằ")
+            .unwrap();
+        assert_eq!(folder_math, "Toán Giải Tích ắ ằ");
+
+        let (sub_note_path, mut sub_doc) = app
+            .library
+            .store
+            .create_note_file(
+                &[folder_math.clone()],
+                "Tích phân bội",
+                &app.default_paper_settings,
+            )
+            .unwrap();
+        let sid = sub_doc.alloc_id();
+        sub_doc.execute(Command::AddStroke(Stroke {
+            id: sid,
+            path: PenPath::new(Element::new(Vector2::new(60.0, 90.0), 0.7)),
+            style: Style::default(),
+        }));
+        sub_doc.to_file().save_to_path(&sub_note_path).unwrap();
+
+        // 2. Tạo 1 ghi chú mới đang soạn trên Editor (có nét bút + tiêu đề riêng), rồi bấm Home về Library
+        app.doc.metadata_mut().title = "Vật lý lượng tử".to_string();
+        app.add_sample_strokes(2);
+        assert_eq!(app.screen, AppScreen::Editor);
+
+        // Mô phỏng hành động bấm Home -> tự lưu vào thư mục Library hiện hành và chuyển sang màn hình Library
+        app.return_to_library(&ctx);
+        assert_eq!(app.screen, AppScreen::Library);
+
+        // Render màn hình Library ở kích thước 1200x800 (Sidebar ~18%, Grid View ~5 cột)
+        let mut out = ctx.run_ui(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 800.0))),
+                ..Default::default()
+            },
+            |ui| app.run_app_ui(ui),
+        );
+        out.textures_delta.clear();
+
+        // Kiểm tra Sidebar (~18% = 216px) và Grid View (~5 cột ở 1200px)
+        assert!((app.library.sidebar_width_last - 216.0).abs() < 1.0);
+        assert_eq!(app.library.grid_cols_last, 5);
+
+        // Thư mục & ghi chú nằm chung một lưới và ghi chú có sẵn trang đầu để vẽ thumbnail
+        let items = app.library.items();
+        assert_eq!(items.len(), 2);
+        assert!(matches!(&items[0], LibraryItem::Folder(f) if f.name == "Toán Giải Tích ắ ằ"));
+        assert!(matches!(
+            &items[1],
+            LibraryItem::Note(n)
+                if n.title == "Vật lý lượng tử"
+                    && n.first_page.as_ref().is_some_and(|p| p.strokes.len() == 2)
+        ));
+
+        // 3. Tìm kiếm theo tên (lọc đệ quy tìm được cả ghi chú nằm trong thư mục con)
+        app.library.search_query = "tích phân".to_string();
+        let mut out2 = ctx.run_ui(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 800.0))),
+                ..Default::default()
+            },
+            |ui| app.run_app_ui(ui),
+        );
+        out2.textures_delta.clear();
+        assert_eq!(app.library.items().len(), 1);
+        assert!(
+            matches!(&app.library.items()[0], LibraryItem::Note(n) if n.title == "Tích phân bội")
+        );
+
+        // Bấm X (xoá từ khoá tìm kiếm) -> khôi phục đủ lưới thư mục & ghi chú ở Documents
+        app.library.search_query.clear();
+        app.library.request_refresh();
+        app.library.refresh_now();
+        assert_eq!(app.library.items().len(), 2);
+
+        // 4. Chuyển tab Trash trên Sidebar và quay lại Documents
+        app.library.section = LibrarySection::Trash;
+        app.library.refresh_now();
+        assert!(app.library.items().is_empty());
+
+        app.library.section = LibrarySection::Documents;
+        app.library.rel_folder = vec![folder_math.clone()];
+        app.library.refresh_now();
+        assert_eq!(app.library.items().len(), 1);
+        assert!(
+            matches!(&app.library.items()[0], LibraryItem::Note(n) if n.title == "Tích phân bội")
+        );
+
+        // Mở ghi chú từ Library -> quay về Note Editor đúng dữ liệu
+        app.load_document_from(sub_note_path);
+        app.screen = AppScreen::Editor;
+        assert_eq!(app.doc.metadata().title, "Tích phân bội");
+        assert_eq!(app.doc.pages()[0].strokes.len(), 1);
     }
 }

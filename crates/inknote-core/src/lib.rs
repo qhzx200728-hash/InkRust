@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::Path;
 
+pub mod library;
+
 /// Số phiên bản định dạng file .inknote hiện tại.
 pub const FORMAT_VERSION: u32 = 1;
 
@@ -153,24 +155,31 @@ impl Default for PaperSettings {
     }
 }
 
+fn unix_secs_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// Thông tin phụ của ghi chú (Metadata).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DocumentMetadata {
     pub title: String,
     pub created_at: u64,
     pub modified_at: u64,
+    #[serde(default)]
+    pub is_favorite: bool,
 }
 
 impl Default for DocumentMetadata {
     fn default() -> Self {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let now = unix_secs_now();
         Self {
             title: "Untitled Note".to_string(),
             created_at: now,
             modified_at: now,
+            is_favorite: false,
         }
     }
 }
@@ -1636,9 +1645,87 @@ impl Document {
         self.rev += 1;
         true
     }
+}
+
+pub(crate) fn page_from_file(page: Page) -> (DocumentPage, u64) {
+    let mut max_id = 0u64;
+    let mut strokes = Vec::new();
+    let mut latex_objects = Vec::new();
+    let mut shapes = Vec::new();
+    let mut text_objects = Vec::new();
+    let mut images = Vec::new();
+    for obj in page.objects {
+        match obj {
+            PageObject::BrushStroke(s) => {
+                if s.id > max_id {
+                    max_id = s.id;
+                }
+                strokes.push(s);
+            }
+            PageObject::Latex(l) => {
+                if l.id > max_id {
+                    max_id = l.id;
+                }
+                latex_objects.push(l);
+            }
+            PageObject::Shape(sh) => {
+                if sh.id > max_id {
+                    max_id = sh.id;
+                }
+                shapes.push(sh);
+            }
+            PageObject::Text(txt) => {
+                if txt.id > max_id {
+                    max_id = txt.id;
+                }
+                text_objects.push(txt);
+            }
+            PageObject::Image(img) => {
+                if img.id > max_id {
+                    max_id = img.id;
+                }
+                images.push(img);
+            }
+        }
+    }
+    (
+        DocumentPage {
+            id: page.id,
+            strokes,
+            latex_objects,
+            shapes,
+            text_objects,
+            images,
+        },
+        max_id,
+    )
+}
+
+impl DocumentPage {
+    /// Trả về `true` nếu trang không chứa đối tượng nào.
+    pub fn is_empty(&self) -> bool {
+        self.strokes.is_empty()
+            && self.latex_objects.is_empty()
+            && self.shapes.is_empty()
+            && self.text_objects.is_empty()
+            && self.images.is_empty()
+    }
+}
+
+impl Document {
+    /// Trả về `true` nếu tài liệu có nội dung (đối tượng, nhiều trang, hoặc tên khác mặc định).
+    pub fn has_content(&self) -> bool {
+        self.pages.len() > 1
+            || self.pages.iter().any(|p| !p.is_empty())
+            || self.metadata.title != "Untitled Note"
+    }
 
     /// Xuất dữ liệu sang cấu trúc `DocumentFile` để lưu đĩa.
     pub fn to_file(&self) -> DocumentFile {
+        let mut metadata = self.metadata.clone();
+        if self.is_dirty() {
+            metadata.modified_at = unix_secs_now().max(metadata.modified_at);
+        }
         let pages = self
             .pages
             .iter()
@@ -1658,7 +1745,7 @@ impl Document {
             .collect();
         DocumentFile {
             format_version: FORMAT_VERSION,
-            metadata: self.metadata.clone(),
+            metadata,
             paper_settings: self.paper_settings.clone(),
             pages,
             first_page_thumbnail: None,
@@ -1674,53 +1761,9 @@ impl Document {
             if page.id > max_page_id {
                 max_page_id = page.id;
             }
-            let mut strokes = Vec::new();
-            let mut latex_objects = Vec::new();
-            let mut shapes = Vec::new();
-            let mut text_objects = Vec::new();
-            let mut images = Vec::new();
-            for obj in page.objects {
-                match obj {
-                    PageObject::BrushStroke(s) => {
-                        if s.id > max_id {
-                            max_id = s.id;
-                        }
-                        strokes.push(s);
-                    }
-                    PageObject::Latex(l) => {
-                        if l.id > max_id {
-                            max_id = l.id;
-                        }
-                        latex_objects.push(l);
-                    }
-                    PageObject::Shape(sh) => {
-                        if sh.id > max_id {
-                            max_id = sh.id;
-                        }
-                        shapes.push(sh);
-                    }
-                    PageObject::Text(txt) => {
-                        if txt.id > max_id {
-                            max_id = txt.id;
-                        }
-                        text_objects.push(txt);
-                    }
-                    PageObject::Image(img) => {
-                        if img.id > max_id {
-                            max_id = img.id;
-                        }
-                        images.push(img);
-                    }
-                }
-            }
-            pages.push(DocumentPage {
-                id: page.id,
-                strokes,
-                latex_objects,
-                shapes,
-                text_objects,
-                images,
-            });
+            let (doc_page, page_max_id) = page_from_file(page);
+            max_id = max_id.max(page_max_id);
+            pages.push(doc_page);
         }
         if pages.is_empty() {
             max_page_id = max_page_id.max(1);

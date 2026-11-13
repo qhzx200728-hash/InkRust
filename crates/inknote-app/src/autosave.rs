@@ -335,7 +335,7 @@ impl AutoSaveState {
 mod tests {
     use super::*;
     use inknote_core::{Command, DocumentFile, PaperPattern, Stroke};
-    use inknote_pen::{penpath::Element, PenPath, Style};
+    use inknote_pen::{PenPath, Style, penpath::Element};
     use parry2d_f64::math::Vector2;
 
     fn add_test_stroke(doc: &mut Document) {

@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::{
     self, Align2, Color32, CornerRadius, FontId, Pos2, Rect, ScrollArea, Stroke, TextEdit,
 };
-use inknote_latex::{compile_latex_to_svg, CompileOptions, LatexError};
+use inknote_latex::{CompileOptions, LatexError, compile_latex_to_svg};
 
 use crate::{svg_cache::SvgTextureCache, theme::Theme};
 
