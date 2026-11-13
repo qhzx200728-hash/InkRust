@@ -2,7 +2,7 @@
 // hệ thống lệnh (Command) và Undo/Redo.
 // Mọi thay đổi nội dung trang PHẢI đi qua `Document::execute` để có thể hoàn tác.
 
-use inknote_pen::{penpath::Segment, PenPath, Style};
+use inknote_pen::{PenPath, Style, penpath::Segment};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::Path;
@@ -194,6 +194,36 @@ pub struct LatexObject {
     pub svg_cache: Option<String>,
 }
 
+/// Các loại hình học cơ bản (Bước 5.3 - P2, khớp docs/04-ui-spec.md).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ShapeKind {
+    Line,
+    Curve,
+    Rectangle,
+    Circle,
+    Triangle,
+    Diamond,
+    RoundedRect,
+    Arrow,
+}
+
+/// Đối tượng hình học vector trên trang.
+/// - `start`, `end`: 2 điểm đầu mút (với `Line`/`Curve`/`Arrow`) hoặc 2 góc đối của khung bao hình.
+/// - `control`: điểm điều khiển Bézier bậc hai dành cho `Curve` (nếu `None`, tự tính độ cong mặc định).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ShapeObject {
+    pub id: u64,
+    pub kind: ShapeKind,
+    pub start: [f64; 2],
+    pub end: [f64; 2],
+    #[serde(default)]
+    pub control: Option<[f64; 2]>,
+    pub color: [u8; 4],
+    pub stroke_width: f64,
+    #[serde(default)]
+    pub dashed: bool,
+}
+
 /// Các loại đối tượng trên một trang (khớp docs/02-architecture.md mục 3).
 /// Chỉ BrushStroke mới bị Eraser xoá; các loại khác không bị tẩy xoá lướt qua.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -201,8 +231,8 @@ pub struct LatexObject {
 pub enum PageObject {
     BrushStroke(Stroke),
     Latex(LatexObject),
+    Shape(ShapeObject),
     // Dự phòng mở rộng cho các bước tiếp theo (P2):
-    // Shape(ShapeObject),
     // Text(TextObject),
     // Image(ImageObject),
 }
@@ -298,26 +328,30 @@ pub enum Command {
         new_size: [f64; 2],
         new_svg_cache: Option<String>,
     },
+    /// Chèn một hình học cơ bản vào trang tại vị trí `page_index` (1 bước undo).
+    AddShape { page_index: usize, obj: ShapeObject },
     /// Áp dụng kết quả tẩy nét bút trên một trang (chỉ tác động lên `strokes`, 1 bước undo).
     EraseStrokes {
         page_index: usize,
         removed: Vec<(usize, Stroke)>,
         added: Vec<Stroke>,
     },
-    /// Di chuyển và/hoặc đổi kích thước vùng chọn (nét bút + LaTeX, 1 bước undo).
+    /// Di chuyển và/hoặc đổi kích thước vùng chọn (nét bút + LaTeX + hình học, 1 bước undo).
     TransformSelection {
         page_index: usize,
         stroke_ids: Vec<u64>,
         latex_ids: Vec<u64>,
+        shape_ids: Vec<u64>,
         anchor: [f64; 2],
         scale: [f64; 2],
         delta: [f64; 2],
     },
-    /// Xoá toàn bộ đối tượng đang chọn (nét bút + LaTeX, 1 bước undo).
+    /// Xoá toàn bộ đối tượng đang chọn (nét bút + LaTeX + hình học, 1 bước undo).
     DeleteSelection {
         page_index: usize,
         stroke_ids: Vec<u64>,
         latex_ids: Vec<u64>,
+        shape_ids: Vec<u64>,
     },
 }
 
@@ -327,6 +361,7 @@ pub struct DocumentPage {
     pub id: u64,
     pub strokes: Vec<Stroke>,
     pub latex_objects: Vec<LatexObject>,
+    pub shapes: Vec<ShapeObject>,
 }
 
 /// Lệnh đã thực thi, kèm dữ liệu cần để hoàn tác.
@@ -372,6 +407,10 @@ enum Done {
         new_size: [f64; 2],
         new_svg_cache: Option<String>,
     },
+    AddShape {
+        page_index: usize,
+        obj: ShapeObject,
+    },
     EraseStrokes {
         page_index: usize,
         removed: Vec<(usize, Stroke)>,
@@ -383,11 +422,14 @@ enum Done {
         new_strokes: Vec<(usize, Stroke)>,
         old_latex: Vec<(usize, LatexObject)>,
         new_latex: Vec<(usize, LatexObject)>,
+        old_shapes: Vec<(usize, ShapeObject)>,
+        new_shapes: Vec<(usize, ShapeObject)>,
     },
     DeleteSelection {
         page_index: usize,
         removed_strokes: Vec<(usize, Stroke)>,
         removed_latex: Vec<(usize, LatexObject)>,
+        removed_shapes: Vec<(usize, ShapeObject)>,
     },
 }
 
@@ -452,6 +494,14 @@ pub fn transform_latex(obj: &mut LatexObject, anchor: [f64; 2], scale: [f64; 2],
     ];
 }
 
+pub fn transform_shape(obj: &mut ShapeObject, anchor: [f64; 2], scale: [f64; 2], delta: [f64; 2]) {
+    obj.start = transform_xy(obj.start, anchor, scale, delta);
+    obj.end = transform_xy(obj.end, anchor, scale, delta);
+    if let Some(c) = obj.control.as_mut() {
+        *c = transform_xy(*c, anchor, scale, delta);
+    }
+}
+
 /// Tài liệu nhiều trang + lịch sử Undo/Redo + trạng thái lưu file.
 pub struct Document {
     metadata: DocumentMetadata,
@@ -475,6 +525,7 @@ impl Default for Document {
                 id: 1,
                 strokes: Vec::new(),
                 latex_objects: Vec::new(),
+                shapes: Vec::new(),
             }],
             active_page_idx: 0,
             undo_stack: Vec::new(),
@@ -648,6 +699,7 @@ impl Document {
                     id: page_id,
                     strokes: Vec::new(),
                     latex_objects: Vec::new(),
+                    shapes: Vec::new(),
                 };
                 let prev_active = self.active_page_idx;
                 self.pages.insert(insert_idx, page.clone());
@@ -665,6 +717,7 @@ impl Document {
                     id: page_id,
                     strokes: Vec::new(),
                     latex_objects: Vec::new(),
+                    shapes: Vec::new(),
                 };
                 let prev_active = self.active_page_idx;
                 self.pages.insert(insert_idx, page.clone());
@@ -696,10 +749,19 @@ impl Document {
                         l
                     })
                     .collect();
+                let src_shapes = self.pages[src].shapes.clone();
+                let cloned_shapes: Vec<ShapeObject> = src_shapes
+                    .into_iter()
+                    .map(|mut sh| {
+                        sh.id = self.alloc_id();
+                        sh
+                    })
+                    .collect();
                 let page = DocumentPage {
                     id: page_id,
                     strokes: cloned_strokes,
                     latex_objects: cloned_latex,
+                    shapes: cloned_shapes,
                 };
                 let prev_active = self.active_page_idx;
                 self.pages.insert(insert_idx, page.clone());
@@ -788,6 +850,15 @@ impl Document {
                     new_svg_cache,
                 }
             }
+            Command::AddShape { page_index, obj } => {
+                let target_idx = page_index.min(self.pages.len().saturating_sub(1));
+                self.pages[target_idx].shapes.push(obj.clone());
+                self.active_page_idx = target_idx;
+                Done::AddShape {
+                    page_index: target_idx,
+                    obj,
+                }
+            }
             Command::EraseStrokes {
                 page_index,
                 mut removed,
@@ -816,6 +887,7 @@ impl Document {
                 page_index,
                 stroke_ids,
                 latex_ids,
+                shape_ids,
                 anchor,
                 scale,
                 delta,
@@ -823,10 +895,13 @@ impl Document {
                 let target_idx = page_index.min(self.pages.len().saturating_sub(1));
                 let s_set: HashSet<u64> = stroke_ids.into_iter().collect();
                 let l_set: HashSet<u64> = latex_ids.into_iter().collect();
+                let sh_set: HashSet<u64> = shape_ids.into_iter().collect();
                 let mut old_strokes = Vec::new();
                 let mut new_strokes = Vec::new();
                 let mut old_latex = Vec::new();
                 let mut new_latex = Vec::new();
+                let mut old_shapes = Vec::new();
+                let mut new_shapes = Vec::new();
 
                 let page = &mut self.pages[target_idx];
                 for (idx, s) in page.strokes.iter_mut().enumerate() {
@@ -843,7 +918,14 @@ impl Document {
                         new_latex.push((idx, l.clone()));
                     }
                 }
-                if old_strokes.is_empty() && old_latex.is_empty() {
+                for (idx, sh) in page.shapes.iter_mut().enumerate() {
+                    if sh_set.contains(&sh.id) {
+                        old_shapes.push((idx, sh.clone()));
+                        transform_shape(sh, anchor, scale, delta);
+                        new_shapes.push((idx, sh.clone()));
+                    }
+                }
+                if old_strokes.is_empty() && old_latex.is_empty() && old_shapes.is_empty() {
                     return;
                 }
                 self.active_page_idx = target_idx;
@@ -853,16 +935,20 @@ impl Document {
                     new_strokes,
                     old_latex,
                     new_latex,
+                    old_shapes,
+                    new_shapes,
                 }
             }
             Command::DeleteSelection {
                 page_index,
                 stroke_ids,
                 latex_ids,
+                shape_ids,
             } => {
                 let target_idx = page_index.min(self.pages.len().saturating_sub(1));
                 let s_set: HashSet<u64> = stroke_ids.into_iter().collect();
                 let l_set: HashSet<u64> = latex_ids.into_iter().collect();
+                let sh_set: HashSet<u64> = shape_ids.into_iter().collect();
                 let page = &mut self.pages[target_idx];
 
                 let removed_strokes: Vec<(usize, Stroke)> = page
@@ -879,8 +965,18 @@ impl Document {
                     .filter(|(_, l)| l_set.contains(&l.id))
                     .map(|(i, l)| (i, l.clone()))
                     .collect();
+                let removed_shapes: Vec<(usize, ShapeObject)> = page
+                    .shapes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, sh)| sh_set.contains(&sh.id))
+                    .map(|(i, sh)| (i, sh.clone()))
+                    .collect();
 
-                if removed_strokes.is_empty() && removed_latex.is_empty() {
+                if removed_strokes.is_empty()
+                    && removed_latex.is_empty()
+                    && removed_shapes.is_empty()
+                {
                     return;
                 }
                 for &(idx, _) in removed_strokes.iter().rev() {
@@ -889,11 +985,15 @@ impl Document {
                 for &(idx, _) in removed_latex.iter().rev() {
                     page.latex_objects.remove(idx);
                 }
+                for &(idx, _) in removed_shapes.iter().rev() {
+                    page.shapes.remove(idx);
+                }
                 self.active_page_idx = target_idx;
                 Done::DeleteSelection {
                     page_index: target_idx,
                     removed_strokes,
                     removed_latex,
+                    removed_shapes,
                 }
             }
         };
@@ -955,6 +1055,10 @@ impl Document {
                 self.pages[*page_index].latex_objects.pop();
                 self.active_page_idx = *page_index;
             }
+            Done::AddShape { page_index, .. } => {
+                self.pages[*page_index].shapes.pop();
+                self.active_page_idx = *page_index;
+            }
             Done::UpdateLatex {
                 page_index,
                 obj_id,
@@ -992,6 +1096,7 @@ impl Document {
                 page_index,
                 old_strokes,
                 old_latex,
+                old_shapes,
                 ..
             } => {
                 let page = &mut self.pages[*page_index];
@@ -1005,12 +1110,18 @@ impl Document {
                         page.latex_objects[*idx] = l.clone();
                     }
                 }
+                for (idx, sh) in old_shapes {
+                    if *idx < page.shapes.len() {
+                        page.shapes[*idx] = sh.clone();
+                    }
+                }
                 self.active_page_idx = *page_index;
             }
             Done::DeleteSelection {
                 page_index,
                 removed_strokes,
                 removed_latex,
+                removed_shapes,
             } => {
                 let page = &mut self.pages[*page_index];
                 for (idx, s) in removed_strokes {
@@ -1020,6 +1131,10 @@ impl Document {
                 for (idx, l) in removed_latex {
                     let at = (*idx).min(page.latex_objects.len());
                     page.latex_objects.insert(at, l.clone());
+                }
+                for (idx, sh) in removed_shapes {
+                    let at = (*idx).min(page.shapes.len());
+                    page.shapes.insert(at, sh.clone());
                 }
                 self.active_page_idx = *page_index;
             }
@@ -1069,6 +1184,10 @@ impl Document {
                 self.pages[*page_index].latex_objects.push(obj.clone());
                 self.active_page_idx = *page_index;
             }
+            Done::AddShape { page_index, obj } => {
+                self.pages[*page_index].shapes.push(obj.clone());
+                self.active_page_idx = *page_index;
+            }
             Done::UpdateLatex {
                 page_index,
                 obj_id,
@@ -1106,6 +1225,7 @@ impl Document {
                 page_index,
                 new_strokes,
                 new_latex,
+                new_shapes,
                 ..
             } => {
                 let page = &mut self.pages[*page_index];
@@ -1119,12 +1239,18 @@ impl Document {
                         page.latex_objects[*idx] = l.clone();
                     }
                 }
+                for (idx, sh) in new_shapes {
+                    if *idx < page.shapes.len() {
+                        page.shapes[*idx] = sh.clone();
+                    }
+                }
                 self.active_page_idx = *page_index;
             }
             Done::DeleteSelection {
                 page_index,
                 removed_strokes,
                 removed_latex,
+                removed_shapes,
             } => {
                 let page = &mut self.pages[*page_index];
                 for &(idx, _) in removed_strokes.iter().rev() {
@@ -1135,6 +1261,11 @@ impl Document {
                 for &(idx, _) in removed_latex.iter().rev() {
                     if idx < page.latex_objects.len() {
                         page.latex_objects.remove(idx);
+                    }
+                }
+                for &(idx, _) in removed_shapes.iter().rev() {
+                    if idx < page.shapes.len() {
+                        page.shapes.remove(idx);
                     }
                 }
                 self.active_page_idx = *page_index;
@@ -1158,6 +1289,7 @@ impl Document {
                     .map(PageObject::BrushStroke)
                     .collect();
                 objects.extend(p.latex_objects.iter().cloned().map(PageObject::Latex));
+                objects.extend(p.shapes.iter().cloned().map(PageObject::Shape));
                 Page { id: p.id, objects }
             })
             .collect();
@@ -1181,6 +1313,7 @@ impl Document {
             }
             let mut strokes = Vec::new();
             let mut latex_objects = Vec::new();
+            let mut shapes = Vec::new();
             for obj in page.objects {
                 match obj {
                     PageObject::BrushStroke(s) => {
@@ -1195,12 +1328,19 @@ impl Document {
                         }
                         latex_objects.push(l);
                     }
+                    PageObject::Shape(sh) => {
+                        if sh.id > max_id {
+                            max_id = sh.id;
+                        }
+                        shapes.push(sh);
+                    }
                 }
             }
             pages.push(DocumentPage {
                 id: page.id,
                 strokes,
                 latex_objects,
+                shapes,
             });
         }
         if pages.is_empty() {
@@ -1209,6 +1349,7 @@ impl Document {
                 id: 1,
                 strokes: Vec::new(),
                 latex_objects: Vec::new(),
+                shapes: Vec::new(),
             });
         }
         Self {
@@ -1730,6 +1871,7 @@ mod tests {
             page_index: 0,
             stroke_ids: vec![s1_id],
             latex_ids: vec![l_id],
+            shape_ids: vec![],
             anchor: [0.0, 0.0],
             scale: [2.0, 2.0],
             delta: [50.0, 30.0],
@@ -1751,6 +1893,7 @@ mod tests {
             page_index: 0,
             stroke_ids: vec![s1_id],
             latex_ids: vec![l_id],
+            shape_ids: vec![],
         });
         assert_eq!(d.page_strokes(0).len(), 0);
         assert_eq!(d.pages()[0].latex_objects.len(), 0);
@@ -1758,5 +1901,83 @@ mod tests {
         assert!(d.undo());
         assert_eq!(d.page_strokes(0).len(), 1);
         assert_eq!(d.pages()[0].latex_objects.len(), 1);
+    }
+
+    #[test]
+    fn shape_add_undo_redo_transform_delete_and_file_roundtrip() {
+        let mut d = Document::new();
+        let sh_id = d.alloc_id();
+        let sh = ShapeObject {
+            id: sh_id,
+            kind: ShapeKind::Curve,
+            start: [40.0, 80.0],
+            end: [200.0, 80.0],
+            control: Some([120.0, 30.0]),
+            color: [25, 103, 210, 255],
+            stroke_width: 3.0,
+            dashed: true,
+        };
+        d.execute(Command::AddShape {
+            page_index: 0,
+            obj: sh.clone(),
+        });
+        assert_eq!(d.pages()[0].shapes.len(), 1);
+        assert_eq!(d.pages()[0].shapes[0], sh);
+
+        assert!(d.undo());
+        assert!(d.pages()[0].shapes.is_empty());
+        assert!(d.redo());
+        assert_eq!(d.pages()[0].shapes.len(), 1);
+
+        // Chuyển đổi + xoá qua Lasso (TransformSelection / DeleteSelection)
+        d.execute(Command::TransformSelection {
+            page_index: 0,
+            stroke_ids: vec![],
+            latex_ids: vec![],
+            shape_ids: vec![sh_id],
+            anchor: [0.0, 0.0],
+            scale: [1.5, 1.0],
+            delta: [10.0, 20.0],
+        });
+        assert_eq!(d.pages()[0].shapes[0].start, [70.0, 100.0]);
+        assert_eq!(d.pages()[0].shapes[0].end, [310.0, 100.0]);
+        assert_eq!(d.pages()[0].shapes[0].control, Some([190.0, 50.0]));
+
+        assert!(d.undo());
+        assert_eq!(d.pages()[0].shapes[0], sh);
+        assert!(d.redo());
+
+        // Kiểm tra lưu & mở lại file vẫn giữ nguyên ShapeObject
+        let file = d.to_file();
+        let json = serde_json::to_string(&file).unwrap();
+        let parsed: DocumentFile = serde_json::from_str(&json).unwrap();
+        let loaded = Document::from_file(parsed);
+        assert_eq!(loaded.pages()[0].shapes.len(), 1);
+        assert_eq!(loaded.pages()[0].shapes[0].kind, ShapeKind::Curve);
+        assert!(loaded.pages()[0].shapes[0].dashed);
+
+        // Eraser (EraseStrokes) không bao giờ chạm tới shapes
+        let s = stroke(&mut d);
+        d.execute(Command::AddStroke(s));
+        let idx = 0;
+        let rem = d.pages()[0].strokes[idx].clone();
+        d.execute(Command::EraseStrokes {
+            page_index: 0,
+            removed: vec![(idx, rem)],
+            added: vec![],
+        });
+        assert!(d.pages()[0].strokes.is_empty());
+        assert_eq!(d.pages()[0].shapes.len(), 1);
+
+        // DeleteSelection xoá hình và undo khôi phục lại
+        d.execute(Command::DeleteSelection {
+            page_index: 0,
+            stroke_ids: vec![],
+            latex_ids: vec![],
+            shape_ids: vec![sh_id],
+        });
+        assert!(d.pages()[0].shapes.is_empty());
+        assert!(d.undo());
+        assert_eq!(d.pages()[0].shapes.len(), 1);
     }
 }

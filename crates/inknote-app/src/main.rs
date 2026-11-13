@@ -8,6 +8,7 @@ mod eraser;
 mod icons;
 mod lasso;
 mod latex_dialog;
+mod shapes;
 mod svg_cache;
 mod theme;
 mod thumbnails;
@@ -23,31 +24,32 @@ use inknote_core::{
     CanvasMode, Command, Document, DocumentFile, LatexObject, PaperSettings, Stroke,
 };
 use inknote_pen::{
+    Constraints, PenEvent, PenPath, Style,
     brushconfig::BrushConfig,
     builders::{
-        buildable::{Buildable, BuilderCreator, BuilderProgress},
         PenPathBuilderType, PenPathCurvedBuilder, PenPathModeledBuilder, PenPathSimpleBuilder,
+        buildable::{Buildable, BuilderCreator, BuilderProgress},
     },
     penpath::{Element, Segment},
     style::Composer,
-    Constraints, PenEvent, PenPath, Style,
 };
 use inknote_render::{CairoRenderContext, DrawBatch};
 use parry2d_f64::math::Vector2;
 
 use crate::{
     autosave::AutoSaveState,
-    eraser::{apply_eraser_sweep, finish_eraser_to_command, ActiveEraser},
+    eraser::{ActiveEraser, apply_eraser_sweep, finish_eraser_to_command},
     icons::{draw_paper, paper_sheet_rect},
     lasso::{
-        corner_pos, hit_resize_corner, opposite_anchor, refresh_selection_bbox, select_in_freehand,
-        select_in_rect, transformed_bbox, LassoInteraction, LassoState, ResizeCorner,
+        LassoInteraction, LassoState, ResizeCorner, corner_pos, hit_resize_corner, opposite_anchor,
+        refresh_selection_bbox, select_in_freehand, select_in_rect, transformed_bbox,
     },
     latex_dialog::{LatexDialogAction, LatexDialogState},
-    svg_cache::{SvgTextureCache, LATEX_DISPLAY_SCALE},
+    shapes::{ActiveShapeDrag, paint_shape},
+    svg_cache::{LATEX_DISPLAY_SCALE, SvgTextureCache},
     theme::Theme,
-    thumbnails::{append_batches_to_mesh, show_thumbnail_panel, ThumbCache, ThumbnailAction},
-    toolbar::{show_toolbars, ActiveTool, ToolbarState},
+    thumbnails::{ThumbCache, ThumbnailAction, append_batches_to_mesh, show_thumbnail_panel},
+    toolbar::{ActiveTool, ToolbarState, show_toolbars},
     view::View,
 };
 
@@ -203,6 +205,7 @@ struct InkNoteApp {
     last_frame: Instant,
     active: Option<ActiveStroke>,
     active_eraser: Option<ActiveEraser>,
+    active_shape: Option<ActiveShapeDrag>,
     lasso_state: LassoState,
     drawing_page_index: Option<usize>,
     static_cache: Option<(StaticKey, Vec<(usize, std::sync::Arc<egui::epaint::Mesh>)>)>,
@@ -279,6 +282,7 @@ impl InkNoteApp {
             last_frame: Instant::now(),
             active: None,
             active_eraser: None,
+            active_shape: None,
             lasso_state: LassoState::default(),
             drawing_page_index: None,
             static_cache: None,
@@ -673,6 +677,7 @@ impl InkNoteApp {
                 self.static_cache = None;
                 self.active = None;
                 self.active_eraser = None;
+                self.active_shape = None;
                 self.lasso_state.clear();
                 self.drawing_page_index = None;
                 self.pull_overscroll = 0.0;
@@ -718,6 +723,7 @@ impl InkNoteApp {
         self.static_cache = None;
         self.active = None;
         self.active_eraser = None;
+        self.active_shape = None;
         self.lasso_state.clear();
         self.drawing_page_index = None;
         self.pull_overscroll = 0.0;
@@ -944,6 +950,7 @@ impl InkNoteApp {
                             page_index: sel.page_index,
                             stroke_ids: sel.stroke_ids.clone(),
                             latex_ids: sel.latex_ids.clone(),
+                            shape_ids: sel.shape_ids.clone(),
                             anchor: [0.0, 0.0],
                             scale: [1.0, 1.0],
                             delta: [delta.x as f64, delta.y as f64],
@@ -964,6 +971,7 @@ impl InkNoteApp {
                             page_index: sel.page_index,
                             stroke_ids: sel.stroke_ids.clone(),
                             latex_ids: sel.latex_ids.clone(),
+                            shape_ids: sel.shape_ids.clone(),
                             anchor,
                             scale,
                             delta: [0.0, 0.0],
@@ -989,7 +997,48 @@ impl InkNoteApp {
             page_index: sel.page_index,
             stroke_ids: sel.stroke_ids,
             latex_ids: sel.latex_ids,
+            shape_ids: sel.shape_ids,
         });
+    }
+
+    fn shape_down(&mut self, ctx: &egui::Context, screen_pos: egui::Pos2) {
+        let Some(page_idx) = self.interactive_page_at(ctx, screen_pos) else {
+            return;
+        };
+        self.doc.set_active_page_index(page_idx);
+        let page_pos = self.page_local_for(screen_pos, page_idx);
+        self.active_shape = Some(ActiveShapeDrag::new(
+            page_idx,
+            self.toolbar_state.shape_kind,
+            page_pos,
+            self.toolbar_state.shape_color,
+            self.toolbar_state.shape_stroke_width,
+            self.toolbar_state.shape_dashed,
+        ));
+    }
+
+    fn shape_move(&mut self, screen_pos: egui::Pos2, shift_held: bool) {
+        let Some(mut drag) = self.active_shape.take() else {
+            return;
+        };
+        let page_pos = self.page_local_for(screen_pos, drag.page_index);
+        drag.update(page_pos, shift_held);
+        self.active_shape = Some(drag);
+    }
+
+    fn shape_up(&mut self, screen_pos: egui::Pos2, shift_held: bool) {
+        let Some(mut drag) = self.active_shape.take() else {
+            return;
+        };
+        let page_pos = self.page_local_for(screen_pos, drag.page_index);
+        drag.update(page_pos, shift_held);
+        let id = self.doc.alloc_id();
+        if let Some(obj) = drag.finish(id) {
+            self.doc.execute(Command::AddShape {
+                page_index: drag.page_index,
+                obj,
+            });
+        }
     }
 
     fn pen_down(&mut self, pos: egui::Pos2, pressure: f64, now: Instant) {
@@ -1194,7 +1243,8 @@ impl eframe::App for InkNoteApp {
 impl InkNoteApp {
     fn run_app_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        let (events, frame_t) = ctx.input(|i| (i.events.clone(), i.time));
+        let (events, frame_t, shift_held) =
+            ctx.input(|i| (i.events.clone(), i.time, i.modifiers.shift));
         let dt = (frame_t - self.prev_frame_t).clamp(0.001, 0.05);
         let n_ev = events.len().max(1) as f64;
 
@@ -1216,6 +1266,13 @@ impl InkNoteApp {
                                 if let Some(page_idx) = self.interactive_page_at(&ctx, pos) {
                                     self.touch_active = true;
                                     self.eraser_down(pos, page_idx);
+                                }
+                                continue;
+                            }
+                            if self.toolbar_state.active_tool == ActiveTool::Shapes {
+                                if self.interactive_page_at(&ctx, pos).is_some() {
+                                    self.touch_active = true;
+                                    self.shape_down(&ctx, pos);
                                 }
                                 continue;
                             }
@@ -1243,6 +1300,8 @@ impl InkNoteApp {
                                 self.lasso_move(pos);
                             } else if self.touch_active && self.active_eraser.is_some() {
                                 self.eraser_move(pos);
+                            } else if self.touch_active && self.active_shape.is_some() {
+                                self.shape_move(pos, shift_held);
                             } else if self.touch_active && self.active.is_some() {
                                 if force.is_some() {
                                     self.stylus_has_force = true;
@@ -1263,6 +1322,8 @@ impl InkNoteApp {
                                 self.lasso_up();
                             } else if self.active_eraser.is_some() {
                                 self.eraser_up(pos);
+                            } else if self.active_shape.is_some() {
+                                self.shape_up(pos, shift_held);
                             } else if self.active.is_some() {
                                 let p = match force {
                                     Some(f) => (f as f64).clamp(0.0, 1.0),
@@ -1291,6 +1352,8 @@ impl InkNoteApp {
                             if let Some(page_idx) = self.interactive_page_at(&ctx, pos) {
                                 self.eraser_down(pos, page_idx);
                             }
+                        } else if self.toolbar_state.active_tool == ActiveTool::Shapes {
+                            self.shape_down(&ctx, pos);
                         } else if let Some(page_idx) = self.drawable_page_at(&ctx, pos) {
                             self.doc.set_active_page_index(page_idx);
                             self.drawing_page_index = Some(page_idx);
@@ -1301,6 +1364,8 @@ impl InkNoteApp {
                             self.lasso_up();
                         } else if self.active_eraser.is_some() {
                             self.eraser_up(pos);
+                        } else if self.active_shape.is_some() {
+                            self.shape_up(pos, shift_held);
                         } else if self.active.is_some() {
                             self.pen_up(pos, Element::PRESSURE_DEFAULT, now);
                         }
@@ -1311,6 +1376,8 @@ impl InkNoteApp {
                         self.lasso_move(pos);
                     } else if self.active_eraser.is_some() {
                         self.eraser_move(pos);
+                    } else if self.active_shape.is_some() {
+                        self.shape_move(pos, shift_held);
                     } else if self.active.is_some() {
                         let now = self.monotonic_instant(ev_secs);
                         self.pen_down(pos, Element::PRESSURE_DEFAULT, now);
@@ -1334,7 +1401,7 @@ impl InkNoteApp {
         self.autosave.poll_and_maybe_save(
             &mut self.doc,
             self.current_path.as_ref(),
-            self.active.is_some(),
+            self.active.is_some() || self.active_shape.is_some(),
             autosave_now,
         );
 
@@ -1367,6 +1434,9 @@ impl InkNoteApp {
         );
         if self.toolbar_state.active_tool != ActiveTool::Lasso {
             self.lasso_state.clear();
+        }
+        if self.toolbar_state.active_tool != ActiveTool::Shapes {
+            self.active_shape = None;
         }
         self.toolbar_state.has_lasso_selection = self.lasso_state.selection.is_some();
 
@@ -1409,8 +1479,12 @@ impl InkNoteApp {
             } else {
                 (false, false, false, false, false, false, false, false)
             };
-        // Không hoàn tác / thao tác file / thêm trang khi đang kéo nét dở
-        if self.active.is_none() && self.active_eraser.is_none() && !self.lasso_state.is_active() {
+        // Không hoàn tác / thao tác file / thêm trang khi đang kéo nét / kéo hình dở
+        if self.active.is_none()
+            && self.active_eraser.is_none()
+            && self.active_shape.is_none()
+            && !self.lasso_state.is_active()
+        {
             if (actions.undo_clicked || key_undo) && self.doc.undo() {
                 self.lasso_state.clear();
                 self.rebuild_batch_cache();
@@ -2123,6 +2197,39 @@ impl InkNoteApp {
                     }
                 }
 
+                // 4c-shapes. Vẽ toàn bộ hình học đã lưu và hình đang kéo (live preview)
+                for page_idx in 0..page_count {
+                    let page = &self.doc.pages()[page_idx];
+                    let dragging_here = self
+                        .active_shape
+                        .as_ref()
+                        .filter(|d| d.page_index == page_idx);
+                    if page.shapes.is_empty() && dragging_here.is_none() {
+                        continue;
+                    }
+                    let sheet = self.page_screen_rect(paper_rect, page_idx);
+                    if !sheet.intersects(paper_rect) {
+                        continue;
+                    }
+                    let page_painter = ui.painter().with_clip_rect(paper_rect.intersect(sheet));
+                    let origin = self.page_origin(paper_rect, page_idx);
+                    for sh in &page.shapes {
+                        let interaction = match (&self.lasso_state.selection, &self.lasso_state.interaction) {
+                            (Some(sel), Some(inter))
+                                if sel.page_index == page_idx && sel.shape_ids.contains(&sh.id) =>
+                            {
+                                Some(inter)
+                            }
+                            _ => None,
+                        };
+                        paint_shape(&page_painter, sh, origin, view.zoom, interaction);
+                    }
+                    if let Some(drag) = dragging_here {
+                        let preview = drag.to_preview_object();
+                        paint_shape(&page_painter, &preview, origin, view.zoom, None);
+                    }
+                }
+
                 let latex_tool_ready = !latex_dialog_was_open
                     && !self.latex_dialog.open
                     && self.toolbar_state.active_tool == ActiveTool::Latex;
@@ -2476,7 +2583,7 @@ fn main() -> eframe::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use eframe::egui::{vec2, Pos2, RawInput, Rect};
+    use eframe::egui::{Pos2, RawInput, Rect, vec2};
     use inknote_core::{CanvasMode, PaperOrientation, PaperPattern, PaperSize};
 
     fn new_test_app(ctx: &egui::Context) -> InkNoteApp {
@@ -2504,6 +2611,7 @@ mod tests {
             last_frame: Instant::now(),
             active: None,
             active_eraser: None,
+            active_shape: None,
             lasso_state: LassoState::default(),
             drawing_page_index: None,
             static_cache: None,
@@ -3258,5 +3366,189 @@ mod tests {
         assert!(app.doc.undo());
         assert_eq!(app.doc.strokes().len(), 1);
         assert_eq!(app.doc.pages()[0].latex_objects.len(), 1);
+    }
+
+    #[test]
+    fn test_shapes_draw_undo_redo_and_save_load() {
+        let ctx = egui::Context::default();
+        let mut app = new_test_app(&ctx);
+        let paper = egui::Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 720.0));
+        app.paper_rect = Some(paper);
+        app.toolbar_state.active_tool = ActiveTool::Shapes;
+
+        let kinds = [
+            inknote_core::ShapeKind::Line,
+            inknote_core::ShapeKind::Curve,
+            inknote_core::ShapeKind::Arrow,
+            inknote_core::ShapeKind::Rectangle,
+            inknote_core::ShapeKind::RoundedRect,
+            inknote_core::ShapeKind::Circle,
+            inknote_core::ShapeKind::Triangle,
+            inknote_core::ShapeKind::Diamond,
+        ];
+
+        for (i, kind) in kinds.iter().copied().enumerate() {
+            app.toolbar_state.shape_kind = kind;
+            app.toolbar_state.shape_dashed = i % 2 == 1;
+            app.toolbar_state.shape_stroke_width = 2.5 + i as f64 * 0.5;
+            app.toolbar_state.shape_color = [25, 103, 210, 255];
+
+            let y = 80.0 + i as f32 * 40.0;
+            let s = app.view.to_screen(paper, Pos2::new(100.0, y));
+            let e = app.view.to_screen(paper, Pos2::new(220.0, y + 30.0));
+            app.shape_down(&ctx, s);
+            app.shape_move(app.view.to_screen(paper, Pos2::new(160.0, y - 10.0)), false);
+            app.shape_up(e, false);
+        }
+
+        assert_eq!(app.doc.pages()[0].shapes.len(), 8);
+        assert!(app.doc.pages()[0].shapes[1].control.is_some()); // Curve có control point
+        assert!(app.doc.pages()[0].shapes[1].dashed);
+
+        assert!(app.doc.undo());
+        assert_eq!(app.doc.pages()[0].shapes.len(), 7);
+        assert!(app.doc.redo());
+        assert_eq!(app.doc.pages()[0].shapes.len(), 8);
+
+        // Kiểm tra lưu và mở lại file giữ nguyên toàn bộ 8 hình học
+        let tmp = std::env::temp_dir().join("inknote_test_shapes_roundtrip.inknote");
+        app.current_path = Some(tmp.clone());
+        assert!(app.save_document());
+
+        let mut app2 = new_test_app(&ctx);
+        app2.load_document_from(tmp.clone());
+        let _ = std::fs::remove_file(tmp);
+        assert_eq!(app2.doc.pages()[0].shapes.len(), 8);
+        assert_eq!(
+            app2.doc.pages()[0].shapes[2].kind,
+            inknote_core::ShapeKind::Arrow
+        );
+    }
+
+    #[test]
+    fn test_eraser_standard_and_stroke_never_erase_shapes() {
+        let ctx = egui::Context::default();
+        let mut app = new_test_app(&ctx);
+        let paper = egui::Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 720.0));
+        app.paper_rect = Some(paper);
+
+        // 1. Vẽ 1 hình chữ nhật tại (150, 150) -> (300, 260)
+        let sh_id = app.doc.alloc_id();
+        app.doc.execute(Command::AddShape {
+            page_index: 0,
+            obj: inknote_core::ShapeObject {
+                id: sh_id,
+                kind: inknote_core::ShapeKind::Rectangle,
+                start: [150.0, 150.0],
+                end: [300.0, 260.0],
+                control: None,
+                color: [217, 48, 37, 255],
+                stroke_width: 3.0,
+                dashed: false,
+            },
+        });
+
+        // 2. Vẽ 1 nét bút chồng lên hình trên
+        app.brush_config.style = inknote_pen::brushconfig::BrushStyle::Solid;
+        let t0 = Instant::now();
+        app.drawing_page_index = Some(0);
+        app.pen_down(app.view.to_screen(paper, Pos2::new(140.0, 200.0)), 0.5, t0);
+        app.pen_down(
+            app.view.to_screen(paper, Pos2::new(220.0, 200.0)),
+            0.5,
+            t0 + Duration::from_millis(16),
+        );
+        app.pen_up(
+            app.view.to_screen(paper, Pos2::new(310.0, 200.0)),
+            0.5,
+            t0 + Duration::from_millis(32),
+        );
+        assert_eq!(app.doc.strokes().len(), 1);
+
+        // 3. Quét tẩy Standard qua cạnh trên hình học (y=150) và cắt qua nét bút (y=200) -> chỉ nét bút bị cắt, hình giữ nguyên
+        app.toolbar_state.active_tool = ActiveTool::Eraser;
+        app.toolbar_state.eraser_mode = toolbar::EraserMode::Standard;
+        app.toolbar_state.eraser_size = 24.0;
+        let p_a = app.view.to_screen(paper, Pos2::new(220.0, 140.0));
+        let p_b = app.view.to_screen(paper, Pos2::new(220.0, 200.0));
+        app.eraser_down(p_a, 0);
+        app.eraser_move(p_b);
+        app.eraser_up(p_b);
+        assert_eq!(app.doc.pages()[0].shapes.len(), 1);
+        assert_eq!(app.doc.pages()[0].shapes[0].id, sh_id);
+
+        // 4. Quét tẩy Stroke ngang qua toàn bộ nét bút còn lại lẫn 2 cạnh dọc hình học -> xoá sạch nét bút, vẫn giữ nguyên hình học
+        app.toolbar_state.eraser_mode = toolbar::EraserMode::Stroke;
+        app.eraser_down(app.view.to_screen(paper, Pos2::new(135.0, 200.0)), 0);
+        app.eraser_up(app.view.to_screen(paper, Pos2::new(315.0, 200.0)));
+        assert!(app.doc.strokes().is_empty());
+        assert_eq!(app.doc.pages()[0].shapes.len(), 1);
+        assert_eq!(app.doc.pages()[0].shapes[0].id, sh_id);
+    }
+
+    #[test]
+    fn test_lasso_select_filter_move_resize_delete_shapes() {
+        let ctx = egui::Context::default();
+        let mut app = new_test_app(&ctx);
+        let paper = egui::Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 720.0));
+        app.paper_rect = Some(paper);
+
+        let sh_id = app.doc.alloc_id();
+        app.doc.execute(Command::AddShape {
+            page_index: 0,
+            obj: inknote_core::ShapeObject {
+                id: sh_id,
+                kind: inknote_core::ShapeKind::Diamond,
+                start: [120.0, 120.0],
+                end: [200.0, 200.0],
+                control: None,
+                color: [20, 22, 25, 255],
+                stroke_width: 2.5,
+                dashed: false,
+            },
+        });
+
+        // 1. Tắt filter shapes -> Lasso không chọn hình
+        app.toolbar_state.active_tool = ActiveTool::Lasso;
+        app.toolbar_state.lasso_mode = toolbar::LassoMode::Rectangle;
+        app.toolbar_state.lasso_filter.shapes = false;
+        let r0 = app.view.to_screen(paper, Pos2::new(100.0, 100.0));
+        let r1 = app.view.to_screen(paper, Pos2::new(220.0, 220.0));
+        app.lasso_down(&ctx, r0);
+        app.lasso_move(r1);
+        app.lasso_up();
+        assert!(app.lasso_state.selection.is_none());
+
+        // 2. Bật filter shapes, dùng Freehand Lasso khoanh chọn hình
+        app.toolbar_state.lasso_filter.shapes = true;
+        app.toolbar_state.lasso_mode = toolbar::LassoMode::Freehand;
+        let poly = [
+            Pos2::new(100.0, 100.0),
+            Pos2::new(220.0, 100.0),
+            Pos2::new(220.0, 220.0),
+            Pos2::new(100.0, 220.0),
+        ];
+        app.lasso_down(&ctx, app.view.to_screen(paper, poly[0]));
+        for pt in &poly[1..] {
+            app.lasso_move(app.view.to_screen(paper, *pt));
+        }
+        app.lasso_up();
+
+        let sel = app.lasso_state.selection.as_ref().unwrap();
+        assert_eq!(sel.shape_ids, vec![sh_id]);
+
+        // 3. Kéo di chuyển (+50, +30)
+        let center = app.view.to_screen(paper, sel.bbox.center());
+        app.lasso_down(&ctx, center);
+        app.lasso_move(center + vec2(50.0, 30.0) * app.view.zoom);
+        app.lasso_up();
+        assert!((app.doc.pages()[0].shapes[0].start[0] - 170.0).abs() < 1.0);
+        assert!((app.doc.pages()[0].shapes[0].start[1] - 150.0).abs() < 1.0);
+
+        // 4. Xoá qua Lasso -> Undo khôi phục lại hình
+        app.delete_lasso_selection();
+        assert!(app.doc.pages()[0].shapes.is_empty());
+        assert!(app.doc.undo());
+        assert_eq!(app.doc.pages()[0].shapes.len(), 1);
     }
 }

@@ -2,23 +2,26 @@
 // theo đặc tả docs/04-ui-spec.md (Ngôn ngữ giao diện: Tiếng Anh).
 
 use eframe::egui::{
-    self, pos2, vec2, Align, Align2, Color32, CornerRadius, Layout, PopupCloseBehavior, Pos2, Rect,
-    RichText, Sense, Stroke, Ui, UiBuilder, Vec2,
+    self, Align, Align2, Color32, CornerRadius, Layout, PopupCloseBehavior, Pos2, Rect, RichText,
+    Sense, Stroke, Ui, UiBuilder, Vec2, pos2, vec2,
 };
-use inknote_core::{CanvasMode, PaperOrientation, PaperPattern, PaperSettings, PaperSize};
+use inknote_core::{
+    CanvasMode, PaperOrientation, PaperPattern, PaperSettings, PaperSize, ShapeKind,
+};
 use inknote_pen::{
+    Color as PenColor,
     brushconfig::{BrushConfig, BrushStyle},
     builders::PenPathBuilderType,
     style::PressureCurve,
-    Color as PenColor,
 };
 
 use crate::{
     autosave::FileStatusInfo,
-    icons::{draw_icon, ToolIcon},
+    icons::{ToolIcon, draw_icon},
+    shapes::{ALL_SHAPE_KINDS, draw_shape_kind_icon, shape_kind_label},
     theme::{
-        pen_color_to_egui, rgb_to_pen_color, Theme, EXTENDED_PALETTE, MARKER_QUICK_WIDTHS,
-        QUICK_COLORS, SOLID_QUICK_WIDTHS,
+        EXTENDED_PALETTE, MARKER_QUICK_WIDTHS, QUICK_COLORS, SOLID_QUICK_WIDTHS, Theme,
+        pen_color_to_egui, rgb_to_pen_color,
     },
 };
 
@@ -128,6 +131,10 @@ pub struct ToolbarState {
     pub lasso_mode: LassoMode,
     pub lasso_filter: LassoFilter,
     pub has_lasso_selection: bool,
+    pub shape_kind: ShapeKind,
+    pub shape_stroke_width: f64,
+    pub shape_color: [u8; 4],
+    pub shape_dashed: bool,
     pub last_metrics: ToolbarLayoutMetrics,
 }
 
@@ -144,6 +151,10 @@ impl Default for ToolbarState {
             lasso_mode: LassoMode::Freehand,
             lasso_filter: LassoFilter::default(),
             has_lasso_selection: false,
+            shape_kind: ShapeKind::Line,
+            shape_stroke_width: 2.5,
+            shape_color: [20, 22, 25, 255],
+            shape_dashed: false,
             last_metrics: ToolbarLayoutMetrics::default(),
         }
     }
@@ -517,13 +528,10 @@ fn set_current_color(cfg: &mut BrushConfig, rgb: [u8; 3], marker_alpha: f64) {
     }
 }
 
-fn same_rgb(c: PenColor, rgb: [u8; 3]) -> bool {
-    let r = (c.r.clamp(0.0, 1.0) * 255.0).round() as i32;
-    let g = (c.g.clamp(0.0, 1.0) * 255.0).round() as i32;
-    let b = (c.b.clamp(0.0, 1.0) * 255.0).round() as i32;
-    (r - rgb[0] as i32).abs() <= 2
-        && (g - rgb[1] as i32).abs() <= 2
-        && (b - rgb[2] as i32).abs() <= 2
+fn same_rgb_u8(a: [u8; 3], b: [u8; 3]) -> bool {
+    (a[0] as i32 - b[0] as i32).abs() <= 2
+        && (a[1] as i32 - b[1] as i32).abs() <= 2
+        && (a[2] as i32 - b[2] as i32).abs() <= 2
 }
 
 /// Hiển thị Khu vực 1 (Navigation Toolbar) và Khu vực 2 (Contextual Tool Options Bar)
@@ -1041,6 +1049,9 @@ pub fn show_toolbars(
                             ActiveTool::Lasso => {
                                 show_lasso_contextual_options(ui, theme, state, &mut actions);
                             }
+                            ActiveTool::Shapes => {
+                                show_shapes_contextual_options(ui, theme, state);
+                            }
                             other => {
                                 ui.label(
                                     RichText::new(format!(
@@ -1217,21 +1228,80 @@ fn show_pen_contextual_options(
 
     // 2. Nhóm Độ dày nét bút (5 mức nhanh + Pop-up thanh trượt)
     let (cur_width, cur_color) = current_width_and_color(brush_config, state.marker_alpha);
-    let (presets, vis_scale): ([f64; 5], f32) = match brush_config.style {
-        BrushStyle::Marker => (MARKER_QUICK_WIDTHS, 0.32),
-        BrushStyle::Solid | BrushStyle::Textured => (SOLID_QUICK_WIDTHS, 1.0),
+    let (presets, vis_scale, range) = match brush_config.style {
+        BrushStyle::Marker => (MARKER_QUICK_WIDTHS, 0.32, 4.0..=48.0),
+        BrushStyle::Solid | BrushStyle::Textured => (SOLID_QUICK_WIDTHS, 1.0, 0.5..=24.0),
     };
+    show_thickness_controls(ui, theme, presets, vis_scale, range, cur_width, |w| {
+        set_current_width(brush_config, w);
+    });
 
+    draw_vertical_divider(ui, row_h, theme.tool_bar_pill_stroke);
+
+    // 3. Hàng chấm màu nhanh (6 màu) + Nút mở Pop-up Bảng màu mở rộng
+    let cur_rgb = [
+        (cur_color.r.clamp(0.0, 1.0) * 255.0).round() as u8,
+        (cur_color.g.clamp(0.0, 1.0) * 255.0).round() as u8,
+        (cur_color.b.clamp(0.0, 1.0) * 255.0).round() as u8,
+    ];
+    let cur_rgba = pen_color_to_egui(cur_color);
+    let mut picked: Option<(Color32, bool)> = None;
+    show_color_controls(
+        ui,
+        theme,
+        "pen_extended_color_grid",
+        "Stroke Color",
+        cur_rgb,
+        cur_rgba,
+        |col, from_swatch| picked = Some((col, from_swatch)),
+        |ui| {
+            if brush_config.style == BrushStyle::Marker {
+                ui.add_space(4.0);
+                let mut alpha_pct = (state.marker_alpha * 100.0) as f32;
+                if ui
+                    .add(egui::Slider::new(&mut alpha_pct, 15.0..=85.0).text("Opacity %"))
+                    .changed()
+                {
+                    state.marker_alpha = (alpha_pct as f64 / 100.0).clamp(0.15, 0.85);
+                    if let Some(mut c) = brush_config.marker_options.stroke_color {
+                        c.a = state.marker_alpha;
+                        brush_config.marker_options.stroke_color = Some(c);
+                    }
+                }
+            }
+        },
+    );
+    if let Some((egui_col, from_swatch)) = picked {
+        let [r, g, b, a] = egui_col.to_srgba_unmultiplied();
+        let alpha = if brush_config.style == BrushStyle::Marker {
+            state.marker_alpha
+        } else if from_swatch {
+            1.0
+        } else {
+            (a as f64 / 255.0).max(0.1)
+        };
+        set_current_color(brush_config, [r, g, b], alpha);
+    }
+}
+
+/// Điều khiển chung cho độ dày nét (5 chấm nhanh + Pop-up thanh trượt px).
+fn show_thickness_controls(
+    ui: &mut Ui,
+    theme: &Theme,
+    presets: [f64; 5],
+    vis_scale: f32,
+    range: std::ops::RangeInclusive<f64>,
+    cur_width: f64,
+    mut on_change: impl FnMut(f64),
+) {
     for w in presets {
         let is_sel = (cur_width - w).abs() < 0.25;
         if stroke_width_slot_button(ui, theme, w, is_sel, vis_scale).clicked() {
-            set_current_width(brush_config, w);
+            on_change(w);
         }
     }
 
-    // Nút hiển thị số px hiện tại & mở Pop-up thanh trượt độ dày (cao đúng `row_h`)
     let width_btn = stroke_width_value_button(ui, theme, cur_width);
-
     egui::Popup::from_toggle_button_response(&width_btn)
         .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
         .frame(theme.dark_popup_frame(ui.style()))
@@ -1245,25 +1315,32 @@ fn show_pen_contextual_options(
             );
             ui.add_space(6.0);
             let mut w = cur_width;
-            let range = match brush_config.style {
-                BrushStyle::Marker => 4.0..=48.0,
-                BrushStyle::Solid | BrushStyle::Textured => 0.5..=24.0,
-            };
             if ui
                 .add(egui::Slider::new(&mut w, range).text("px"))
                 .changed()
             {
-                set_current_width(brush_config, w);
+                on_change(w);
             }
         });
+}
 
-    draw_vertical_divider(ui, row_h, theme.tool_bar_pill_stroke);
-
-    // 3. Hàng chấm màu nhanh (6 màu) + Nút mở Pop-up Bảng màu mở rộng (tất cả cao đúng `row_h`)
+/// Điều khiển chung cho hàng màu nhanh + Pop-up bảng màu 24 ô + chọn màu tuỳ ý.
+#[allow(clippy::too_many_arguments)]
+fn show_color_controls(
+    ui: &mut Ui,
+    theme: &Theme,
+    grid_id: &'static str,
+    popup_title: &str,
+    cur_rgb: [u8; 3],
+    mut cur_rgba: Color32,
+    mut on_pick_rgba: impl FnMut(Color32, bool),
+    extra_popup_ui: impl FnOnce(&mut Ui),
+) {
+    let row_h = theme.tool_row_height;
     for rgb in QUICK_COLORS {
-        let is_sel = same_rgb(cur_color, rgb);
+        let is_sel = same_rgb_u8(cur_rgb, rgb);
         if color_swatch_button(ui, rgb, is_sel, 8.5, row_h).clicked() {
-            set_current_color(brush_config, rgb, state.marker_alpha);
+            on_pick_rgba(Color32::from_rgb(rgb[0], rgb[1], rgb[2]), true);
         }
     }
 
@@ -1274,7 +1351,7 @@ fn show_pen_contextual_options(
         .show(|ui| {
             ui.set_min_width(245.0);
             ui.label(
-                RichText::new("Stroke Color")
+                RichText::new(popup_title)
                     .size(theme.font_size_title)
                     .strong()
                     .color(theme.popup_header_fg),
@@ -1286,13 +1363,13 @@ fn show_pen_contextual_options(
                 .corner_radius(CornerRadius::same(8))
                 .inner_margin(egui::Margin::same(8))
                 .show(ui, |ui| {
-                    egui::Grid::new("extended_color_grid")
+                    egui::Grid::new(grid_id)
                         .spacing(vec2(6.0, 6.0))
                         .show(ui, |ui| {
                             for (idx, rgb) in EXTENDED_PALETTE.iter().copied().enumerate() {
-                                let is_sel = same_rgb(cur_color, rgb);
+                                let is_sel = same_rgb_u8(cur_rgb, rgb);
                                 if color_swatch_button(ui, rgb, is_sel, 9.5, 26.0).clicked() {
-                                    set_current_color(brush_config, rgb, state.marker_alpha);
+                                    on_pick_rgba(Color32::from_rgb(rgb[0], rgb[1], rgb[2]), true);
                                 }
                                 if (idx + 1) % 8 == 0 {
                                     ui.end_row();
@@ -1308,32 +1385,12 @@ fn show_pen_contextual_options(
                         .size(theme.font_size_small)
                         .color(theme.tool_text_muted),
                 );
-                let mut egui_col = pen_color_to_egui(cur_color);
-                if ui.color_edit_button_srgba(&mut egui_col).changed() {
-                    let [r, g, b, a] = egui_col.to_srgba_unmultiplied();
-                    let alpha = if brush_config.style == BrushStyle::Marker {
-                        state.marker_alpha
-                    } else {
-                        (a as f64 / 255.0).max(0.1)
-                    };
-                    set_current_color(brush_config, [r, g, b], alpha);
+                if ui.color_edit_button_srgba(&mut cur_rgba).changed() {
+                    on_pick_rgba(cur_rgba, false);
                 }
             });
 
-            if brush_config.style == BrushStyle::Marker {
-                ui.add_space(4.0);
-                let mut alpha_pct = (state.marker_alpha * 100.0) as f32;
-                if ui
-                    .add(egui::Slider::new(&mut alpha_pct, 15.0..=85.0).text("Opacity %"))
-                    .changed()
-                {
-                    state.marker_alpha = (alpha_pct as f64 / 100.0).clamp(0.15, 0.85);
-                    if let Some(mut c) = brush_config.marker_options.stroke_color {
-                        c.a = state.marker_alpha;
-                        brush_config.marker_options.stroke_color = Some(c);
-                    }
-                }
-            }
+            extra_popup_ui(ui);
         });
 }
 
@@ -1644,4 +1701,105 @@ fn show_lasso_contextual_options(
             actions.delete_selection_clicked = true;
         }
     }
+}
+
+fn shape_kind_chip(ui: &mut Ui, theme: &Theme, kind: ShapeKind, selected: bool) -> egui::Response {
+    let h = theme.tool_row_height;
+    let (rect, resp) = ui.allocate_exact_size(vec2(h, h), Sense::click());
+    if ui.is_rect_visible(rect) {
+        if selected {
+            ui.painter().rect_filled(
+                rect,
+                CornerRadius::same(theme.tool_item_rounding),
+                theme.tool_selected_bg,
+            );
+        } else if resp.hovered() {
+            ui.painter().rect_filled(
+                rect,
+                CornerRadius::same(theme.tool_item_rounding),
+                theme.tool_hover_bg,
+            );
+        }
+        let fg = if selected {
+            Color32::WHITE
+        } else {
+            theme.tool_text_fg
+        };
+        draw_shape_kind_icon(ui.painter(), rect.shrink(3.0), kind, fg);
+    }
+    resp.on_hover_text(shape_kind_label(kind))
+}
+
+/// Nội dung Thanh tuỳ chọn khi đang chọn công cụ Hình học (Shapes)
+fn show_shapes_contextual_options(ui: &mut Ui, theme: &Theme, state: &mut ToolbarState) {
+    let row_h = theme.tool_row_height;
+
+    // 1. Hàng chọn 8 loại hình cơ bản
+    for kind in ALL_SHAPE_KINDS {
+        if shape_kind_chip(ui, theme, kind, state.shape_kind == kind).clicked() {
+            state.shape_kind = kind;
+        }
+    }
+
+    draw_vertical_divider(ui, row_h, theme.tool_bar_pill_stroke);
+
+    // 2. Kiểu nét: Liền (Solid) hoặc Đứt (Dashed)
+    if eraser_mode_chip(
+        ui,
+        theme,
+        "Solid",
+        !state.shape_dashed,
+        "Solid shape outline",
+    )
+    .clicked()
+    {
+        state.shape_dashed = false;
+    }
+    if eraser_mode_chip(
+        ui,
+        theme,
+        "Dashed",
+        state.shape_dashed,
+        "Dashed shape outline",
+    )
+    .clicked()
+    {
+        state.shape_dashed = true;
+    }
+
+    draw_vertical_divider(ui, row_h, theme.tool_bar_pill_stroke);
+
+    // 3. Độ dày nét viền (5 mức nhanh + thanh trượt px)
+    let cur_w = state.shape_stroke_width;
+    show_thickness_controls(ui, theme, SOLID_QUICK_WIDTHS, 1.0, 0.5..=24.0, cur_w, |w| {
+        state.shape_stroke_width = w
+    });
+
+    draw_vertical_divider(ui, row_h, theme.tool_bar_pill_stroke);
+
+    // 4. Màu hình (6 chấm nhanh + Pop-up 24 màu + chọn màu tuỳ ý)
+    let cur_rgb = [
+        state.shape_color[0],
+        state.shape_color[1],
+        state.shape_color[2],
+    ];
+    let cur_rgba = Color32::from_rgba_unmultiplied(
+        state.shape_color[0],
+        state.shape_color[1],
+        state.shape_color[2],
+        state.shape_color[3],
+    );
+    show_color_controls(
+        ui,
+        theme,
+        "shape_extended_color_grid",
+        "Shape Color",
+        cur_rgb,
+        cur_rgba,
+        |col, from_swatch| {
+            let [r, g, b, a] = col.to_srgba_unmultiplied();
+            state.shape_color = [r, g, b, if from_swatch { 255 } else { a.max(25) }];
+        },
+        |_| {},
+    );
 }
