@@ -106,11 +106,23 @@ impl Drop for TempWorkDir {
 }
 
 /// Tạo nội dung file `.tex` hoàn chỉnh hỗ trợ tiếng Việt (`T5` + `utf8`) và toán học (`amsmath, amssymb`).
+/// Nếu người dùng không gõ `$ ... $`, tự động bọc trong `$\displaystyle ...$` để nhập công thức nhanh.
 pub fn build_tex_document(source: &str, color_rgb: Option<[u8; 3]>) -> String {
     let trimmed = source.trim();
     if trimmed.starts_with("\\documentclass") {
         return trimmed.to_string();
     }
+    let has_explicit_math = trimmed.contains('$')
+        || trimmed.contains("\\[")
+        || trimmed.contains("\\begin{equation")
+        || trimmed.contains("\\begin{align")
+        || trimmed.contains("\\begin{gather")
+        || trimmed.contains("\\begin{multline");
+    let body = if has_explicit_math {
+        trimmed.to_string()
+    } else {
+        format!("$\\displaystyle {trimmed}$")
+    };
     match color_rgb {
         Some([r, g, b]) => format!(
             "\\documentclass[preview,border=2pt]{{standalone}}\n\
@@ -119,7 +131,7 @@ pub fn build_tex_document(source: &str, color_rgb: Option<[u8; 3]>) -> String {
              \\usepackage{{amsmath,amssymb}}\n\
              \\usepackage{{xcolor}}\n\
              \\begin{{document}}\n\
-             {{\\color[RGB]{{{r},{g},{b}}}{trimmed}}}\n\
+             {{\\color[RGB]{{{r},{g},{b}}}{body}}}\n\
              \\end{{document}}\n"
         ),
         None => format!(
@@ -128,7 +140,7 @@ pub fn build_tex_document(source: &str, color_rgb: Option<[u8; 3]>) -> String {
              \\usepackage[utf8]{{inputenc}}\n\
              \\usepackage{{amsmath,amssymb}}\n\
              \\begin{{document}}\n\
-             {trimmed}\n\
+             {body}\n\
              \\end{{document}}\n"
         ),
     }
@@ -479,6 +491,14 @@ mod tests {
             elapsed < Duration::from_secs(4),
             "timeout should abort promptly, took {elapsed:?}"
         );
+    }
+
+    #[test]
+    fn compile_bare_formula_without_dollar_signs() {
+        let src = r"x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a} + \mathbb{R}";
+        let svg = compile_latex_to_svg(src, &CompileOptions::default())
+            .expect("bare formula without $ should compile");
+        assert!(svg.contains("<svg"));
     }
 
     #[test]

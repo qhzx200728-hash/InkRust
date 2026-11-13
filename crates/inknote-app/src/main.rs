@@ -1030,7 +1030,7 @@ impl eframe::App for InkNoteApp {
             }
             if actions.latex_clicked {
                 self.latex_dialog
-                    .open_with(r"$x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}$", &ctx);
+                    .open_with(r"x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}", &ctx);
             }
             if key_pgup && self.doc.active_page_index() > 0 {
                 let target = self.doc.active_page_index() - 1;

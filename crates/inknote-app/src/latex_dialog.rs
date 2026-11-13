@@ -14,9 +14,710 @@ use inknote_latex::{compile_latex_to_svg, CompileOptions, LatexError};
 
 use crate::{svg_cache::SvgTextureCache, theme::Theme};
 
-const DIALOG_WIDTH: f32 = 520.0;
+const DIALOG_WIDTH: f32 = 560.0;
 const DEBOUNCE_DELAY: Duration = Duration::from_millis(500);
 const PREVIEW_TEX_ID: u64 = 999_001;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SymbolCategory {
+    All,
+    GreekHebrew,
+    Delimiters,
+    MathsConstructs,
+    VariableSized,
+    StandardFunctions,
+    OperatorsRelations,
+    Arrows,
+    Accents,
+    Miscellaneous,
+    LetterStyles,
+}
+
+impl SymbolCategory {
+    const ALL_CATS: [Self; 11] = [
+        Self::All,
+        Self::GreekHebrew,
+        Self::Delimiters,
+        Self::MathsConstructs,
+        Self::VariableSized,
+        Self::StandardFunctions,
+        Self::OperatorsRelations,
+        Self::Arrows,
+        Self::Accents,
+        Self::Miscellaneous,
+        Self::LetterStyles,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::GreekHebrew => "Greek/Hebrew Letters",
+            Self::Delimiters => "Delimiters",
+            Self::MathsConstructs => "Maths Constructs",
+            Self::VariableSized => "Variable-sized symbols",
+            Self::StandardFunctions => "Standard Functions",
+            Self::OperatorsRelations => "Operators and Relations",
+            Self::Arrows => "Arrows",
+            Self::Accents => "Accents",
+            Self::Miscellaneous => "Miscellaneous",
+            Self::LetterStyles => "Letter Styles",
+        }
+    }
+}
+
+struct LatexSymbol {
+    cat: SymbolCategory,
+    label: &'static str,
+    tex: &'static str,
+}
+
+const LATEX_SYMBOLS: &[LatexSymbol] = &[
+    // Greek/Hebrew Letters
+    LatexSymbol {
+        cat: SymbolCategory::GreekHebrew,
+        label: "α",
+        tex: r"\alpha",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::GreekHebrew,
+        label: "β",
+        tex: r"\beta",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::GreekHebrew,
+        label: "γ",
+        tex: r"\gamma",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::GreekHebrew,
+        label: "δ",
+        tex: r"\delta",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::GreekHebrew,
+        label: "ε",
+        tex: r"\epsilon",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::GreekHebrew,
+        label: "ζ",
+        tex: r"\zeta",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::GreekHebrew,
+        label: "η",
+        tex: r"\eta",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::GreekHebrew,
+        label: "θ",
+        tex: r"\theta",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::GreekHebrew,
+        label: "λ",
+        tex: r"\lambda",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::GreekHebrew,
+        label: "μ",
+        tex: r"\mu",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::GreekHebrew,
+        label: "π",
+        tex: r"\pi",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::GreekHebrew,
+        label: "ρ",
+        tex: r"\rho",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::GreekHebrew,
+        label: "σ",
+        tex: r"\sigma",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::GreekHebrew,
+        label: "τ",
+        tex: r"\tau",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::GreekHebrew,
+        label: "φ",
+        tex: r"\phi",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::GreekHebrew,
+        label: "ψ",
+        tex: r"\psi",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::GreekHebrew,
+        label: "ω",
+        tex: r"\omega",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::GreekHebrew,
+        label: "Γ",
+        tex: r"\Gamma",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::GreekHebrew,
+        label: "Δ",
+        tex: r"\Delta",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::GreekHebrew,
+        label: "Θ",
+        tex: r"\Theta",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::GreekHebrew,
+        label: "Λ",
+        tex: r"\Lambda",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::GreekHebrew,
+        label: "Σ",
+        tex: r"\Sigma",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::GreekHebrew,
+        label: "Φ",
+        tex: r"\Phi",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::GreekHebrew,
+        label: "Ω",
+        tex: r"\Omega",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::GreekHebrew,
+        label: "ℵ",
+        tex: r"\aleph",
+    },
+    // Delimiters
+    LatexSymbol {
+        cat: SymbolCategory::Delimiters,
+        label: "( )",
+        tex: r"\left(  \right)",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::Delimiters,
+        label: "[ ]",
+        tex: r"\left[  \right]",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::Delimiters,
+        label: "{ }",
+        tex: r"\left\{  \right\}",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::Delimiters,
+        label: "| |",
+        tex: r"\left|  \right|",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::Delimiters,
+        label: "‖ ‖",
+        tex: r"\left\|  \right\|",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::Delimiters,
+        label: "⟨ ⟩",
+        tex: r"\langle  \rangle",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::Delimiters,
+        label: "⌊ ⌋",
+        tex: r"\lfloor  \rfloor",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::Delimiters,
+        label: "⌈ ⌉",
+        tex: r"\lceil  \rceil",
+    },
+    // Maths Constructs
+    LatexSymbol {
+        cat: SymbolCategory::MathsConstructs,
+        label: "a/b",
+        tex: r"\frac{a}{b}",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::MathsConstructs,
+        label: "√x",
+        tex: r"\sqrt{x}",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::MathsConstructs,
+        label: "ⁿ√x",
+        tex: r"\sqrt[n]{x}",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::MathsConstructs,
+        label: "xⁿ",
+        tex: r"x^{n}",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::MathsConstructs,
+        label: "xᵢ",
+        tex: r"x_{i}",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::MathsConstructs,
+        label: "C(n,k)",
+        tex: r"\binom{n}{k}",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::MathsConstructs,
+        label: "{cases}",
+        tex: r"\begin{cases} a & b \\ c & d \end{cases}",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::MathsConstructs,
+        label: "(mat)",
+        tex: r"\begin{pmatrix} a & b \\ c & d \end{pmatrix}",
+    },
+    // Variable-sized symbols
+    LatexSymbol {
+        cat: SymbolCategory::VariableSized,
+        label: "∑",
+        tex: r"\sum_{i=1}^{n}",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::VariableSized,
+        label: "∏",
+        tex: r"\prod_{i=1}^{n}",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::VariableSized,
+        label: "∫",
+        tex: r"\int_{a}^{b}",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::VariableSized,
+        label: "∬",
+        tex: r"\iint",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::VariableSized,
+        label: "∮",
+        tex: r"\oint",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::VariableSized,
+        label: "⋃",
+        tex: r"\bigcup_{i=1}^{n}",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::VariableSized,
+        label: "⋂",
+        tex: r"\bigcap_{i=1}^{n}",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::VariableSized,
+        label: "lim",
+        tex: r"\lim_{x \to \infty}",
+    },
+    // Standard Functions
+    LatexSymbol {
+        cat: SymbolCategory::StandardFunctions,
+        label: "sin",
+        tex: r"\sin",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::StandardFunctions,
+        label: "cos",
+        tex: r"\cos",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::StandardFunctions,
+        label: "tan",
+        tex: r"\tan",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::StandardFunctions,
+        label: "cot",
+        tex: r"\cot",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::StandardFunctions,
+        label: "arcsin",
+        tex: r"\arcsin",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::StandardFunctions,
+        label: "arccos",
+        tex: r"\arccos",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::StandardFunctions,
+        label: "arctan",
+        tex: r"\arctan",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::StandardFunctions,
+        label: "ln",
+        tex: r"\ln",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::StandardFunctions,
+        label: "log",
+        tex: r"\log",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::StandardFunctions,
+        label: "exp",
+        tex: r"\exp",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::StandardFunctions,
+        label: "max",
+        tex: r"\max",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::StandardFunctions,
+        label: "min",
+        tex: r"\min",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::StandardFunctions,
+        label: "det",
+        tex: r"\det",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::StandardFunctions,
+        label: "gcd",
+        tex: r"\gcd",
+    },
+    // Operators and Relations
+    LatexSymbol {
+        cat: SymbolCategory::OperatorsRelations,
+        label: "±",
+        tex: r"\pm",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::OperatorsRelations,
+        label: "∓",
+        tex: r"\mp",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::OperatorsRelations,
+        label: "×",
+        tex: r"\times",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::OperatorsRelations,
+        label: "÷",
+        tex: r"\div",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::OperatorsRelations,
+        label: "·",
+        tex: r"\cdot",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::OperatorsRelations,
+        label: "∘",
+        tex: r"\circ",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::OperatorsRelations,
+        label: "≤",
+        tex: r"\leq",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::OperatorsRelations,
+        label: "≥",
+        tex: r"\geq",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::OperatorsRelations,
+        label: "≠",
+        tex: r"\neq",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::OperatorsRelations,
+        label: "≈",
+        tex: r"\approx",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::OperatorsRelations,
+        label: "≡",
+        tex: r"\equiv",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::OperatorsRelations,
+        label: "∼",
+        tex: r"\sim",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::OperatorsRelations,
+        label: "∝",
+        tex: r"\propto",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::OperatorsRelations,
+        label: "∈",
+        tex: r"\in",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::OperatorsRelations,
+        label: "∉",
+        tex: r"\notin",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::OperatorsRelations,
+        label: "⊂",
+        tex: r"\subset",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::OperatorsRelations,
+        label: "⊆",
+        tex: r"\subseteq",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::OperatorsRelations,
+        label: "∪",
+        tex: r"\cup",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::OperatorsRelations,
+        label: "∩",
+        tex: r"\cap",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::OperatorsRelations,
+        label: "∖",
+        tex: r"\setminus",
+    },
+    // Arrows
+    LatexSymbol {
+        cat: SymbolCategory::Arrows,
+        label: "→",
+        tex: r"\to",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::Arrows,
+        label: "←",
+        tex: r"\leftarrow",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::Arrows,
+        label: "↔",
+        tex: r"\leftrightarrow",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::Arrows,
+        label: "⇒",
+        tex: r"\Rightarrow",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::Arrows,
+        label: "⇐",
+        tex: r"\Leftarrow",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::Arrows,
+        label: "⇔",
+        tex: r"\Leftrightarrow",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::Arrows,
+        label: "↦",
+        tex: r"\mapsto",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::Arrows,
+        label: "↑",
+        tex: r"\uparrow",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::Arrows,
+        label: "↓",
+        tex: r"\downarrow",
+    },
+    // Accents
+    LatexSymbol {
+        cat: SymbolCategory::Accents,
+        label: "x̂",
+        tex: r"\hat{x}",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::Accents,
+        label: "x̄",
+        tex: r"\bar{x}",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::Accents,
+        label: "v⃗",
+        tex: r"\vec{v}",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::Accents,
+        label: "ẋ",
+        tex: r"\dot{x}",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::Accents,
+        label: "ẍ",
+        tex: r"\ddot{x}",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::Accents,
+        label: "x̃",
+        tex: r"\tilde{x}",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::Accents,
+        label: "AB̂",
+        tex: r"\widehat{AB}",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::Accents,
+        label: "A̅B̅",
+        tex: r"\overline{AB}",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::Accents,
+        label: "A̲B̲",
+        tex: r"\underline{AB}",
+    },
+    // Miscellaneous
+    LatexSymbol {
+        cat: SymbolCategory::Miscellaneous,
+        label: "∞",
+        tex: r"\infty",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::Miscellaneous,
+        label: "∂",
+        tex: r"\partial",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::Miscellaneous,
+        label: "∇",
+        tex: r"\nabla",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::Miscellaneous,
+        label: "∀",
+        tex: r"\forall",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::Miscellaneous,
+        label: "∃",
+        tex: r"\exists",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::Miscellaneous,
+        label: "∄",
+        tex: r"\nexists",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::Miscellaneous,
+        label: "∅",
+        tex: r"\emptyset",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::Miscellaneous,
+        label: "∴",
+        tex: r"\therefore",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::Miscellaneous,
+        label: "∵",
+        tex: r"\because",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::Miscellaneous,
+        label: "⋯",
+        tex: r"\cdots",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::Miscellaneous,
+        label: "⋮",
+        tex: r"\vdots",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::Miscellaneous,
+        label: "⋱",
+        tex: r"\ddots",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::Miscellaneous,
+        label: "∠",
+        tex: r"\angle",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::Miscellaneous,
+        label: "△",
+        tex: r"\triangle",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::Miscellaneous,
+        label: "⊥",
+        tex: r"\perp",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::Miscellaneous,
+        label: "∥",
+        tex: r"\parallel",
+    },
+    // Letter Styles
+    LatexSymbol {
+        cat: SymbolCategory::LetterStyles,
+        label: "ℝ",
+        tex: r"\mathbb{R}",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::LetterStyles,
+        label: "ℕ",
+        tex: r"\mathbb{N}",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::LetterStyles,
+        label: "ℤ",
+        tex: r"\mathbb{Z}",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::LetterStyles,
+        label: "ℚ",
+        tex: r"\mathbb{Q}",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::LetterStyles,
+        label: "ℂ",
+        tex: r"\mathbb{C}",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::LetterStyles,
+        label: "𝓛",
+        tex: r"\mathcal{L}",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::LetterStyles,
+        label: "𝖌",
+        tex: r"\mathfrak{g}",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::LetterStyles,
+        label: "bf",
+        tex: r"\mathbf{v}",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::LetterStyles,
+        label: "rm",
+        tex: r"\mathrm{d}",
+    },
+    LatexSymbol {
+        cat: SymbolCategory::LetterStyles,
+        label: "text",
+        tex: r"\text{text}",
+    },
+];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LatexDialogAction {
@@ -28,6 +729,7 @@ pub enum LatexDialogAction {
 pub struct LatexDialogState {
     pub open: bool,
     pub source: String,
+    pub category: SymbolCategory,
     last_edit_at: Option<Instant>,
     pending_compile: bool,
     compiling: bool,
@@ -42,6 +744,7 @@ impl Default for LatexDialogState {
         Self {
             open: false,
             source: String::new(),
+            category: SymbolCategory::All,
             last_edit_at: None,
             pending_compile: false,
             compiling: false,
@@ -233,39 +936,67 @@ impl LatexDialogState {
 
                 ui.add_space(8.0);
 
-                // Thanh chèn nhanh ký hiệu toán học phổ biến
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
-                    let snippets = [
-                        (r"\frac{a}{b}", "a/b"),
-                        (r"\sqrt{x}", "√x"),
-                        (r"\sum_{i=1}^{n}", "∑"),
-                        (r"\int_{a}^{b}", "∫"),
-                        (r"\pm", "±"),
-                        (r"\alpha", "α"),
-                        (r"\beta", "β"),
-                    ];
-                    for (tex, label) in snippets {
-                        let btn = egui::Button::new(
-                            egui::RichText::new(label)
-                                .color(Color32::from_rgb(225, 232, 244))
-                                .size(12.0),
-                        )
-                        .fill(Color32::from_rgb(52, 59, 74))
-                        .corner_radius(CornerRadius::same(6));
-                        if ui.add(btn).clicked() {
-                            if !self.source.is_empty() && !self.source.ends_with(' ') {
-                                self.source.push(' ');
+                // Bộ chọn nhóm ký hiệu LaTeX (11 nhóm như ảnh mẫu) + lưới nút chèn nhanh
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Symbols:")
+                            .color(Color32::from_rgb(180, 188, 204))
+                            .size(12.5),
+                    );
+                    egui::ComboBox::from_id_salt("latex_symbol_category")
+                        .width(210.0)
+                        .selected_text(self.category.label())
+                        .show_ui(ui, |ui| {
+                            for cat in SymbolCategory::ALL_CATS {
+                                ui.selectable_value(&mut self.category, cat, cat.label());
                             }
-                            self.source.push_str(tex);
-                            self.mark_edited();
-                        }
-                    }
+                        });
                 });
+
+                ui.add_space(6.0);
+
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(30, 35, 44))
+                    .stroke(Stroke::new(1.0, Color32::from_rgb(56, 64, 78)))
+                    .corner_radius(CornerRadius::same(8))
+                    .inner_margin(egui::Margin::same(6))
+                    .show(ui, |ui| {
+                        ScrollArea::vertical()
+                            .id_salt("latex_symbols_scroll")
+                            .max_height(88.0)
+                            .show(ui, |ui| {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+                                    for sym in LATEX_SYMBOLS {
+                                        if self.category != SymbolCategory::All
+                                            && sym.cat != self.category
+                                        {
+                                            continue;
+                                        }
+                                        let btn = egui::Button::new(
+                                            egui::RichText::new(sym.label)
+                                                .color(Color32::from_rgb(232, 238, 248))
+                                                .size(13.0),
+                                        )
+                                        .min_size(egui::vec2(30.0, 26.0))
+                                        .fill(Color32::from_rgb(48, 55, 68))
+                                        .corner_radius(CornerRadius::same(5));
+                                        if ui.add(btn).on_hover_text(sym.tex).clicked() {
+                                            if !self.source.is_empty() && !self.source.ends_with(' ')
+                                            {
+                                                self.source.push(' ');
+                                            }
+                                            self.source.push_str(sym.tex);
+                                            self.mark_edited();
+                                        }
+                                    }
+                                });
+                            });
+                    });
 
                 ui.add_space(8.0);
 
-                // Ô nhập mã LaTeX (nền tối, chữ sáng, font monospace)
+                // Ô nhập mã LaTeX (nền tối, chữ sáng, font monospace — không cần gõ $$)
                 let edit_frame = egui::Frame::new()
                     .fill(Color32::from_rgb(24, 28, 36))
                     .stroke(Stroke::new(1.0, Color32::from_rgb(70, 80, 98)))
@@ -280,7 +1011,7 @@ impl LatexDialogState {
                             .font(FontId::monospace(14.0))
                             .text_color(Color32::from_rgb(238, 242, 248))
                             .hint_text(
-                                "Type LaTeX here, e.g. $x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}$",
+                                "Type formula directly (no $ needed), e.g. x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}",
                             ),
                     );
                     if resp.changed() {
