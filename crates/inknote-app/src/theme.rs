@@ -18,6 +18,9 @@ pub struct Theme {
     pub nav_divider: Color32,
     pub nav_button_size: [f32; 2],
     pub nav_button_rounding: u8,
+    pub nav_status_saved_dot: Color32,
+    pub nav_status_unsaved_dot: Color32,
+    pub nav_status_notice_fg: Color32,
 
     // 2. Thanh tuỳ chọn công cụ (Contextual Tool Options Bar)
     pub tool_strip_bg: Color32,
@@ -54,10 +57,6 @@ pub struct Theme {
     pub font_size_title: f32,
     pub font_size_body: f32,
     pub font_size_small: f32,
-
-    // 6. Màu chữ trạng thái trên nền sáng (canvas/bàn làm việc)
-    pub status_text_fg: Color32,
-    pub status_error_fg: Color32,
 }
 
 impl Default for Theme {
@@ -73,6 +72,9 @@ impl Default for Theme {
             nav_divider: Color32::from_rgba_unmultiplied(255, 255, 255, 45),
             nav_button_size: [34.0, 30.0],
             nav_button_rounding: 7,
+            nav_status_saved_dot: Color32::from_rgb(74, 222, 128),
+            nav_status_unsaved_dot: Color32::from_rgb(248, 113, 113),
+            nav_status_notice_fg: Color32::from_rgb(187, 247, 208),
 
             // Thanh tuỳ chọn công cụ nền tối bo tròn
             tool_strip_bg: Color32::from_rgb(236, 239, 244),
@@ -109,10 +111,6 @@ impl Default for Theme {
             font_size_title: 14.5,
             font_size_body: 13.0,
             font_size_small: 11.5,
-
-            // Màu chữ trạng thái trên nền sáng
-            status_text_fg: Color32::from_rgb(105, 112, 126),
-            status_error_fg: Color32::from_rgb(200, 56, 56),
         }
     }
 }

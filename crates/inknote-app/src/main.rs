@@ -316,8 +316,7 @@ impl InkNoteApp {
                 eprintln!("Lỗi khi lưu file {:?}: {e}", path);
             } else {
                 self.doc.mark_saved();
-                self.autosave
-                    .note_manual_save(self.doc.revision(), Instant::now());
+                self.autosave.note_manual_save(self.doc.revision());
             }
         } else {
             self.save_document_as();
@@ -340,8 +339,7 @@ impl InkNoteApp {
             } else {
                 self.doc.mark_saved();
                 self.current_path = Some(path);
-                self.autosave
-                    .note_manual_save(self.doc.revision(), Instant::now());
+                self.autosave.note_manual_save(self.doc.revision());
             }
         }
     }
@@ -667,6 +665,15 @@ impl eframe::App for InkNoteApp {
         }
         self.prev_frame_t = frame_t;
 
+        // Cập nhật trạng thái auto-save trước khi vẽ tiêu đề & thanh công cụ để chấm xanh/đỏ & thông báo tức thì
+        let autosave_now = Instant::now();
+        self.autosave.poll_and_maybe_save(
+            &mut self.doc,
+            self.current_path.as_ref(),
+            self.active.is_some(),
+            autosave_now,
+        );
+
         // Cập nhật tiêu đề cửa sổ theo tên file hiện tại và trạng thái sửa đổi (*)
         let doc_title = match &self.current_path {
             Some(p) => p
@@ -678,6 +685,13 @@ impl eframe::App for InkNoteApp {
         let dirty_mark = if self.doc.is_dirty() { " *" } else { "" };
         let full_title = format!("InkNote - {}{}", doc_title, dirty_mark);
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(full_title));
+
+        let file_status = self.autosave.file_status(
+            &self.doc,
+            doc_title,
+            self.current_path.as_ref(),
+            autosave_now,
+        );
 
         // Khu vực 1 & 2: Navigation Toolbar + Contextual Tool Options Bar
         let wacom_status = format!(
@@ -694,6 +708,7 @@ impl eframe::App for InkNoteApp {
             &mut self.toolbar_state,
             &mut self.brush_config,
             &mut paper_settings,
+            &file_status,
             &wacom_status,
         );
         if self.doc.set_paper_settings(paper_settings.clone()) {
@@ -884,24 +899,17 @@ impl eframe::App for InkNoteApp {
             self.add_sample_strokes(2000);
         }
 
-        // Auto-save: tự động lưu ngầm sau 2.5s kể từ thay đổi cuối cùng (nếu đã có đường dẫn)
-        let autosave_now = Instant::now();
-        self.autosave.poll_and_maybe_save(
-            &mut self.doc,
-            self.current_path.as_ref(),
-            self.active.is_some(),
-            autosave_now,
-        );
-
-        // FPS (trung bình trượt)
+        // FPS khi đang tương tác liên tục (bỏ qua khoảng nghỉ lúc không chạm vào app)
         let now = Instant::now();
         let real_dt = now.duration_since(self.last_frame).as_secs_f32().max(1e-4);
         self.last_frame = now;
-        self.fps = if self.fps == 0.0 {
-            1.0 / real_dt
-        } else {
-            self.fps * 0.9 + 0.1 / real_dt
-        };
+        if real_dt < 0.25 {
+            self.fps = if self.fps == 0.0 {
+                1.0 / real_dt
+            } else {
+                self.fps * 0.9 + 0.1 / real_dt
+            };
+        }
 
         // Khu vực 3: Main Canvas (trang giấy chấm Dotted Paper)
         let workspace_frame = egui::Frame::central_panel(ui.style()).fill(self.theme.workspace_bg);
@@ -1015,29 +1023,16 @@ impl eframe::App for InkNoteApp {
                     egui::FontId::proportional(self.theme.font_size_small),
                     self.theme.tool_text_muted,
                 );
-
-                // 7. Trạng thái lưu nhẹ nhàng ở góc dưới-phải
-                if let Some((status_text, is_error)) = self.autosave.status_label(
-                    &self.doc,
-                    self.current_path.as_ref(),
-                    autosave_now,
-                ) {
-                    let color = if is_error {
-                        self.theme.status_error_fg
-                    } else {
-                        self.theme.status_text_fg
-                    };
-                    ui.painter().with_clip_rect(paper_rect).text(
-                        paper_rect.right_bottom() + egui::vec2(-10.0, -8.0),
-                        egui::Align2::RIGHT_BOTTOM,
-                        status_text,
-                        egui::FontId::proportional(self.theme.font_size_small),
-                        color,
-                    );
-                }
             });
 
-        ctx.request_repaint();
+        // Chỉ hẹn vẽ lại khi có bộ đếm auto-save hoặc cần tự ẩn thông báo sau 3s;
+        // khi đứng yên sẽ không render liên tục gây quá tải CPU/GPU.
+        if let Some(delay) =
+            self.autosave
+                .next_repaint_delay(&self.doc, self.current_path.as_ref(), autosave_now)
+        {
+            ctx.request_repaint_after(delay);
+        }
     }
 
     fn on_exit(&mut self) {
@@ -1048,7 +1043,8 @@ impl eframe::App for InkNoteApp {
 
 fn main() -> eframe::Result {
     let mut wgpu_options = eframe::egui_wgpu::WgpuConfiguration::default();
-    wgpu_options.surface.present_mode = eframe::egui_wgpu::wgpu::PresentMode::AutoNoVsync;
+    // VSync (Fifo): hãm tối đa FPS theo đúng tần số quét của màn hình (144Hz -> 144fps, 60Hz -> 60fps)
+    wgpu_options.surface.present_mode = eframe::egui_wgpu::wgpu::PresentMode::Fifo;
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -1332,12 +1328,20 @@ mod tests {
                 let mut out = ctx.run_ui(raw_input, |ui| {
                     let wacom_status = "Test Stylus";
                     let mut paper_settings = app.doc.paper_settings().clone();
+                    let file_status = crate::autosave::FileStatusInfo {
+                        file_name: "VeryLongLectureNotesFileName2026.inknote",
+                        is_saved: true,
+                        has_path: true,
+                        autosaved_notice: Some("Auto-saved"),
+                        has_error: false,
+                    };
                     let _ = show_toolbars(
                         ui,
                         &app.theme,
                         &mut app.toolbar_state,
                         &mut app.brush_config,
                         &mut paper_settings,
+                        &file_status,
                         wacom_status,
                     );
                     let workspace_frame =

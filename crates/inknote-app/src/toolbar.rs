@@ -14,6 +14,7 @@ use inknote_pen::{
 };
 
 use crate::{
+    autosave::FileStatusInfo,
     icons::{ToolIcon, draw_icon},
     theme::{
         EXTENDED_PALETTE, MARKER_QUICK_WIDTHS, QUICK_COLORS, SOLID_QUICK_WIDTHS, Theme,
@@ -184,6 +185,60 @@ fn nav_icon_button(
     }
 
     response.on_hover_text(tooltip)
+}
+
+/// Vẽ cụm trạng thái file ngay bên phải nút Read-Only:
+/// `Tên File` - `Dấu chấm xanh/đỏ` - `Thông báo đã lưu (3s rồi ẩn)`.
+fn draw_nav_file_status(ui: &mut Ui, theme: &Theme, status: &FileStatusInfo<'_>) {
+    ui.add_space(4.0);
+    // Tên file co gọn theo độ dài thật, chỉ rút gọn (...) nếu dài quá 130px
+    ui.scope(|ui| {
+        ui.set_max_width(130.0);
+        ui.add(
+            egui::Label::new(
+                RichText::new(status.file_name)
+                    .size(theme.font_size_small)
+                    .color(theme.nav_icon_fg),
+            )
+            .truncate(),
+        );
+    });
+
+    // Dấu chấm xanh (đã lưu) hoặc đỏ (chưa lưu)
+    let (dot_rect, dot_resp) = ui.allocate_exact_size(vec2(12.0, 18.0), Sense::hover());
+    if ui.is_rect_visible(dot_rect) {
+        let dot_color = if status.is_saved {
+            theme.nav_status_saved_dot
+        } else {
+            theme.nav_status_unsaved_dot
+        };
+        let c = dot_rect.center();
+        ui.painter().circle_filled(c, 4.5, dot_color);
+        ui.painter().circle_stroke(
+            c,
+            4.5,
+            Stroke::new(0.8, Color32::from_rgba_unmultiplied(255, 255, 255, 160)),
+        );
+    }
+    let dot_tip = if status.has_error {
+        "Auto-save failed"
+    } else if status.is_saved {
+        "All changes saved"
+    } else if status.has_path {
+        "Unsaved changes"
+    } else {
+        "Not saved to file yet (Ctrl+S)"
+    };
+    dot_resp.on_hover_text(dot_tip);
+
+    // Thông báo đã lưu chỉ hiện trong 3 giây sau mỗi lần tự lưu thành công
+    if let Some(notice) = status.autosaved_notice {
+        ui.label(
+            RichText::new(notice)
+                .size(theme.font_size_small)
+                .color(theme.nav_status_notice_fg),
+        );
+    }
 }
 
 /// Vẽ vạch ngăn cách dọc giữa các nhóm chức năng, căn giữa theo trục dọc `row_height`
@@ -415,6 +470,7 @@ pub fn show_toolbars(
     state: &mut ToolbarState,
     brush_config: &mut BrushConfig,
     paper_settings: &mut PaperSettings,
+    file_status: &FileStatusInfo<'_>,
     wacom_status: &str,
 ) -> ToolbarActions {
     let mut actions = ToolbarActions {
@@ -477,6 +533,7 @@ pub fn show_toolbars(
             {
                 state.read_only = !state.read_only;
             }
+            draw_nav_file_status(&mut left_ui, theme, file_status);
             let left_rect = left_ui.min_rect();
 
             // 2. Nhóm Phải: luôn căn phải trong `bar_rect`
