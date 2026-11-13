@@ -117,6 +117,8 @@ pub struct LibraryState {
     focus_search_requested: bool,
     pub sidebar_width_last: f32,
     pub grid_cols_last: usize,
+    #[cfg(test)]
+    pub card_menu_width_last: f32,
 }
 
 impl LibraryState {
@@ -140,7 +142,23 @@ impl LibraryState {
             focus_search_requested: false,
             sidebar_width_last: 216.0,
             grid_cols_last: 5,
+            #[cfg(test)]
+            card_menu_width_last: 0.0,
         }
+    }
+
+    #[cfg(test)]
+    pub fn open_card_menu_for_test(&mut self, path: PathBuf, display_name: &str, is_folder: bool) {
+        self.card_menu = Some(CardMenuState {
+            path,
+            display_name: display_name.to_string(),
+            rel_folder: self.rel_folder.clone(),
+            is_folder,
+            is_favorite: false,
+            in_trash: self.section == LibrarySection::Trash,
+            anchor: pos2(300.0, 260.0),
+            opened_this_frame: true,
+        });
     }
 
     pub fn request_refresh(&mut self) {
@@ -1152,10 +1170,27 @@ impl LibraryState {
             close_menu = true;
         }
 
-        let menu_w = 178.0;
-        let est_h = if menu.in_trash {
-            86.0
+        let labels: &[&str] = if menu.in_trash {
+            &["Restore", "Delete Permanently"]
         } else if menu.is_folder {
+            &["Rename", "Move to Trash"]
+        } else {
+            &["Rename", "Duplicate", "Remove Favorite", "Move to Trash"]
+        };
+        let font = FontId::proportional(theme.font_size_body);
+        let max_label_w = labels
+            .iter()
+            .map(|lbl| {
+                ctx.fonts_mut(|f| {
+                    f.layout_no_wrap((*lbl).to_string(), font.clone(), Color32::WHITE)
+                        .size()
+                        .x
+                })
+            })
+            .fold(0.0_f32, f32::max);
+        let inner_w = (46.0 + max_label_w).ceil().clamp(132.0, 210.0);
+        let menu_w = inner_w + 20.0;
+        let est_h = if menu.in_trash || menu.is_folder {
             86.0
         } else {
             154.0
@@ -1176,7 +1211,8 @@ impl LibraryState {
             .fixed_pos(pos2(clamped_x, clamped_y))
             .show(ctx, |ui| {
                 theme.dark_popup_frame(ui.style()).show(ui, |ui| {
-                    ui.set_min_width(menu_w - 20.0);
+                    ui.set_width(inner_w);
+                    ui.set_max_width(inner_w);
                     ui.spacing_mut().item_spacing.y = 3.0;
 
                     if menu.in_trash {
@@ -1310,6 +1346,11 @@ impl LibraryState {
                 });
             })
             .response;
+
+        #[cfg(test)]
+        {
+            self.card_menu_width_last = area_resp.rect.width();
+        }
 
         if !menu.opened_this_frame {
             let popup_rect = area_resp.rect;
@@ -1701,7 +1742,7 @@ fn popup_menu_item(
     label: &str,
     fg: Color32,
 ) -> egui::Response {
-    let row_w = ui.available_width().max(150.0);
+    let row_w = ui.available_width().clamp(110.0, 210.0);
     let (rect, resp) = ui.allocate_exact_size(vec2(row_w, 28.0), Sense::click());
     if resp.hovered() {
         ui.painter()

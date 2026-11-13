@@ -5694,6 +5694,28 @@ mod tests {
             LibraryItem::Note(n) if n.title == "Ghi chú nhanh" && n.is_favorite
         ));
 
+        // Kiểm tra khung menu chuột phải của thư mục co gọn vừa đủ (không bị kéo dài ngang màn hình)
+        let folder_path = app
+            .library
+            .store
+            .resolve_folder(LibrarySection::Documents, &[])
+            .join(&folder);
+        app.library
+            .open_card_menu_for_test(folder_path, &folder, true);
+        let mut out_menu = ctx.run_ui(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 800.0))),
+                ..Default::default()
+            },
+            |ui| app.run_app_ui(ui),
+        );
+        out_menu.textures_delta.clear();
+        assert!(
+            (130.0..=210.0).contains(&app.library.card_menu_width_last),
+            "Unexpected wide card menu width: {}",
+            app.library.card_menu_width_last
+        );
+
         // Đổi tên, nhân bản và chuyển ghi chú trong thư mục con vào Trash -> Khôi phục -> Xoá vĩnh viễn -> Dọn thùng rác
         let note_renamed = app
             .library
