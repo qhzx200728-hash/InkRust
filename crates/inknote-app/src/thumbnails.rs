@@ -278,6 +278,99 @@ fn popup_menu_item(ui: &mut Ui, label: &str, text_color: Color32, enabled: bool)
     enabled && resp.clicked()
 }
 
+fn page_popup_frame() -> egui::Frame {
+    egui::Frame::new()
+        .fill(Color32::WHITE)
+        .stroke(Stroke::new(1.0, Color32::from_rgb(220, 224, 232)))
+        .corner_radius(CornerRadius::same(12))
+        .inner_margin(egui::Margin::symmetric(6, 6))
+        .shadow(egui::Shadow {
+            offset: [0, 4],
+            blur: 14,
+            spread: 0,
+            color: Color32::from_rgba_unmultiplied(0, 0, 0, 38),
+        })
+}
+
+fn show_page_menu_items(ui: &mut Ui, idx: usize, page_count: usize, action: &mut ThumbnailAction) {
+    ui.set_width(POPUP_MENU_WIDTH);
+    let normal_fg = Color32::from_rgb(32, 36, 44);
+    let danger_fg = Color32::from_rgb(225, 76, 56);
+
+    if popup_menu_item(ui, "Add Page Before", normal_fg, true) {
+        *action = ThumbnailAction::AddPageBefore(idx);
+        ui.close();
+    }
+    if popup_menu_item(ui, "Add Page After", normal_fg, true) {
+        *action = ThumbnailAction::AddPageAfter(idx);
+        ui.close();
+    }
+    if popup_menu_item(ui, "Duplicate", normal_fg, true) {
+        *action = ThumbnailAction::DuplicatePage(idx);
+        ui.close();
+    }
+
+    ui.add_space(4.0);
+    let (sep_rect, _) = ui.allocate_exact_size(vec2(POPUP_MENU_WIDTH, 1.0), Sense::hover());
+    ui.painter().line_segment(
+        [
+            pos2(sep_rect.left() + 8.0, sep_rect.center().y),
+            pos2(sep_rect.right() - 8.0, sep_rect.center().y),
+        ],
+        Stroke::new(1.0, Color32::from_rgb(236, 239, 245)),
+    );
+    ui.add_space(4.0);
+
+    if popup_menu_item(ui, "Clear Page", danger_fg, true) {
+        *action = ThumbnailAction::ClearPage(idx);
+        ui.close();
+    }
+    if popup_menu_item(ui, "Delete Page", danger_fg, page_count > 1) {
+        *action = ThumbnailAction::DeletePage(idx);
+        ui.close();
+    }
+}
+
+fn draw_check_circle(
+    painter: &egui::Painter,
+    center: Pos2,
+    selected: bool,
+    hovered: bool,
+    accent: Color32,
+) {
+    let r = 7.5;
+    if selected {
+        painter.circle_filled(center, r, accent);
+        let tick = Stroke::new(1.7, Color32::WHITE);
+        painter.line_segment(
+            [
+                pos2(center.x - 3.2, center.y + 0.2),
+                pos2(center.x - 0.8, center.y + 2.6),
+            ],
+            tick,
+        );
+        painter.line_segment(
+            [
+                pos2(center.x - 0.8, center.y + 2.6),
+                pos2(center.x + 3.4, center.y - 2.4),
+            ],
+            tick,
+        );
+    } else {
+        painter.circle_filled(
+            center,
+            r,
+            Color32::from_rgba_unmultiplied(255, 255, 255, 215),
+        );
+        let border_col = if hovered {
+            accent
+        } else {
+            Color32::from_rgb(172, 180, 194)
+        };
+        painter.circle_stroke(center, r, Stroke::new(1.3, border_col));
+    }
+}
+
 /// Vẽ thanh danh sách thumbnail các trang ở cạnh trái workspace (2 cột kiểu GoodNotes).
 pub fn show_thumbnail_panel(
     ui: &mut Ui,
@@ -376,6 +469,16 @@ pub fn show_thumbnail_panel(
                         );
                         rendered_cards.push((idx, card_rect));
 
+                        let check_rect = Rect::from_center_size(
+                            pos2(card_rect.right() - 12.0, card_rect.top() + 12.0),
+                            vec2(18.0, 18.0),
+                        );
+                        let check_resp = ui.interact(
+                            check_rect,
+                            ui.scope_id().with(("thumb_check", page.id)),
+                            Sense::click(),
+                        );
+
                         let card_resp = ui.interact(
                             card_rect,
                             ui.scope_id().with(("thumb_card", page.id)),
@@ -450,11 +553,27 @@ pub fn show_thumbnail_panel(
                                 border,
                                 StrokeKind::Inside,
                             );
+
+                            draw_check_circle(
+                                ui.painter(),
+                                check_rect.center(),
+                                is_active,
+                                check_resp.hovered(),
+                                theme.thumb_card_selected_border,
+                            );
                         }
 
-                        if card_resp.clicked() {
+                        if check_resp.clicked() || card_resp.clicked() {
                             action = ThumbnailAction::SelectPage(idx);
                         }
+
+                        // Chuột phải trực tiếp lên thẻ để mở nhanh menu trang
+                        egui::Popup::context_menu(&card_resp)
+                            .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+                            .frame(page_popup_frame())
+                            .show(|ui| {
+                                show_page_menu_items(ui, idx, page_count, &mut action);
+                            });
 
                         // Hàng chân thẻ: số trang căn trái + nút mũi tên xuống ⌄ căn phải
                         let num_color = if is_active {
@@ -496,61 +615,11 @@ pub fn show_thumbnail_panel(
                             })
                             .inner;
 
-                        let popup_frame = egui::Frame::new()
-                            .fill(Color32::WHITE)
-                            .stroke(Stroke::new(1.0, Color32::from_rgb(220, 224, 232)))
-                            .corner_radius(CornerRadius::same(12))
-                            .inner_margin(egui::Margin::symmetric(6, 6))
-                            .shadow(egui::Shadow {
-                                offset: [0, 4],
-                                blur: 14,
-                                spread: 0,
-                                color: Color32::from_rgba_unmultiplied(0, 0, 0, 38),
-                            });
-
                         egui::Popup::from_toggle_button_response(&menu_btn_resp)
                             .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
-                            .frame(popup_frame)
+                            .frame(page_popup_frame())
                             .show(|ui| {
-                                ui.set_width(POPUP_MENU_WIDTH);
-                                let normal_fg = Color32::from_rgb(32, 36, 44);
-                                let danger_fg = Color32::from_rgb(225, 76, 56);
-
-                                if popup_menu_item(ui, "Add Page Before", normal_fg, true) {
-                                    action = ThumbnailAction::AddPageBefore(idx);
-                                    ui.close();
-                                }
-                                if popup_menu_item(ui, "Add Page After", normal_fg, true) {
-                                    action = ThumbnailAction::AddPageAfter(idx);
-                                    ui.close();
-                                }
-                                if popup_menu_item(ui, "Duplicate", normal_fg, true) {
-                                    action = ThumbnailAction::DuplicatePage(idx);
-                                    ui.close();
-                                }
-
-                                ui.add_space(4.0);
-                                let (sep_rect, _) = ui.allocate_exact_size(
-                                    vec2(POPUP_MENU_WIDTH, 1.0),
-                                    Sense::hover(),
-                                );
-                                ui.painter().line_segment(
-                                    [
-                                        pos2(sep_rect.left() + 8.0, sep_rect.center().y),
-                                        pos2(sep_rect.right() - 8.0, sep_rect.center().y),
-                                    ],
-                                    Stroke::new(1.0, Color32::from_rgb(236, 239, 245)),
-                                );
-                                ui.add_space(4.0);
-
-                                if popup_menu_item(ui, "Clear Page", danger_fg, true) {
-                                    action = ThumbnailAction::ClearPage(idx);
-                                    ui.close();
-                                }
-                                if popup_menu_item(ui, "Delete Page", danger_fg, page_count > 1) {
-                                    action = ThumbnailAction::DeletePage(idx);
-                                    ui.close();
-                                }
+                                show_page_menu_items(ui, idx, page_count, &mut action);
                             });
                     }
                 });
