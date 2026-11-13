@@ -2365,6 +2365,7 @@ impl InkNoteApp {
                         &self.doc,
                         &self.batch_cache,
                         &mut self.thumb_cache,
+                        &mut self.image_cache,
                     );
                 });
             if self.active.is_none() {
@@ -3970,6 +3971,7 @@ mod tests {
                             &app.doc,
                             &app.batch_cache,
                             &mut app.thumb_cache,
+                            &mut app.image_cache,
                         );
                         assert_eq!(act, ThumbnailAction::None);
                     });
@@ -5196,5 +5198,186 @@ mod tests {
         };
         let _ = ctx.run_ui(blocked_raw, |ui| app.run_app_ui(ui));
         assert_eq!(app.doc.pages()[0].images.len(), 0);
+    }
+
+    #[test]
+    fn test_step_6_2_image_sharp_at_300_zoom_and_mixed_eraser_protection() {
+        let ctx = egui::Context::default();
+        theme::setup_fonts(&ctx);
+        let mut app = new_test_app(&ctx);
+        let raw_init = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 720.0))),
+            max_texture_side: Some(4096),
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(raw_init, |ui| app.run_app_ui(ui));
+        let paper = app.paper_rect.expect("paper_rect initialized");
+
+        // 1. Chèn ảnh độ phân giải cao (900x450) có hoạ tiết sắc nét, byte gốc bất biến
+        let mut rgba = vec![255u8; 900 * 450 * 4];
+        for y in 0..450usize {
+            for x in 0..900usize {
+                if ((x / 10) + (y / 10)) % 2 == 0 {
+                    let i = (y * 900 + x) * 4;
+                    rgba[i] = 24;
+                    rgba[i + 1] = 24;
+                    rgba[i + 2] = 28;
+                    rgba[i + 3] = 255;
+                }
+            }
+        }
+        let loaded = image_box::encode_rgba_to_png(900, 450, rgba).expect("encode 900x450");
+        let orig_bytes = loaded.bytes.clone();
+        let img_id = app.doc.alloc_id();
+        app.doc.execute(Command::AddImage {
+            page_index: 0,
+            obj: ImageObject {
+                id: img_id,
+                pos: [100.0, 120.0],
+                size: [300.0, 150.0],
+                pixel_size: [900, 450],
+                bytes: orig_bytes.clone(),
+            },
+        });
+
+        // 2. Đặt thêm LaTeX + Hình học + Văn bản + 2 Nét bút chồng đè lên vùng ảnh
+        let latex_id = app.doc.alloc_id();
+        app.doc.execute(Command::AddLatex {
+            page_index: 0,
+            obj: LatexObject {
+                id: latex_id,
+                source: "E = mc^2".to_string(),
+                pos: [130.0, 140.0],
+                size: [140.0, 70.0],
+                svg_cache: Some(
+                    "<svg xmlns='http://www.w3.org/2000/svg' width='140' height='70'><rect width='140' height='70' fill='none'/></svg>".to_string(),
+                ),
+            },
+        });
+        let shape_id = app.doc.alloc_id();
+        app.doc.execute(Command::AddShape {
+            page_index: 0,
+            obj: inknote_core::ShapeObject {
+                id: shape_id,
+                kind: inknote_core::ShapeKind::Rectangle,
+                start: [120.0, 130.0],
+                end: [320.0, 240.0],
+                color: [217, 48, 37, 255],
+                stroke_width: 3.0,
+                dashed: false,
+            },
+        });
+        let text_id = app.doc.alloc_id();
+        app.doc.execute(Command::AddText {
+            page_index: 0,
+            obj: TextObject {
+                id: text_id,
+                text: "Chú thích trên ảnh".to_string(),
+                pos: [150.0, 150.0],
+                size: [180.0, 32.0],
+                font_family: inknote_core::TextFontFamily::Sans,
+                font_size: 16.0,
+                bold: false,
+                italic: false,
+                align: inknote_core::TextAlign::Left,
+                list_mode: inknote_core::TextListMode::None,
+                color: [17, 24, 39, 255],
+            },
+        });
+
+        let origin_1x = app.page_origin(paper, 0);
+        let t0 = Instant::now();
+        app.toolbar_state.active_tool = ActiveTool::Pen;
+        app.pen_down(origin_1x + vec2(110.0, 170.0) * app.view.zoom, 0.5, t0);
+        app.pen_down(
+            origin_1x + vec2(330.0, 170.0) * app.view.zoom,
+            0.5,
+            t0 + std::time::Duration::from_millis(16),
+        );
+        app.pen_up(
+            origin_1x + vec2(330.0, 170.0) * app.view.zoom,
+            0.5,
+            t0 + std::time::Duration::from_millis(32),
+        );
+
+        let t1 = t0 + std::time::Duration::from_millis(50);
+        app.pen_down(origin_1x + vec2(110.0, 210.0) * app.view.zoom, 0.5, t1);
+        app.pen_down(
+            origin_1x + vec2(330.0, 210.0) * app.view.zoom,
+            0.5,
+            t1 + std::time::Duration::from_millis(16),
+        );
+        app.pen_up(
+            origin_1x + vec2(330.0, 210.0) * app.view.zoom,
+            0.5,
+            t1 + std::time::Duration::from_millis(32),
+        );
+        assert_eq!(app.doc.pages()[0].strokes.len(), 2);
+
+        // 3. Render ở cả thumbnail sidebar, zoom 50% và zoom 300% -> giữ nguyên texture 900x450 và byte gốc
+        app.toolbar_state.show_thumbnails = true;
+        app.view.zoom_at(paper, paper.center(), 0.5);
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 720.0))),
+                max_texture_side: Some(4096),
+                ..Default::default()
+            },
+            |ui| app.run_app_ui(ui),
+        );
+        app.view.zoom_at(paper, paper.center(), 6.0); // 0.5 * 6.0 = 3.0 (300%)
+        assert!((app.view.zoom - 3.0).abs() < 1e-4);
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 720.0))),
+                max_texture_side: Some(4096),
+                ..Default::default()
+            },
+            |ui| app.run_app_ui(ui),
+        );
+        let tex = app
+            .image_cache
+            .get_or_load(&ctx, &app.doc.pages()[0].images[0].bytes)
+            .expect("image texture loaded");
+        assert_eq!(tex.size(), [900, 450]);
+        assert_eq!(app.doc.pages()[0].images[0].bytes, orig_bytes);
+
+        // 4. Khi đang zoom 300%, quét cả Tẩy thường & Tẩy nét đè lên Nét bút + LaTeX + Hình + Văn bản + Ảnh
+        let paper_now = app.paper_rect.unwrap();
+        let origin_3x = app.page_origin(paper_now, 0);
+        app.toolbar_state.active_tool = ActiveTool::Eraser;
+        app.toolbar_state.eraser_mode = toolbar::EraserMode::Standard;
+        app.eraser_down(origin_3x + vec2(200.0, 170.0) * app.view.zoom, 0);
+        app.eraser_move(origin_3x + vec2(235.0, 170.0) * app.view.zoom);
+        app.eraser_up(origin_3x + vec2(235.0, 170.0) * app.view.zoom);
+
+        app.toolbar_state.eraser_mode = toolbar::EraserMode::Stroke;
+        app.eraser_down(origin_3x + vec2(200.0, 210.0) * app.view.zoom, 0);
+        app.eraser_move(origin_3x + vec2(235.0, 210.0) * app.view.zoom);
+        app.eraser_up(origin_3x + vec2(235.0, 210.0) * app.view.zoom);
+
+        let gap_aabb = parry2d_f64::bounding_volume::Aabb::new(
+            parry2d_f64::math::Vector2::new(212.0, 168.0),
+            parry2d_f64::math::Vector2::new(218.0, 172.0),
+        );
+        let stroke2_aabb = parry2d_f64::bounding_volume::Aabb::new(
+            parry2d_f64::math::Vector2::new(115.0, 206.0),
+            parry2d_f64::math::Vector2::new(325.0, 214.0),
+        );
+        let p0 = &app.doc.pages()[0];
+        assert!(!p0.strokes.iter().any(|s| !s.path.hittest(&gap_aabb, 1.0).is_empty()));
+        assert!(!p0.strokes.iter().any(|s| !s.path.hittest(&stroke2_aabb, 2.0).is_empty()));
+        assert_eq!(p0.latex_objects.len(), 1);
+        assert_eq!(p0.shapes.len(), 1);
+        assert_eq!(p0.text_objects.len(), 1);
+        assert_eq!(p0.images.len(), 1);
+        assert_eq!(p0.images[0].pos, [100.0, 120.0]);
+        assert_eq!(p0.images[0].size, [300.0, 150.0]);
+        assert_eq!(p0.images[0].bytes, orig_bytes);
+
+        // Undo 2 lần khôi phục nguyên 2 nét bút ban đầu
+        assert!(app.doc.undo());
+        assert!(app.doc.undo());
+        assert_eq!(app.doc.pages()[0].strokes.len(), 2);
     }
 }

@@ -3,14 +3,18 @@ use std::io::Cursor;
 use std::path::Path;
 
 use eframe::egui::{
-    self, Color32, ColorImage, Context, Painter, Pos2, Rect, Stroke, TextureHandle, TextureOptions,
-    Vec2, pos2, vec2,
+    self, Color32, ColorImage, Context, Painter, Pos2, Rect, Stroke, TextureFilter, TextureHandle,
+    TextureOptions, Vec2, pos2, vec2,
 };
 use image::{DynamicImage, ImageFormat, RgbaImage, imageops::FilterType};
 use inknote_core::ImageObject;
 
-/// Maximum texture side uploaded to the GPU while keeping original `ImageObject.bytes` untouched.
-const MAX_GPU_TEXTURE_SIDE: u32 = 4096;
+/// Upper bound for a single decoded GPU texture side while preserving original `ImageObject.bytes`.
+const GPU_MAX_SIDE_CAP: usize = 8192;
+
+/// Trilinear mipmapped filtering keeps high-res text images crisp across all zoom levels (25%–800%).
+pub const IMAGE_TEXTURE_OPTIONS: TextureOptions =
+    TextureOptions::LINEAR.with_mipmap_mode(Some(TextureFilter::Linear));
 
 /// Validated image payload ready to store inside `ImageObject`.
 #[derive(Debug, Clone)]
@@ -157,14 +161,38 @@ fn fnv1a_64(bytes: &[u8]) -> u64 {
 }
 
 enum CachedEntry {
-    Ready(TextureHandle),
+    Ready {
+        texture: TextureHandle,
+        max_side_used: usize,
+        was_clamped: bool,
+    },
     Failed,
 }
 
-/// Cache of full-resolution GPU textures decoded lazily from `ImageObject.bytes`.
+/// Cache of full-resolution mipmapped GPU textures decoded lazily from `ImageObject.bytes`.
 #[derive(Default)]
 pub struct ImageTextureCache {
     entries: HashMap<(u64, usize), CachedEntry>,
+}
+
+fn resolve_gpu_max_side(ctx: &Context) -> usize {
+    ctx.input(|i| i.max_texture_side)
+        .clamp(512, GPU_MAX_SIDE_CAP)
+}
+
+/// Computes the GPU texture dimensions preserving aspect ratio within `gpu_max_side`.
+pub fn effective_gpu_texture_size(native: [u32; 2], gpu_max_side: usize) -> [usize; 2] {
+    let w = native[0].max(1) as f64;
+    let h = native[1].max(1) as f64;
+    let max_side = gpu_max_side.max(1) as f64;
+    if w <= max_side && h <= max_side {
+        return [w as usize, h as usize];
+    }
+    let scale = (max_side / w).min(max_side / h);
+    [
+        (w * scale).round().max(1.0) as usize,
+        (h * scale).round().max(1.0) as usize,
+    ]
 }
 
 impl ImageTextureCache {
@@ -174,35 +202,60 @@ impl ImageTextureCache {
 
     pub fn get_or_load(&mut self, ctx: &Context, bytes: &[u8]) -> Option<&TextureHandle> {
         let key = (fnv1a_64(bytes), bytes.len());
-        if !self.entries.contains_key(&key) {
-            let entry = match decode_to_texture(ctx, key.0, bytes) {
-                Ok(tex) => CachedEntry::Ready(tex),
+        let gpu_max_side = resolve_gpu_max_side(ctx);
+        let needs_decode = match self.entries.get(&key) {
+            None => true,
+            Some(CachedEntry::Ready {
+                max_side_used,
+                was_clamped,
+                ..
+            }) => *was_clamped && gpu_max_side > *max_side_used,
+            Some(CachedEntry::Failed) => false,
+        };
+        if needs_decode {
+            let entry = match decode_to_texture(ctx, key.0, bytes, gpu_max_side) {
+                Ok((texture, was_clamped)) => CachedEntry::Ready {
+                    texture,
+                    max_side_used: gpu_max_side,
+                    was_clamped,
+                },
                 Err(_) => CachedEntry::Failed,
             };
             self.entries.insert(key, entry);
         }
         match self.entries.get(&key) {
-            Some(CachedEntry::Ready(tex)) => Some(tex),
+            Some(CachedEntry::Ready { texture, .. }) => Some(texture),
             _ => None,
         }
     }
 }
 
-fn decode_to_texture(ctx: &Context, hash: u64, bytes: &[u8]) -> Result<TextureHandle, String> {
+fn decode_to_texture(
+    ctx: &Context,
+    hash: u64,
+    bytes: &[u8],
+    gpu_max_side: usize,
+) -> Result<(TextureHandle, bool), String> {
     let mut img = image::load_from_memory(bytes)
         .map_err(|err| format!("Failed to decode cached image: {err}"))?;
-    if img.width() > MAX_GPU_TEXTURE_SIDE || img.height() > MAX_GPU_TEXTURE_SIDE {
-        img = img.resize(
-            MAX_GPU_TEXTURE_SIDE,
-            MAX_GPU_TEXTURE_SIDE,
-            FilterType::Triangle,
-        );
+    let [tw, th] = effective_gpu_texture_size([img.width(), img.height()], gpu_max_side);
+    let was_clamped = tw as u32 != img.width() || th as u32 != img.height();
+    if was_clamped {
+        img = img.resize_exact(tw as u32, th as u32, FilterType::Lanczos3);
     }
     let rgba = img.to_rgba8();
     let size = [rgba.width() as usize, rgba.height() as usize];
     let color_image = ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
-    let name = format!("inknote-img-{hash:016x}-{}", bytes.len());
-    Ok(ctx.load_texture(name, color_image, TextureOptions::LINEAR))
+    let name = format!(
+        "inknote-img-{hash:016x}-{}-{}x{}",
+        bytes.len(),
+        size[0],
+        size[1]
+    );
+    Ok((
+        ctx.load_texture(name, color_image, IMAGE_TEXTURE_OPTIONS),
+        was_clamped,
+    ))
 }
 
 /// Paints an `ImageObject` onto the canvas painter in page coordinates scaled by `zoom`.
@@ -313,5 +366,47 @@ mod tests {
         let decoded = image::load_from_memory(&encoded.bytes).expect("decode PNG");
         assert_eq!(decoded.width(), 3);
         assert_eq!(decoded.height(), 2);
+    }
+
+    #[test]
+    fn gpu_texture_respects_max_side_uses_mipmaps_and_upgrades_when_limit_grows() {
+        assert_eq!(
+            IMAGE_TEXTURE_OPTIONS.mipmap_mode,
+            Some(TextureFilter::Linear)
+        );
+        assert_eq!(effective_gpu_texture_size([1920, 1080], 4096), [1920, 1080]);
+        assert_eq!(effective_gpu_texture_size([6000, 3000], 2048), [2048, 1024]);
+
+        let ctx = Context::default();
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                max_texture_side: Some(1024),
+                ..Default::default()
+            },
+            |_| {},
+        );
+        let rgba = vec![140u8; 1600 * 800 * 4];
+        let encoded = encode_rgba_to_png(1600, 800, rgba).expect("encode 1600x800 png");
+        let orig_bytes = encoded.bytes.clone();
+
+        let mut cache = ImageTextureCache::default();
+        let tex_clamped = cache
+            .get_or_load(&ctx, &encoded.bytes)
+            .expect("clamped texture");
+        assert_eq!(tex_clamped.size(), [1024, 512]);
+        assert_eq!(encoded.bytes, orig_bytes);
+
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                max_texture_side: Some(4096),
+                ..Default::default()
+            },
+            |_| {},
+        );
+        let tex_full = cache
+            .get_or_load(&ctx, &encoded.bytes)
+            .expect("upgraded full-res texture");
+        assert_eq!(tex_full.size(), [1600, 800]);
+        assert_eq!(encoded.bytes, orig_bytes);
     }
 }

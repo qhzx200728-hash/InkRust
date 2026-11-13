@@ -6,13 +6,17 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use eframe::egui::{
-    self, pos2, vec2, Align2, Color32, CornerRadius, FontId, PopupCloseBehavior, Pos2, Rect,
-    ScrollArea, Sense, Stroke, StrokeKind, Ui, UiBuilder,
+    self, Align2, Color32, CornerRadius, FontId, PopupCloseBehavior, Pos2, Rect, ScrollArea, Sense,
+    Stroke, StrokeKind, Ui, UiBuilder, pos2, vec2,
 };
 use inknote_core::{CanvasMode, Document, DocumentPage, PaperPattern, PaperSettings};
 use inknote_render::DrawBatch;
 
-use crate::{theme::Theme, CachedStroke};
+use crate::{
+    CachedStroke,
+    image_box::{ImageTextureCache, paint_image_object},
+    theme::Theme,
+};
 
 /// Hành động trả về từ Thanh thumbnail trang.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -409,6 +413,7 @@ pub fn show_thumbnail_panel(
     doc: &Document,
     batch_cache: &HashMap<u64, CachedStroke>,
     thumb_cache: &mut ThumbCache,
+    image_cache: &mut ImageTextureCache,
 ) -> ThumbnailAction {
     let mut action = ThumbnailAction::None;
     let pages = doc.pages();
@@ -583,6 +588,21 @@ pub fn show_thumbnail_panel(
                                 scale,
                                 theme,
                             );
+
+                            if !page.images.is_empty() {
+                                let thumb_painter = ui.painter().with_clip_rect(card_rect);
+                                for img in &page.images {
+                                    paint_image_object(
+                                        ui.ctx(),
+                                        &thumb_painter,
+                                        image_cache,
+                                        img,
+                                        card_rect.min,
+                                        scale,
+                                        None,
+                                    );
+                                }
+                            }
 
                             if let Some(cached_mesh) =
                                 build_or_get_thumb_mesh(page, scale, batch_cache, thumb_cache)
