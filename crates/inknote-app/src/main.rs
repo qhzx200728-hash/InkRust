@@ -174,8 +174,8 @@ struct InkNoteApp {
     batch_cache: HashMap<u64, CachedStroke>,
     thumb_cache: ThumbCache,
     view: View,
-    confirm_clear: Option<usize>,
-    confirm_delete_page: Option<usize>,
+    confirm_clear: Option<Vec<usize>>,
+    confirm_delete_page: Option<Vec<usize>>,
     paint_ms: f32,
     fps: f32,
     last_frame: Instant,
@@ -1008,13 +1008,13 @@ impl eframe::App for InkNoteApp {
                 self.doc.redo();
             }
             if actions.clear_clicked {
-                self.confirm_clear = Some(self.doc.active_page_index());
+                self.confirm_clear = Some(vec![self.doc.active_page_index()]);
             }
             if actions.add_page_clicked {
                 self.add_page_after_current();
             }
             if actions.delete_page_clicked && self.doc.page_count() > 1 {
-                self.confirm_delete_page = Some(self.doc.active_page_index());
+                self.confirm_delete_page = Some(vec![self.doc.active_page_index()]);
             }
             if key_pgup && self.doc.active_page_index() > 0 {
                 let target = self.doc.active_page_index() - 1;
@@ -1041,21 +1041,25 @@ impl eframe::App for InkNoteApp {
         }
 
         // Hộp xác nhận xoá sạch nét trên trang (xoá xong vẫn Undo được)
-        if let Some(clear_idx) = self.confirm_clear {
-            let page_num = clear_idx + 1;
+        if let Some(clear_targets) = self.confirm_clear.clone() {
+            let title = if clear_targets.len() == 1 {
+                format!("Clear Page {}?", clear_targets[0] + 1)
+            } else {
+                format!("Clear {} Pages?", clear_targets.len())
+            };
             let mut do_clear = false;
             let mut cancel = false;
             #[allow(deprecated)]
             let modal = egui::Modal::new(egui::Id::new("confirm_clear_page")).show(&ctx, |ui| {
                 ui.set_width(300.0);
-                ui.heading(format!("Clear Page {}?", page_num));
+                ui.heading(title);
                 ui.add_space(4.0);
                 ui.label(
-                    "All strokes on this page will be removed. You can undo this with Ctrl+Z.",
+                    "All strokes on the selected page(s) will be removed. You can undo this with Ctrl+Z.",
                 );
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Clear page").clicked() {
+                    if ui.button("Clear page(s)").clicked() {
                         do_clear = true;
                     }
                     if ui.button("Cancel").clicked() {
@@ -1063,8 +1067,16 @@ impl eframe::App for InkNoteApp {
                     }
                 });
             });
-            if do_clear && clear_idx < self.doc.page_count() {
-                self.doc.execute(Command::ClearPageAt(clear_idx));
+            if do_clear {
+                let mut indices = clear_targets;
+                indices.sort_unstable();
+                indices.dedup();
+                for idx in indices {
+                    if idx < self.doc.page_count() {
+                        self.doc.execute(Command::ClearPageAt(idx));
+                    }
+                }
+                self.thumb_cache.clear_selection();
             }
             if do_clear || cancel || modal.should_close() {
                 self.confirm_clear = None;
@@ -1072,23 +1084,29 @@ impl eframe::App for InkNoteApp {
         }
 
         // Hộp xác nhận xoá trang được chọn (xoá xong vẫn Undo được)
-        if let Some(target_idx) = self.confirm_delete_page {
-            let page_num = target_idx + 1;
-            let can_delete = self.doc.page_count() > 1 && target_idx < self.doc.page_count();
+        if let Some(delete_targets) = self.confirm_delete_page.clone() {
+            let count = delete_targets.len();
+            let title = if count == 1 {
+                format!("Delete Page {}?", delete_targets[0] + 1)
+            } else {
+                format!("Delete {} Pages?", count)
+            };
+            let can_delete = self.doc.page_count() > count
+                && delete_targets.iter().all(|&i| i < self.doc.page_count());
             let mut do_delete = false;
             let mut cancel = false;
             #[allow(deprecated)]
             let modal = egui::Modal::new(egui::Id::new("confirm_delete_page")).show(&ctx, |ui| {
                 ui.set_width(300.0);
-                ui.heading(format!("Delete Page {}?", page_num));
+                ui.heading(title);
                 ui.add_space(4.0);
                 ui.label(
-                    "This page and all of its strokes will be removed. You can undo this with Ctrl+Z.",
+                    "The selected page(s) and all of their strokes will be removed. You can undo this with Ctrl+Z.",
                 );
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     if ui
-                        .add_enabled(can_delete, egui::Button::new("Delete page"))
+                        .add_enabled(can_delete, egui::Button::new("Delete page(s)"))
                         .clicked()
                     {
                         do_delete = true;
@@ -1099,7 +1117,13 @@ impl eframe::App for InkNoteApp {
                 });
             });
             if do_delete && can_delete {
-                self.delete_page_at(target_idx);
+                let mut indices = delete_targets;
+                indices.sort_unstable();
+                indices.dedup();
+                for &idx in indices.iter().rev() {
+                    self.delete_page_at(idx);
+                }
+                self.thumb_cache.clear_selection();
             }
             if do_delete || cancel || !can_delete || modal.should_close() {
                 self.confirm_delete_page = None;
@@ -1328,28 +1352,37 @@ impl eframe::App for InkNoteApp {
                         let new_idx = self.doc.active_page_index();
                         self.scroll_to_page(new_idx);
                     }
-                    ThumbnailAction::DuplicatePage(idx) => {
-                        self.doc.execute(Command::DuplicatePage(idx));
-                        let new_idx = self.doc.active_page_index();
-                        for s in &self.doc.pages()[new_idx].strokes {
-                            self.render_cx.clear_batches();
-                            s.path.draw_composed(&mut self.render_cx, &s.style);
-                            let batches = std::mem::take(&mut self.render_cx.batches);
-                            self.batch_cache.insert(s.id, CachedStroke::new(batches));
+                    ThumbnailAction::DuplicatePages(mut indices) => {
+                        indices.sort_unstable();
+                        indices.dedup();
+                        for &idx in indices.iter().rev() {
+                            if idx < self.doc.page_count() {
+                                self.doc.execute(Command::DuplicatePage(idx));
+                                let new_idx = self.doc.active_page_index();
+                                for s in &self.doc.pages()[new_idx].strokes {
+                                    self.render_cx.clear_batches();
+                                    s.path.draw_composed(&mut self.render_cx, &s.style);
+                                    let batches = std::mem::take(&mut self.render_cx.batches);
+                                    self.batch_cache.insert(s.id, CachedStroke::new(batches));
+                                }
+                            }
                         }
-                        self.scroll_to_page(new_idx);
+                        self.thumb_cache.clear_selection();
+                        self.scroll_to_page(self.doc.active_page_index());
                     }
                     ThumbnailAction::MovePage { from, to } => {
                         self.doc.execute(Command::MovePage { from, to });
                         let cur = self.doc.active_page_index();
                         self.scroll_to_page(cur);
                     }
-                    ThumbnailAction::ClearPage(idx) => {
-                        self.confirm_clear = Some(idx);
+                    ThumbnailAction::ClearPages(indices) => {
+                        if !indices.is_empty() {
+                            self.confirm_clear = Some(indices);
+                        }
                     }
-                    ThumbnailAction::DeletePage(idx) => {
-                        if self.doc.page_count() > 1 {
-                            self.confirm_delete_page = Some(idx);
+                    ThumbnailAction::DeletePages(indices) => {
+                        if !indices.is_empty() && self.doc.page_count() > indices.len() {
+                            self.confirm_delete_page = Some(indices);
                         }
                     }
                 }

@@ -2,7 +2,7 @@
 // Bố cục 2 cột kiểu GoodNotes: tiêu đề "Pages" + nút đóng ×, mỗi thẻ có số trang bên trái
 // và nút mũi tên ⌄ bên phải mở menu popup thao tác trên trang đó.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use eframe::egui::{
@@ -15,17 +15,17 @@ use inknote_render::DrawBatch;
 use crate::{theme::Theme, CachedStroke};
 
 /// Hành động trả về từ Thanh thumbnail trang.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ThumbnailAction {
     None,
     Close,
     SelectPage(usize),
     AddPageBefore(usize),
     AddPageAfter(usize),
-    DuplicatePage(usize),
+    DuplicatePages(Vec<usize>),
     MovePage { from: usize, to: usize },
-    ClearPage(usize),
-    DeletePage(usize),
+    ClearPages(Vec<usize>),
+    DeletePages(Vec<usize>),
 }
 
 struct CachedThumb {
@@ -46,17 +46,25 @@ struct ThumbDragState {
 pub struct ThumbCache {
     entries: HashMap<u64, CachedThumb>,
     drag: Option<ThumbDragState>,
+    selected_pages: HashSet<u64>,
 }
 
 impl ThumbCache {
     pub fn clear(&mut self) {
         self.entries.clear();
         self.drag = None;
+        self.selected_pages.clear();
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selected_pages.clear();
     }
 
     pub fn retain_pages(&mut self, pages: &[DocumentPage]) {
         self.entries
             .retain(|id, _| pages.iter().any(|p| p.id == *id));
+        self.selected_pages
+            .retain(|id| pages.iter().any(|p| p.id == *id));
     }
 }
 
@@ -292,21 +300,34 @@ fn page_popup_frame() -> egui::Frame {
         })
 }
 
-fn show_page_menu_items(ui: &mut Ui, idx: usize, page_count: usize, action: &mut ThumbnailAction) {
+fn show_page_menu_items(
+    ui: &mut Ui,
+    idx: usize,
+    targets: &[usize],
+    page_count: usize,
+    action: &mut ThumbnailAction,
+) {
     ui.set_width(POPUP_MENU_WIDTH);
     let normal_fg = Color32::from_rgb(32, 36, 44);
     let danger_fg = Color32::from_rgb(225, 76, 56);
+    let count = targets.len();
+    let multi = count > 1;
 
-    if popup_menu_item(ui, "Add Page Before", normal_fg, true) {
+    if popup_menu_item(ui, "Add Page Before", normal_fg, !multi) {
         *action = ThumbnailAction::AddPageBefore(idx);
         ui.close();
     }
-    if popup_menu_item(ui, "Add Page After", normal_fg, true) {
+    if popup_menu_item(ui, "Add Page After", normal_fg, !multi) {
         *action = ThumbnailAction::AddPageAfter(idx);
         ui.close();
     }
-    if popup_menu_item(ui, "Duplicate", normal_fg, true) {
-        *action = ThumbnailAction::DuplicatePage(idx);
+    let dup_label = if multi {
+        format!("Duplicate ({count})")
+    } else {
+        "Duplicate".to_string()
+    };
+    if popup_menu_item(ui, &dup_label, normal_fg, true) {
+        *action = ThumbnailAction::DuplicatePages(targets.to_vec());
         ui.close();
     }
 
@@ -321,12 +342,22 @@ fn show_page_menu_items(ui: &mut Ui, idx: usize, page_count: usize, action: &mut
     );
     ui.add_space(4.0);
 
-    if popup_menu_item(ui, "Clear Page", danger_fg, true) {
-        *action = ThumbnailAction::ClearPage(idx);
+    let clear_label = if multi {
+        format!("Clear Pages ({count})")
+    } else {
+        "Clear Page".to_string()
+    };
+    if popup_menu_item(ui, &clear_label, danger_fg, true) {
+        *action = ThumbnailAction::ClearPages(targets.to_vec());
         ui.close();
     }
-    if popup_menu_item(ui, "Delete Page", danger_fg, page_count > 1) {
-        *action = ThumbnailAction::DeletePage(idx);
+    let del_label = if multi {
+        format!("Delete Pages ({count})")
+    } else {
+        "Delete Page".to_string()
+    };
+    if popup_menu_item(ui, &del_label, danger_fg, page_count > count) {
+        *action = ThumbnailAction::DeletePages(targets.to_vec());
         ui.close();
     }
 }
@@ -385,13 +416,47 @@ pub fn show_thumbnail_panel(
     let active_idx = doc.active_page_index();
     let settings = doc.paper_settings();
 
-    if thumb_cache.entries.len() > page_count {
+    if thumb_cache.entries.len() > page_count || !thumb_cache.selected_pages.is_empty() {
         thumb_cache.retain_pages(pages);
+    }
+    if !thumb_cache.selected_pages.is_empty()
+        && ui.ctx().input(|i| i.key_pressed(egui::Key::Escape))
+    {
+        thumb_cache.selected_pages.clear();
     }
 
     // Header: chữ "Pages" căn giữa + nút × đóng bảng ở góc phải (không có nút Add Page)
     ui.add_space(4.0);
     let (header_rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::hover());
+    if !thumb_cache.selected_pages.is_empty() {
+        let sel_count = thumb_cache.selected_pages.len();
+        let pill_rect = Rect::from_center_size(
+            pos2(header_rect.left() + 30.0, header_rect.center().y),
+            vec2(52.0, 22.0),
+        );
+        let pill_resp = ui.interact(
+            pill_rect,
+            ui.scope_id().with("clear_multi_select"),
+            Sense::click(),
+        );
+        let pill_bg = if pill_resp.hovered() {
+            Color32::from_rgb(214, 228, 250)
+        } else {
+            Color32::from_rgb(228, 238, 252)
+        };
+        ui.painter()
+            .rect_filled(pill_rect, CornerRadius::same(11), pill_bg);
+        ui.painter().text(
+            pill_rect.center(),
+            Align2::CENTER_CENTER,
+            format!("{sel_count} ×"),
+            FontId::proportional(11.5),
+            theme.thumb_card_selected_border,
+        );
+        if pill_resp.clicked() {
+            thumb_cache.selected_pages.clear();
+        }
+    }
     ui.painter().text(
         header_rect.center(),
         Align2::CENTER_CENTER,
@@ -537,7 +602,8 @@ pub fn show_thumbnail_panel(
                                 );
                             }
 
-                            let border = if is_active {
+                            let is_ticked = thumb_cache.selected_pages.contains(&page.id);
+                            let border = if is_ticked || is_active {
                                 Stroke::new(2.2, theme.thumb_card_selected_border)
                             } else if card_resp.hovered() {
                                 Stroke::new(
@@ -554,25 +620,44 @@ pub fn show_thumbnail_panel(
                                 StrokeKind::Inside,
                             );
 
-                            draw_check_circle(
-                                ui.painter(),
-                                check_rect.center(),
-                                is_active,
-                                check_resp.hovered(),
-                                theme.thumb_card_selected_border,
-                            );
+                            // Bình thường ẩn ô tích tròn; chỉ hiện khi trang đang được tick hoặc khi di chuột vào thẻ
+                            if is_ticked || card_resp.hovered() || check_resp.hovered() {
+                                draw_check_circle(
+                                    ui.painter(),
+                                    check_rect.center(),
+                                    is_ticked,
+                                    check_resp.hovered(),
+                                    theme.thumb_card_selected_border,
+                                );
+                            }
                         }
 
-                        if check_resp.clicked() || card_resp.clicked() {
+                        if check_resp.clicked() {
+                            if !thumb_cache.selected_pages.remove(&page.id) {
+                                thumb_cache.selected_pages.insert(page.id);
+                            }
+                        } else if card_resp.clicked() {
                             action = ThumbnailAction::SelectPage(idx);
                         }
 
-                        // Chuột phải trực tiếp lên thẻ để mở nhanh menu trang
+                        let selected_indices: Vec<usize> = pages
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, p)| thumb_cache.selected_pages.contains(&p.id))
+                            .map(|(i, _)| i)
+                            .collect();
+                        let targets: Vec<usize> = if selected_indices.contains(&idx) {
+                            selected_indices
+                        } else {
+                            vec![idx]
+                        };
+
+                        // Chuột phải trực tiếp lên thẻ để mở nhanh menu trang (hỗ trợ cả nhiều trang đang tick)
                         egui::Popup::context_menu(&card_resp)
                             .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
                             .frame(page_popup_frame())
                             .show(|ui| {
-                                show_page_menu_items(ui, idx, page_count, &mut action);
+                                show_page_menu_items(ui, idx, &targets, page_count, &mut action);
                             });
 
                         // Hàng chân thẻ: số trang căn trái + nút mũi tên xuống ⌄ căn phải
@@ -619,7 +704,7 @@ pub fn show_thumbnail_panel(
                             .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
                             .frame(page_popup_frame())
                             .show(|ui| {
-                                show_page_menu_items(ui, idx, page_count, &mut action);
+                                show_page_menu_items(ui, idx, &targets, page_count, &mut action);
                             });
                     }
                 });
