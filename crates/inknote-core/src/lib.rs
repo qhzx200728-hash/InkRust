@@ -264,8 +264,14 @@ pub enum Command {
     AddStrokes(Vec<Stroke>),
     /// Xoá toàn bộ nét trên trang hiện hành (1 bước undo).
     ClearPage,
+    /// Xoá toàn bộ nét trên trang tại vị trí `index` (1 bước undo).
+    ClearPageAt(usize),
+    /// Chèn một trang mới ngay trước vị trí `before_index` (1 bước undo).
+    InsertPageBefore(usize),
     /// Chèn một trang mới ngay sau vị trí `after_index` (1 bước undo).
     InsertPageAfter(usize),
+    /// Nhân bản trang tại vị trí `index` sang ngay sau nó (1 bước undo).
+    DuplicatePage(usize),
     /// Xoá trang tại vị trí `index` (chỉ xoá khi tài liệu có > 1 trang, 1 bước undo).
     DeletePage(usize),
 }
@@ -480,12 +486,65 @@ impl Document {
                     removed,
                 }
             }
+            Command::ClearPageAt(idx) => {
+                let target_idx = idx.min(self.pages.len().saturating_sub(1));
+                if self.pages[target_idx].strokes.is_empty() {
+                    return;
+                }
+                let removed = std::mem::take(&mut self.pages[target_idx].strokes);
+                Done::ClearPage {
+                    page_index: target_idx,
+                    removed,
+                }
+            }
+            Command::InsertPageBefore(before_idx) => {
+                let insert_idx = before_idx.min(self.pages.len().saturating_sub(1));
+                let page_id = self.alloc_page_id();
+                let page = DocumentPage {
+                    id: page_id,
+                    strokes: Vec::new(),
+                };
+                let prev_active = self.active_page_idx;
+                self.pages.insert(insert_idx, page.clone());
+                self.active_page_idx = insert_idx;
+                Done::InsertPage {
+                    index: insert_idx,
+                    page,
+                    prev_active,
+                }
+            }
             Command::InsertPageAfter(after_idx) => {
                 let insert_idx = (after_idx.min(self.pages.len().saturating_sub(1))) + 1;
                 let page_id = self.alloc_page_id();
                 let page = DocumentPage {
                     id: page_id,
                     strokes: Vec::new(),
+                };
+                let prev_active = self.active_page_idx;
+                self.pages.insert(insert_idx, page.clone());
+                self.active_page_idx = insert_idx;
+                Done::InsertPage {
+                    index: insert_idx,
+                    page,
+                    prev_active,
+                }
+            }
+            Command::DuplicatePage(src_idx) => {
+                let src = src_idx.min(self.pages.len().saturating_sub(1));
+                let insert_idx = src + 1;
+                let page_id = self.alloc_page_id();
+                let src_strokes = self.pages[src].strokes.clone();
+                let cloned_strokes: Vec<Stroke> = src_strokes
+                    .into_iter()
+                    .map(|s| Stroke {
+                        id: self.alloc_id(),
+                        path: s.path,
+                        style: s.style,
+                    })
+                    .collect();
+                let page = DocumentPage {
+                    id: page_id,
+                    strokes: cloned_strokes,
                 };
                 let prev_active = self.active_page_idx;
                 self.pages.insert(insert_idx, page.clone());
@@ -960,5 +1019,32 @@ mod tests {
         }
 
         let _ = std::fs::remove_file(&temp_file);
+    }
+
+    #[test]
+    fn insert_page_before_duplicate_and_clear_page_at_undo_redo() {
+        let mut d = Document::new();
+        let s1 = stroke(&mut d);
+        d.execute(Command::AddStroke(s1));
+
+        // Nhân bản trang 0 -> trang 1 có 1 nét mới (id khác)
+        d.execute(Command::DuplicatePage(0));
+        assert_eq!(d.page_count(), 2);
+        assert_eq!(d.active_page_index(), 1);
+        assert_eq!(d.page_strokes(1).len(), 1);
+        assert_ne!(d.page_strokes(0)[0].id, d.page_strokes(1)[0].id);
+
+        // Chèn trang mới trước trang 1 -> trang trống ở index 1, trang nhân bản dời sang index 2
+        d.execute(Command::InsertPageBefore(1));
+        assert_eq!(d.page_count(), 3);
+        assert_eq!(d.active_page_index(), 1);
+        assert_eq!(d.page_strokes(1).len(), 0);
+        assert_eq!(d.page_strokes(2).len(), 1);
+
+        // Clear trang index 2 rồi Undo
+        d.execute(Command::ClearPageAt(2));
+        assert_eq!(d.page_strokes(2).len(), 0);
+        assert!(d.undo());
+        assert_eq!(d.page_strokes(2).len(), 1);
     }
 }

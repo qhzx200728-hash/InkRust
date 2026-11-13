@@ -1,12 +1,13 @@
 // Thanh thumbnail danh sách các trang (Bước 3.2 - P1).
-// Hiển thị cột thumbnail bên trái Workspace, cho phép bấm để nhảy trang, thêm trang và xoá trang.
+// Bố cục 2 cột kiểu GoodNotes: tiêu đề "Pages" + nút đóng ×, mỗi thẻ có số trang bên trái
+// và nút mũi tên ⌄ bên phải mở menu popup thao tác trên trang đó.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use eframe::egui::{
-    self, pos2, vec2, Align, Color32, CornerRadius, FontId, Layout, Pos2, Rect, RichText,
-    ScrollArea, Sense, Stroke, StrokeKind, Ui,
+    self, pos2, vec2, Align2, Color32, CornerRadius, FontId, PopupCloseBehavior, Pos2, Rect,
+    ScrollArea, Sense, Stroke, StrokeKind, Ui, UiBuilder,
 };
 use inknote_core::{CanvasMode, Document, DocumentPage, PaperPattern, PaperSettings};
 use inknote_render::DrawBatch;
@@ -17,8 +18,12 @@ use crate::{theme::Theme, CachedStroke};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThumbnailAction {
     None,
+    Close,
     SelectPage(usize),
-    AddPage,
+    AddPageBefore(usize),
+    AddPageAfter(usize),
+    DuplicatePage(usize),
+    ClearPage(usize),
     DeletePage(usize),
 }
 
@@ -190,7 +195,78 @@ fn build_or_get_thumb_mesh(
     Some(arc)
 }
 
-/// Vẽ thanh danh sách thumbnail các trang ở cạnh trái workspace.
+fn draw_chevron_down(painter: &egui::Painter, center: Pos2, color: Color32) {
+    let stroke = Stroke::new(1.5, color);
+    painter.line_segment(
+        [
+            pos2(center.x - 4.0, center.y - 1.5),
+            pos2(center.x, center.y + 2.5),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            pos2(center.x, center.y + 2.5),
+            pos2(center.x + 4.0, center.y - 1.5),
+        ],
+        stroke,
+    );
+}
+
+fn draw_close_x(painter: &egui::Painter, center: Pos2, color: Color32) {
+    let stroke = Stroke::new(1.6, color);
+    let r = 4.5;
+    painter.line_segment(
+        [
+            pos2(center.x - r, center.y - r),
+            pos2(center.x + r, center.y + r),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            pos2(center.x + r, center.y - r),
+            pos2(center.x - r, center.y + r),
+        ],
+        stroke,
+    );
+}
+
+fn popup_menu_item(ui: &mut Ui, label: &str, text_color: Color32, enabled: bool) -> bool {
+    let desired = vec2(ui.available_width().max(168.0), 30.0);
+    let (rect, resp) = ui.allocate_exact_size(
+        desired,
+        if enabled {
+            Sense::click()
+        } else {
+            Sense::hover()
+        },
+    );
+    if ui.is_rect_visible(rect) {
+        if enabled && resp.hovered() {
+            ui.painter().rect_filled(
+                rect,
+                CornerRadius::same(6),
+                Color32::from_rgb(238, 241, 246),
+            );
+        }
+        let col = if enabled {
+            text_color
+        } else {
+            Color32::from_rgb(175, 180, 190)
+        };
+        ui.painter().text(
+            pos2(rect.left() + 10.0, rect.center().y),
+            Align2::LEFT_CENTER,
+            label,
+            FontId::proportional(13.5),
+            col,
+        );
+    }
+    enabled && resp.clicked()
+}
+
+/// Vẽ thanh danh sách thumbnail các trang ở cạnh trái workspace (2 cột kiểu GoodNotes).
 pub fn show_thumbnail_panel(
     ui: &mut Ui,
     theme: &Theme,
@@ -204,153 +280,227 @@ pub fn show_thumbnail_panel(
     let active_idx = doc.active_page_index();
     let settings = doc.paper_settings();
 
-    // Dọn cache nếu số trang giảm sau thao tác xoá
     if thumb_cache.entries.len() > page_count {
         thumb_cache.retain_pages(pages);
     }
 
-    ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        ui.label(
-            RichText::new(format!("Pages ({})", page_count))
-                .size(theme.font_size_body)
-                .strong()
-                .color(theme.thumb_label_fg),
+    // Header: chữ "Pages" căn giữa + nút × đóng bảng ở góc phải (không có nút Add Page)
+    ui.add_space(4.0);
+    let (header_rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::hover());
+    ui.painter().text(
+        header_rect.center(),
+        Align2::CENTER_CENTER,
+        "Pages",
+        FontId::proportional(15.0),
+        Color32::from_rgb(28, 32, 40),
+    );
+    let close_rect = Rect::from_center_size(
+        pos2(header_rect.right() - 14.0, header_rect.center().y),
+        vec2(24.0, 24.0),
+    );
+    let close_resp = ui.interact(
+        close_rect,
+        ui.scope_id().with("close_pages_panel"),
+        Sense::click(),
+    );
+    if close_resp.hovered() {
+        ui.painter().rect_filled(
+            close_rect,
+            CornerRadius::same(6),
+            Color32::from_rgb(228, 232, 238),
         );
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if ui
-                .button(RichText::new("+ Add").size(theme.font_size_small))
-                .on_hover_text("Add a new page after current page")
-                .clicked()
-            {
-                action = ThumbnailAction::AddPage;
-            }
-        });
-    });
-    ui.add_space(4.0);
+    }
+    draw_close_x(
+        ui.painter(),
+        close_rect.center(),
+        Color32::from_rgb(56, 62, 74),
+    );
+    if close_resp.clicked() {
+        action = ThumbnailAction::Close;
+    }
+
+    ui.add_space(6.0);
     ui.separator();
-    ui.add_space(4.0);
+    ui.add_space(8.0);
 
     let aspect = (settings.page_height / settings.page_width.max(1.0)).clamp(0.45, 2.0);
     ScrollArea::vertical()
         .id_salt("page_thumbnails_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            let thumb_w = (ui.available_width() - 16.0).max(96.0);
-            let thumb_h = (thumb_w * aspect).round();
-            let scale = thumb_w / settings.page_width.max(1.0);
+            let col_gap = 14.0;
+            let row_gap = 14.0;
+            let avail_w = ui.available_width();
+            let card_w = ((avail_w - col_gap - 8.0) * 0.5).max(80.0);
+            let thumb_h = (card_w * aspect).round();
+            let scale = card_w / settings.page_width.max(1.0);
+            let footer_h = 22.0;
 
-            for (idx, page) in pages.iter().enumerate() {
-                let is_active = idx == active_idx;
-                ui.vertical_centered(|ui| {
-                    let (card_rect, card_resp) =
-                        ui.allocate_exact_size(vec2(thumb_w, thumb_h), Sense::click());
-
-                    let mut delete_clicked = false;
-                    let can_delete = page_count > 1;
-                    let del_rect = Rect::from_center_size(
-                        pos2(card_rect.right() - 12.0, card_rect.top() + 12.0),
-                        vec2(18.0, 18.0),
-                    );
-                    let show_del_btn = can_delete
-                        && (is_active
-                            || card_resp.hovered()
-                            || ui.rect_contains_pointer(card_rect));
-                    let del_resp = if can_delete {
-                        Some(ui.interact(
-                            del_rect,
-                            ui.scope_id().with(("thumb_del", page.id)),
-                            Sense::click(),
-                        ))
-                    } else {
-                        None
-                    };
-                    if let Some(ref dr) = del_resp {
-                        if dr.clicked() {
-                            delete_clicked = true;
+            for row_start in (0..page_count).step_by(2) {
+                ui.horizontal(|ui| {
+                    ui.add_space(4.0);
+                    for col in 0..2 {
+                        let idx = row_start + col;
+                        if idx >= page_count {
+                            break;
                         }
-                    }
+                        if col > 0 {
+                            ui.add_space(col_gap);
+                        }
+                        let page = &pages[idx];
+                        let is_active = idx == active_idx;
 
-                    if ui.is_rect_visible(card_rect) {
-                        // Đổ bóng nhẹ phía dưới card
-                        ui.painter().rect_filled(
-                            card_rect.translate(vec2(0.0, 1.5)),
-                            CornerRadius::same(4),
-                            Color32::from_rgba_unmultiplied(0, 0, 0, 20),
+                        let cell_rect = ui.allocate_space(vec2(card_w, thumb_h + 4.0 + footer_h)).1;
+                        let card_rect = Rect::from_min_size(cell_rect.min, vec2(card_w, thumb_h));
+                        let footer_rect = Rect::from_min_size(
+                            pos2(cell_rect.left(), card_rect.bottom() + 4.0),
+                            vec2(card_w, footer_h),
                         );
 
-                        draw_thumbnail_paper_bg(ui.painter(), card_rect, settings, scale, theme);
-
-                        if let Some(cached_mesh) =
-                            build_or_get_thumb_mesh(page, scale, batch_cache, thumb_cache)
-                        {
-                            let mut translated = (*cached_mesh).clone();
-                            let offset = card_rect.min.to_vec2();
-                            for v in &mut translated.vertices {
-                                v.pos += offset;
-                            }
-                            ui.painter()
-                                .with_clip_rect(card_rect)
-                                .add(egui::Shape::mesh(translated));
-                        }
-
-                        let border = if is_active {
-                            Stroke::new(2.5, theme.thumb_card_selected_border)
-                        } else if card_resp.hovered() {
-                            Stroke::new(1.5, theme.thumb_card_selected_border.linear_multiply(0.6))
-                        } else {
-                            Stroke::new(1.0, theme.thumb_card_border)
-                        };
-                        ui.painter().rect_stroke(
+                        let card_resp = ui.interact(
                             card_rect,
-                            CornerRadius::same(4),
-                            border,
-                            StrokeKind::Outside,
+                            ui.scope_id().with(("thumb_card", page.id)),
+                            Sense::click(),
                         );
 
-                        if show_del_btn {
-                            let is_del_hovered = del_resp.as_ref().is_some_and(|r| r.hovered());
-                            let bg = if is_del_hovered {
-                                theme.thumb_delete_hover_bg
+                        if ui.is_rect_visible(card_rect) {
+                            ui.painter().rect_filled(
+                                card_rect.translate(vec2(0.0, 1.5)),
+                                CornerRadius::same(4),
+                                Color32::from_rgba_unmultiplied(0, 0, 0, 20),
+                            );
+                            draw_thumbnail_paper_bg(
+                                ui.painter(),
+                                card_rect,
+                                settings,
+                                scale,
+                                theme,
+                            );
+
+                            if let Some(cached_mesh) =
+                                build_or_get_thumb_mesh(page, scale, batch_cache, thumb_cache)
+                            {
+                                let mut translated = (*cached_mesh).clone();
+                                let offset = card_rect.min.to_vec2();
+                                for v in &mut translated.vertices {
+                                    v.pos += offset;
+                                }
+                                ui.painter()
+                                    .with_clip_rect(card_rect)
+                                    .add(egui::Shape::mesh(translated));
+                            }
+
+                            let border = if is_active {
+                                Stroke::new(2.2, theme.thumb_card_selected_border)
+                            } else if card_resp.hovered() {
+                                Stroke::new(
+                                    1.5,
+                                    theme.thumb_card_selected_border.linear_multiply(0.6),
+                                )
                             } else {
-                                theme.thumb_delete_bg
+                                Stroke::new(1.0, theme.thumb_card_border)
                             };
-                            ui.painter().circle_filled(del_rect.center(), 8.5, bg);
-                            ui.painter().text(
-                                del_rect.center(),
-                                egui::Align2::CENTER_CENTER,
-                                "×",
-                                FontId::proportional(13.0),
-                                Color32::WHITE,
+                            ui.painter().rect_stroke(
+                                card_rect,
+                                CornerRadius::same(4),
+                                border,
+                                StrokeKind::Outside,
                             );
                         }
-                    }
 
-                    if let Some(dr) = del_resp {
-                        dr.on_hover_text(format!("Delete Page {}", idx + 1));
-                    }
+                        if card_resp.clicked() {
+                            action = ThumbnailAction::SelectPage(idx);
+                        }
 
-                    if delete_clicked {
-                        action = ThumbnailAction::DeletePage(idx);
-                    } else if card_resp.clicked() {
-                        action = ThumbnailAction::SelectPage(idx);
-                    }
+                        // Hàng chân thẻ: số trang căn trái + nút mũi tên xuống ⌄ căn phải
+                        let num_color = if is_active {
+                            theme.thumb_label_active_fg
+                        } else {
+                            theme.thumb_label_fg
+                        };
+                        ui.painter().text(
+                            pos2(footer_rect.left() + 2.0, footer_rect.center().y),
+                            Align2::LEFT_CENTER,
+                            format!("{}", idx + 1),
+                            FontId::proportional(12.5),
+                            num_color,
+                        );
 
-                    ui.add_space(3.0);
-                    let label_color = if is_active {
-                        theme.thumb_label_active_fg
-                    } else {
-                        theme.thumb_label_fg
-                    };
-                    let mut label = RichText::new(format!("{}", idx + 1))
-                        .size(theme.font_size_small)
-                        .color(label_color);
-                    if is_active {
-                        label = label.strong();
+                        let menu_btn_rect = Rect::from_center_size(
+                            pos2(footer_rect.right() - 10.0, footer_rect.center().y),
+                            vec2(22.0, 20.0),
+                        );
+                        let menu_btn_resp = ui
+                            .scope_builder(UiBuilder::new().max_rect(menu_btn_rect), |ui| {
+                                let (r, resp) =
+                                    ui.allocate_exact_size(menu_btn_rect.size(), Sense::click());
+                                if ui.is_rect_visible(r) {
+                                    if resp.hovered() {
+                                        ui.painter().rect_filled(
+                                            r,
+                                            CornerRadius::same(5),
+                                            Color32::from_rgb(228, 232, 238),
+                                        );
+                                    }
+                                    draw_chevron_down(
+                                        ui.painter(),
+                                        r.center(),
+                                        Color32::from_rgb(56, 62, 74),
+                                    );
+                                }
+                                resp
+                            })
+                            .inner;
+
+                        let popup_frame = egui::Frame::new()
+                            .fill(Color32::WHITE)
+                            .stroke(Stroke::new(1.0, Color32::from_rgb(220, 224, 232)))
+                            .corner_radius(CornerRadius::same(12))
+                            .inner_margin(egui::Margin::symmetric(6, 6))
+                            .shadow(egui::Shadow {
+                                offset: [0, 4],
+                                blur: 14,
+                                spread: 0,
+                                color: Color32::from_rgba_unmultiplied(0, 0, 0, 38),
+                            });
+
+                        egui::Popup::from_toggle_button_response(&menu_btn_resp)
+                            .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+                            .frame(popup_frame)
+                            .show(|ui| {
+                                ui.set_min_width(176.0);
+                                let normal_fg = Color32::from_rgb(32, 36, 44);
+                                let danger_fg = Color32::from_rgb(225, 76, 56);
+
+                                if popup_menu_item(ui, "Add Page Before", normal_fg, true) {
+                                    action = ThumbnailAction::AddPageBefore(idx);
+                                    ui.close();
+                                }
+                                if popup_menu_item(ui, "Add Page After", normal_fg, true) {
+                                    action = ThumbnailAction::AddPageAfter(idx);
+                                    ui.close();
+                                }
+                                if popup_menu_item(ui, "Duplicate", normal_fg, true) {
+                                    action = ThumbnailAction::DuplicatePage(idx);
+                                    ui.close();
+                                }
+
+                                ui.add_space(2.0);
+                                ui.separator();
+                                ui.add_space(2.0);
+
+                                if popup_menu_item(ui, "Clear Page", danger_fg, true) {
+                                    action = ThumbnailAction::ClearPage(idx);
+                                    ui.close();
+                                }
+                                if popup_menu_item(ui, "Delete Page", danger_fg, page_count > 1) {
+                                    action = ThumbnailAction::DeletePage(idx);
+                                    ui.close();
+                                }
+                            });
                     }
-                    ui.label(label);
                 });
-                ui.add_space(10.0);
+                ui.add_space(row_gap);
             }
         });
 

@@ -174,7 +174,7 @@ struct InkNoteApp {
     batch_cache: HashMap<u64, CachedStroke>,
     thumb_cache: ThumbCache,
     view: View,
-    confirm_clear: bool,
+    confirm_clear: Option<usize>,
     confirm_delete_page: Option<usize>,
     paint_ms: f32,
     fps: f32,
@@ -245,7 +245,7 @@ impl InkNoteApp {
             batch_cache: HashMap::new(),
             thumb_cache: ThumbCache::default(),
             view: View::default(),
-            confirm_clear: false,
+            confirm_clear: None,
             confirm_delete_page: None,
             paint_ms: 0.0,
             fps: 0.0,
@@ -332,7 +332,7 @@ impl InkNoteApp {
             return None;
         }
         if egui::Popup::is_any_open(ctx)
-            || self.confirm_clear
+            || self.confirm_clear.is_some()
             || self.confirm_delete_page.is_some()
             || self.confirm_unsaved.is_some()
         {
@@ -1007,7 +1007,7 @@ impl eframe::App for InkNoteApp {
                 self.doc.redo();
             }
             if actions.clear_clicked {
-                self.confirm_clear = true;
+                self.confirm_clear = Some(self.doc.active_page_index());
             }
             if actions.add_page_clicked {
                 self.add_page_after_current();
@@ -1040,13 +1040,14 @@ impl eframe::App for InkNoteApp {
         }
 
         // Hộp xác nhận xoá sạch nét trên trang (xoá xong vẫn Undo được)
-        if self.confirm_clear {
+        if let Some(clear_idx) = self.confirm_clear {
+            let page_num = clear_idx + 1;
             let mut do_clear = false;
             let mut cancel = false;
             #[allow(deprecated)]
             let modal = egui::Modal::new(egui::Id::new("confirm_clear_page")).show(&ctx, |ui| {
                 ui.set_width(300.0);
-                ui.heading("Clear this page?");
+                ui.heading(format!("Clear Page {}?", page_num));
                 ui.add_space(4.0);
                 ui.label(
                     "All strokes on this page will be removed. You can undo this with Ctrl+Z.",
@@ -1061,11 +1062,11 @@ impl eframe::App for InkNoteApp {
                     }
                 });
             });
-            if do_clear {
-                self.doc.execute(Command::ClearPage);
+            if do_clear && clear_idx < self.doc.page_count() {
+                self.doc.execute(Command::ClearPageAt(clear_idx));
             }
             if do_clear || cancel || modal.should_close() {
-                self.confirm_clear = false;
+                self.confirm_clear = None;
             }
         }
 
@@ -1215,7 +1216,7 @@ impl eframe::App for InkNoteApp {
                 )
             });
             let blocked = egui::Popup::is_any_open(&ctx)
-                || self.confirm_clear
+                || self.confirm_clear.is_some()
                 || self.confirm_delete_page.is_some()
                 || self.confirm_unsaved.is_some();
             let mut scrolled_or_panned = false;
@@ -1301,12 +1302,36 @@ impl eframe::App for InkNoteApp {
             if self.active.is_none() {
                 match thumb_action {
                     ThumbnailAction::None => {}
+                    ThumbnailAction::Close => {
+                        self.toolbar_state.show_thumbnails = false;
+                    }
                     ThumbnailAction::SelectPage(idx) => {
                         self.doc.set_active_page_index(idx);
                         self.scroll_to_page(idx);
                     }
-                    ThumbnailAction::AddPage => {
-                        self.add_page_after_current();
+                    ThumbnailAction::AddPageBefore(idx) => {
+                        self.doc.execute(Command::InsertPageBefore(idx));
+                        let new_idx = self.doc.active_page_index();
+                        self.scroll_to_page(new_idx);
+                    }
+                    ThumbnailAction::AddPageAfter(idx) => {
+                        self.doc.execute(Command::InsertPageAfter(idx));
+                        let new_idx = self.doc.active_page_index();
+                        self.scroll_to_page(new_idx);
+                    }
+                    ThumbnailAction::DuplicatePage(idx) => {
+                        self.doc.execute(Command::DuplicatePage(idx));
+                        let new_idx = self.doc.active_page_index();
+                        for s in &self.doc.pages()[new_idx].strokes {
+                            self.render_cx.clear_batches();
+                            s.path.draw_composed(&mut self.render_cx, &s.style);
+                            let batches = std::mem::take(&mut self.render_cx.batches);
+                            self.batch_cache.insert(s.id, CachedStroke::new(batches));
+                        }
+                        self.scroll_to_page(new_idx);
+                    }
+                    ThumbnailAction::ClearPage(idx) => {
+                        self.confirm_clear = Some(idx);
                     }
                     ThumbnailAction::DeletePage(idx) => {
                         if self.doc.page_count() > 1 {
@@ -1606,7 +1631,7 @@ mod tests {
             batch_cache: HashMap::new(),
             thumb_cache: ThumbCache::default(),
             view: View::default(),
-            confirm_clear: false,
+            confirm_clear: None,
             confirm_delete_page: None,
             paint_ms: 0.0,
             fps: 0.0,

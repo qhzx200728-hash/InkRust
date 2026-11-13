@@ -62,8 +62,6 @@ pub struct Theme {
     pub thumb_card_border: Color32,
     pub thumb_label_fg: Color32,
     pub thumb_label_active_fg: Color32,
-    pub thumb_delete_bg: Color32,
-    pub thumb_delete_hover_bg: Color32,
 
     // 6. Cỡ chữ
     pub font_size_title: f32,
@@ -119,17 +117,15 @@ impl Default for Theme {
             paper_dot_radius: 1.25,
             paper_margin: 14.0,
 
-            // Thanh thumbnail trang (bên trái, sáng nhẹ, nổi bật viền xanh ở trang đang chọn)
-            thumb_panel_bg: Color32::from_rgb(242, 245, 250),
-            thumb_panel_stroke: Color32::from_rgb(212, 218, 228),
-            thumb_panel_width: 186.0,
+            // Thanh thumbnail trang (bên trái, bố cục 2 cột kiểu GoodNotes)
+            thumb_panel_bg: Color32::from_rgb(245, 246, 249),
+            thumb_panel_stroke: Color32::from_rgb(218, 222, 230),
+            thumb_panel_width: 268.0,
             thumb_card_bg: Color32::WHITE,
             thumb_card_selected_border: Color32::from_rgb(24, 90, 188),
             thumb_card_border: Color32::from_rgb(204, 210, 220),
             thumb_label_fg: Color32::from_rgb(60, 66, 78),
             thumb_label_active_fg: Color32::from_rgb(24, 90, 188),
-            thumb_delete_bg: Color32::from_rgba_unmultiplied(28, 32, 42, 165),
-            thumb_delete_hover_bg: Color32::from_rgb(215, 62, 62),
 
             // Cỡ chữ
             font_size_title: 14.5,
