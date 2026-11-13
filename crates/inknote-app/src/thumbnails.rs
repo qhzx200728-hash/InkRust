@@ -23,6 +23,7 @@ pub enum ThumbnailAction {
     AddPageBefore(usize),
     AddPageAfter(usize),
     DuplicatePage(usize),
+    MovePage { from: usize, to: usize },
     ClearPage(usize),
     DeletePage(usize),
 }
@@ -33,15 +34,24 @@ struct CachedThumb {
     mesh: Arc<egui::epaint::Mesh>,
 }
 
+struct ThumbDragState {
+    source_idx: usize,
+    start_pos: Pos2,
+    dragging: bool,
+    target_idx: usize,
+}
+
 /// Bộ nhớ đệm lưới thumbnail cho từng trang (khoá = `page.id`) để giữ hiệu năng mượt khi cuộn.
 #[derive(Default)]
 pub struct ThumbCache {
     entries: HashMap<u64, CachedThumb>,
+    drag: Option<ThumbDragState>,
 }
 
 impl ThumbCache {
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.drag = None;
     }
 
     pub fn retain_pages(&mut self, pages: &[DocumentPage]) {
@@ -324,15 +334,21 @@ pub fn show_thumbnail_panel(
     ui.add_space(10.0);
 
     let aspect = (settings.page_height / settings.page_width.max(1.0)).clamp(0.45, 2.0);
+    let mut rendered_cards: Vec<(usize, Rect)> = Vec::with_capacity(page_count);
+    let mut scroll_rect = Rect::NOTHING;
+
     ScrollArea::vertical()
         .id_salt("page_thumbnails_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            scroll_rect = ui.clip_rect();
             let side_pad = 6.0;
+            // Chừa khoảng trống bên phải cho thanh cuộn nằm hẳn ra ngoài thẻ thumbnail
+            let scroll_reserve = 16.0;
             let col_gap = 16.0;
             let row_gap = 14.0;
             let avail_w = ui.available_width();
-            let card_w = ((avail_w - side_pad * 2.0 - col_gap) * 0.5).max(80.0);
+            let card_w = ((avail_w - side_pad - scroll_reserve - col_gap) * 0.5).max(76.0);
             let thumb_h = (card_w * aspect).round();
             let scale = card_w / settings.page_width.max(1.0);
             let footer_h = 24.0;
@@ -358,12 +374,30 @@ pub fn show_thumbnail_panel(
                             pos2(cell_rect.left(), card_rect.bottom() + 4.0),
                             vec2(card_w, footer_h),
                         );
+                        rendered_cards.push((idx, card_rect));
 
                         let card_resp = ui.interact(
                             card_rect,
                             ui.scope_id().with(("thumb_card", page.id)),
-                            Sense::click(),
+                            Sense::click_and_drag(),
                         );
+
+                        if page_count > 1 && card_resp.drag_started_by(egui::PointerButton::Primary)
+                        {
+                            if let Some(pos) = ui.ctx().input(|i| i.pointer.interact_pos()) {
+                                thumb_cache.drag = Some(ThumbDragState {
+                                    source_idx: idx,
+                                    start_pos: pos,
+                                    dragging: false,
+                                    target_idx: idx,
+                                });
+                            }
+                        }
+
+                        let is_drag_source = thumb_cache
+                            .drag
+                            .as_ref()
+                            .is_some_and(|d| d.dragging && d.source_idx == idx);
 
                         if ui.is_rect_visible(card_rect) {
                             ui.painter().rect_filled(
@@ -390,6 +424,14 @@ pub fn show_thumbnail_panel(
                                 ui.painter()
                                     .with_clip_rect(card_rect)
                                     .add(egui::Shape::mesh(translated));
+                            }
+
+                            if is_drag_source {
+                                ui.painter().rect_filled(
+                                    card_rect,
+                                    CornerRadius::same(6),
+                                    Color32::from_rgba_unmultiplied(245, 246, 249, 150),
+                                );
                             }
 
                             let border = if is_active {
@@ -515,6 +557,90 @@ pub fn show_thumbnail_panel(
                 ui.add_space(row_gap);
             }
         });
+
+    // Xử lý kéo-thả sắp xếp thứ tự trang
+    if thumb_cache.drag.is_some() {
+        let (primary_down, cur_pos) = ui
+            .ctx()
+            .input(|i| (i.pointer.primary_down(), i.pointer.interact_pos()));
+
+        if primary_down {
+            if let (Some(drag), Some(pos)) = (thumb_cache.drag.as_mut(), cur_pos) {
+                if !drag.dragging && pos.distance(drag.start_pos) > 6.0 {
+                    drag.dragging = true;
+                }
+                if drag.dragging && !rendered_cards.is_empty() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                    let &(hover_idx, hover_rect) = rendered_cards
+                        .iter()
+                        .min_by(|a, b| {
+                            let da = a.1.center().distance_sq(pos);
+                            let db = b.1.center().distance_sq(pos);
+                            da.total_cmp(&db)
+                        })
+                        .unwrap();
+                    let insert_before = pos.x < hover_rect.center().x;
+                    let raw_slot = if insert_before {
+                        hover_idx
+                    } else {
+                        hover_idx + 1
+                    };
+                    let target_idx = if raw_slot > drag.source_idx {
+                        raw_slot - 1
+                    } else {
+                        raw_slot
+                    }
+                    .min(page_count.saturating_sub(1));
+                    drag.target_idx = target_idx;
+
+                    if target_idx != drag.source_idx {
+                        let bar_x = if insert_before {
+                            hover_rect.left() - 8.0
+                        } else {
+                            hover_rect.right() + 8.0
+                        };
+                        let bar_painter = ui.painter().with_clip_rect(scroll_rect);
+                        let col = theme.thumb_card_selected_border;
+                        bar_painter.line_segment(
+                            [
+                                pos2(bar_x, hover_rect.top() - 2.0),
+                                pos2(bar_x, hover_rect.bottom() + 2.0),
+                            ],
+                            Stroke::new(3.0, col),
+                        );
+                        bar_painter.circle_filled(pos2(bar_x, hover_rect.top() - 2.0), 3.5, col);
+                        bar_painter.circle_filled(pos2(bar_x, hover_rect.bottom() + 2.0), 3.5, col);
+                    }
+
+                    // Nhãn nổi đi theo con trỏ chuột khi đang kéo trang
+                    let overlay = ui.ctx().layer_painter(egui::LayerId::new(
+                        egui::Order::Tooltip,
+                        ui.scope_id().with("thumb_drag_badge"),
+                    ));
+                    let badge_rect = Rect::from_min_size(pos + vec2(14.0, 14.0), vec2(74.0, 24.0));
+                    overlay.rect_filled(
+                        badge_rect,
+                        CornerRadius::same(6),
+                        theme.thumb_card_selected_border,
+                    );
+                    overlay.text(
+                        badge_rect.center(),
+                        Align2::CENTER_CENTER,
+                        format!("Page {}", drag.source_idx + 1),
+                        FontId::proportional(12.0),
+                        Color32::WHITE,
+                    );
+                }
+            }
+        } else if let Some(drag) = thumb_cache.drag.take() {
+            if drag.dragging && drag.target_idx != drag.source_idx {
+                action = ThumbnailAction::MovePage {
+                    from: drag.source_idx,
+                    to: drag.target_idx,
+                };
+            }
+        }
+    }
 
     action
 }

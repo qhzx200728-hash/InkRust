@@ -22,8 +22,7 @@ pub struct Theme {
     pub nav_status_unsaved_dot: Color32,
     pub nav_status_notice_fg: Color32,
 
-    // 2. Thanh tuỳ chọn công cụ (Contextual Tool Options Bar)
-    pub tool_strip_bg: Color32,
+    // 2. Thanh tuỳ chọn công cụ nổi dạng popup (Contextual Tool Options Pill)
     pub tool_bar_pill_bg: Color32,
     pub tool_bar_pill_stroke: Color32,
     pub tool_bar_rounding: u8,
@@ -86,8 +85,7 @@ impl Default for Theme {
             nav_status_unsaved_dot: Color32::from_rgb(248, 113, 113),
             nav_status_notice_fg: Color32::WHITE,
 
-            // Thanh tuỳ chọn công cụ nền tối bo tròn
-            tool_strip_bg: Color32::from_rgb(236, 239, 244),
+            // Thanh tuỳ chọn công cụ nổi nền tối bo tròn
             tool_bar_pill_bg: Color32::from_rgb(34, 36, 42),
             tool_bar_pill_stroke: Color32::from_rgb(56, 59, 68),
             tool_bar_rounding: 18,
@@ -120,7 +118,7 @@ impl Default for Theme {
             // Thanh thumbnail trang (bên trái, bố cục 2 cột kiểu GoodNotes)
             thumb_panel_bg: Color32::from_rgb(245, 246, 249),
             thumb_panel_stroke: Color32::from_rgb(218, 222, 230),
-            thumb_panel_width: 268.0,
+            thumb_panel_width: 280.0,
             thumb_card_bg: Color32::WHITE,
             thumb_card_selected_border: Color32::from_rgb(24, 90, 188),
             thumb_card_border: Color32::from_rgb(204, 210, 220),
@@ -142,18 +140,18 @@ impl Theme {
             .inner_margin(Margin::symmetric(12, 5))
     }
 
-    pub fn tool_strip_frame(&self) -> egui::Frame {
-        egui::Frame::new()
-            .fill(self.tool_strip_bg)
-            .inner_margin(Margin::symmetric(12, 6))
-    }
-
     pub fn tool_pill_frame(&self) -> egui::Frame {
         egui::Frame::new()
             .fill(self.tool_bar_pill_bg)
             .stroke(egui::Stroke::new(1.0, self.tool_bar_pill_stroke))
             .corner_radius(CornerRadius::same(self.tool_bar_rounding))
             .inner_margin(Margin::symmetric(14, 5))
+            .shadow(egui::Shadow {
+                offset: [0, 4],
+                blur: 12,
+                spread: 0,
+                color: Color32::from_rgba_unmultiplied(0, 0, 0, 48),
+            })
     }
 
     pub fn dark_popup_frame(&self, base_style: &egui::Style) -> egui::Frame {

@@ -272,6 +272,8 @@ pub enum Command {
     InsertPageAfter(usize),
     /// Nhân bản trang tại vị trí `index` sang ngay sau nó (1 bước undo).
     DuplicatePage(usize),
+    /// Di chuyển trang từ vị trí `from` sang vị trí `to` (1 bước undo).
+    MovePage { from: usize, to: usize },
     /// Xoá trang tại vị trí `index` (chỉ xoá khi tài liệu có > 1 trang, 1 bước undo).
     DeletePage(usize),
 }
@@ -300,6 +302,11 @@ enum Done {
     InsertPage {
         index: usize,
         page: DocumentPage,
+        prev_active: usize,
+    },
+    MovePage {
+        from: usize,
+        to: usize,
         prev_active: usize,
     },
     DeletePage {
@@ -555,6 +562,25 @@ impl Document {
                     prev_active,
                 }
             }
+            Command::MovePage { from, to } => {
+                if self.pages.len() <= 1 {
+                    return;
+                }
+                let from_idx = from.min(self.pages.len() - 1);
+                let to_idx = to.min(self.pages.len() - 1);
+                if from_idx == to_idx {
+                    return;
+                }
+                let prev_active = self.active_page_idx;
+                let page = self.pages.remove(from_idx);
+                self.pages.insert(to_idx, page);
+                self.active_page_idx = to_idx;
+                Done::MovePage {
+                    from: from_idx,
+                    to: to_idx,
+                    prev_active,
+                }
+            }
             Command::DeletePage(idx) => {
                 if self.pages.len() <= 1 {
                     return; // luôn giữ ít nhất 1 trang trong tài liệu
@@ -607,6 +633,15 @@ impl Document {
                 self.pages.remove(*index);
                 self.active_page_idx = (*prev_active).min(self.pages.len().saturating_sub(1));
             }
+            Done::MovePage {
+                from,
+                to,
+                prev_active,
+            } => {
+                let page = self.pages.remove(*to);
+                self.pages.insert(*from, page);
+                self.active_page_idx = (*prev_active).min(self.pages.len().saturating_sub(1));
+            }
             Done::DeletePage {
                 index,
                 page,
@@ -647,6 +682,11 @@ impl Document {
             Done::InsertPage { index, page, .. } => {
                 self.pages.insert(*index, page.clone());
                 self.active_page_idx = *index;
+            }
+            Done::MovePage { from, to, .. } => {
+                let page = self.pages.remove(*from);
+                self.pages.insert(*to, page);
+                self.active_page_idx = *to;
             }
             Done::DeletePage { index, .. } => {
                 self.pages.remove(*index);
@@ -1046,5 +1086,15 @@ mod tests {
         assert_eq!(d.page_strokes(2).len(), 0);
         assert!(d.undo());
         assert_eq!(d.page_strokes(2).len(), 1);
+
+        // Di chuyển trang index 2 lên đầu (index 0) rồi Undo/Redo
+        let moved_id = d.pages()[2].id;
+        d.execute(Command::MovePage { from: 2, to: 0 });
+        assert_eq!(d.pages()[0].id, moved_id);
+        assert_eq!(d.active_page_index(), 0);
+        assert!(d.undo());
+        assert_eq!(d.pages()[2].id, moved_id);
+        assert!(d.redo());
+        assert_eq!(d.pages()[0].id, moved_id);
     }
 }

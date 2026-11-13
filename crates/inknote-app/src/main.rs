@@ -1287,7 +1287,12 @@ impl eframe::App for InkNoteApp {
         if self.toolbar_state.show_thumbnails {
             let panel_frame = egui::Frame::new()
                 .fill(self.theme.thumb_panel_bg)
-                .inner_margin(egui::Margin::symmetric(12, 10));
+                .inner_margin(egui::Margin {
+                    left: 10,
+                    right: 4,
+                    top: 10,
+                    bottom: 10,
+                });
             let mut thumb_action = ThumbnailAction::None;
             egui::Panel::left("page_thumbnails_sidebar")
                 .resizable(false)
@@ -1333,6 +1338,11 @@ impl eframe::App for InkNoteApp {
                             self.batch_cache.insert(s.id, CachedStroke::new(batches));
                         }
                         self.scroll_to_page(new_idx);
+                    }
+                    ThumbnailAction::MovePage { from, to } => {
+                        self.doc.execute(Command::MovePage { from, to });
+                        let cur = self.doc.active_page_index();
+                        self.scroll_to_page(cur);
                     }
                     ThumbnailAction::ClearPage(idx) => {
                         self.confirm_clear = Some(idx);
