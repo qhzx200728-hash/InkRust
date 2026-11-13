@@ -18,7 +18,7 @@ use inknote_pen::{
 use crate::{
     autosave::FileStatusInfo,
     icons::{ToolIcon, draw_icon},
-    shapes::{ALL_SHAPE_KINDS, draw_shape_kind_icon, shape_kind_label},
+    shapes::{QUICK_SHAPE_KINDS, SHAPE_GROUPS, draw_shape_kind_icon, shape_kind_label},
     theme::{
         EXTENDED_PALETTE, MARKER_QUICK_WIDTHS, QUICK_COLORS, SOLID_QUICK_WIDTHS, Theme,
         pen_color_to_egui, rgb_to_pen_color,
@@ -1730,16 +1730,112 @@ fn shape_kind_chip(ui: &mut Ui, theme: &Theme, kind: ShapeKind, selected: bool) 
     resp.on_hover_text(shape_kind_label(kind))
 }
 
+fn all_shapes_toggle_chip(
+    ui: &mut Ui,
+    theme: &Theme,
+    active_kind: ShapeKind,
+    is_extra_active: bool,
+) -> egui::Response {
+    let h = theme.tool_row_height;
+    let w = if is_extra_active { 42.0 } else { 54.0 };
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, h), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let p = ui.painter();
+        if is_extra_active {
+            p.rect_filled(
+                rect,
+                CornerRadius::same(theme.tool_item_rounding),
+                theme.tool_selected_bg,
+            );
+            let icon_rect = Rect::from_min_size(rect.min + vec2(3.0, 2.0), vec2(h - 4.0, h - 4.0));
+            draw_shape_kind_icon(p, icon_rect.shrink(1.0), active_kind, Color32::WHITE);
+            p.text(
+                pos2(rect.right() - 8.0, rect.center().y),
+                Align2::CENTER_CENTER,
+                "⌄",
+                egui::FontId::proportional(theme.font_size_small),
+                Color32::WHITE,
+            );
+        } else {
+            let bg = if resp.hovered() {
+                theme.tool_hover_bg
+            } else {
+                theme.popup_section_bg
+            };
+            p.rect_filled(rect, CornerRadius::same(theme.tool_item_rounding), bg);
+            p.text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                "All ⌄",
+                egui::FontId::proportional(theme.font_size_small),
+                theme.tool_text_fg,
+            );
+        }
+    }
+    resp.on_hover_text(format!(
+        "All 19 Shapes — Current: {}",
+        shape_kind_label(active_kind)
+    ))
+}
+
 /// Nội dung Thanh tuỳ chọn khi đang chọn công cụ Hình học (Shapes)
 fn show_shapes_contextual_options(ui: &mut Ui, theme: &Theme, state: &mut ToolbarState) {
     let row_h = theme.tool_row_height;
 
-    // 1. Hàng chọn 8 loại hình cơ bản
-    for kind in ALL_SHAPE_KINDS {
+    // 1. 7 nút chọn nhanh + nút mở Pop-up toàn bộ 19 loại hình
+    for kind in QUICK_SHAPE_KINDS {
         if shape_kind_chip(ui, theme, kind, state.shape_kind == kind).clicked() {
             state.shape_kind = kind;
         }
     }
+    let is_extra = !QUICK_SHAPE_KINDS.contains(&state.shape_kind);
+    let more_shapes_btn = all_shapes_toggle_chip(ui, theme, state.shape_kind, is_extra);
+    egui::Popup::from_toggle_button_response(&more_shapes_btn)
+        .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+        .frame(theme.dark_popup_frame(ui.style()))
+        .show(|ui| {
+            ui.set_min_width(235.0);
+            ui.label(
+                RichText::new("Shapes & Polygons")
+                    .size(theme.font_size_title)
+                    .strong()
+                    .color(theme.popup_header_fg),
+            );
+            ui.add_space(6.0);
+
+            for (group_title, kinds) in SHAPE_GROUPS {
+                egui::Frame::new()
+                    .fill(theme.popup_section_bg)
+                    .corner_radius(CornerRadius::same(8))
+                    .inner_margin(egui::Margin::same(7))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new(group_title)
+                                .size(theme.font_size_small)
+                                .color(theme.tool_text_muted),
+                        );
+                        ui.add_space(3.0);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                            for &kind in kinds {
+                                if shape_kind_chip(ui, theme, kind, state.shape_kind == kind)
+                                    .clicked()
+                                {
+                                    state.shape_kind = kind;
+                                    ui.close();
+                                }
+                            }
+                        });
+                    });
+                ui.add_space(5.0);
+            }
+
+            ui.label(
+                RichText::new("Tip: Hold Ctrl for 0°/30°/45°/60°/90° & regular shapes")
+                    .size(theme.font_size_small)
+                    .color(theme.tool_text_muted),
+            );
+        });
 
     draw_vertical_divider(ui, row_h, theme.tool_bar_pill_stroke);
 

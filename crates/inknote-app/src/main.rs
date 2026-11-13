@@ -1017,21 +1017,21 @@ impl InkNoteApp {
         ));
     }
 
-    fn shape_move(&mut self, screen_pos: egui::Pos2, shift_held: bool) {
+    fn shape_move(&mut self, screen_pos: egui::Pos2, ctrl_held: bool) {
         let Some(mut drag) = self.active_shape.take() else {
             return;
         };
         let page_pos = self.page_local_for(screen_pos, drag.page_index);
-        drag.update(page_pos, shift_held);
+        drag.update(page_pos, ctrl_held);
         self.active_shape = Some(drag);
     }
 
-    fn shape_up(&mut self, screen_pos: egui::Pos2, shift_held: bool) {
+    fn shape_up(&mut self, screen_pos: egui::Pos2, ctrl_held: bool) {
         let Some(mut drag) = self.active_shape.take() else {
             return;
         };
         let page_pos = self.page_local_for(screen_pos, drag.page_index);
-        drag.update(page_pos, shift_held);
+        drag.update(page_pos, ctrl_held);
         let id = self.doc.alloc_id();
         if let Some(obj) = drag.finish(id) {
             self.doc.execute(Command::AddShape {
@@ -1243,8 +1243,13 @@ impl eframe::App for InkNoteApp {
 impl InkNoteApp {
     fn run_app_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        let (events, frame_t, shift_held) =
-            ctx.input(|i| (i.events.clone(), i.time, i.modifiers.shift));
+        let (events, frame_t, ctrl_held) = ctx.input(|i| {
+            (
+                i.events.clone(),
+                i.time,
+                i.modifiers.ctrl || i.modifiers.command,
+            )
+        });
         let dt = (frame_t - self.prev_frame_t).clamp(0.001, 0.05);
         let n_ev = events.len().max(1) as f64;
 
@@ -1301,7 +1306,7 @@ impl InkNoteApp {
                             } else if self.touch_active && self.active_eraser.is_some() {
                                 self.eraser_move(pos);
                             } else if self.touch_active && self.active_shape.is_some() {
-                                self.shape_move(pos, shift_held);
+                                self.shape_move(pos, ctrl_held);
                             } else if self.touch_active && self.active.is_some() {
                                 if force.is_some() {
                                     self.stylus_has_force = true;
@@ -1323,7 +1328,7 @@ impl InkNoteApp {
                             } else if self.active_eraser.is_some() {
                                 self.eraser_up(pos);
                             } else if self.active_shape.is_some() {
-                                self.shape_up(pos, shift_held);
+                                self.shape_up(pos, ctrl_held);
                             } else if self.active.is_some() {
                                 let p = match force {
                                     Some(f) => (f as f64).clamp(0.0, 1.0),
@@ -1365,7 +1370,7 @@ impl InkNoteApp {
                         } else if self.active_eraser.is_some() {
                             self.eraser_up(pos);
                         } else if self.active_shape.is_some() {
-                            self.shape_up(pos, shift_held);
+                            self.shape_up(pos, ctrl_held);
                         } else if self.active.is_some() {
                             self.pen_up(pos, Element::PRESSURE_DEFAULT, now);
                         }
@@ -1377,7 +1382,7 @@ impl InkNoteApp {
                     } else if self.active_eraser.is_some() {
                         self.eraser_move(pos);
                     } else if self.active_shape.is_some() {
-                        self.shape_move(pos, shift_held);
+                        self.shape_move(pos, ctrl_held);
                     } else if self.active.is_some() {
                         let now = self.monotonic_instant(ev_secs);
                         self.pen_down(pos, Element::PRESSURE_DEFAULT, now);
@@ -1385,6 +1390,10 @@ impl InkNoteApp {
                 }
                 _ => {}
             }
+        }
+        // Khi người dùng nhấn/nhả phím Ctrl ngay lúc đang giữ chuột/bút đứng yên -> cập nhật xem trước ngay tức thì
+        if let Some(drag) = &mut self.active_shape {
+            drag.reapply_constraint(ctrl_held);
         }
         self.prev_frame_t = frame_t;
 
@@ -3550,5 +3559,161 @@ mod tests {
         assert!(app.doc.pages()[0].shapes.is_empty());
         assert!(app.doc.undo());
         assert_eq!(app.doc.pages()[0].shapes.len(), 1);
+    }
+
+    #[test]
+    fn test_ctrl_constrains_angles_and_regular_shapes() {
+        let start = Pos2::new(200.0, 200.0);
+
+        // 1. Góc đặc trưng 0°, 30°, 45°, 60°, 90° cho đường thẳng & mũi tên
+        for (target, expected_deg) in [
+            (Pos2::new(300.0, 210.0), 0.0_f32),
+            (Pos2::new(290.0, 248.0), 30.0_f32),
+            (Pos2::new(275.0, 272.0), 45.0_f32),
+            (Pos2::new(250.0, 290.0), 60.0_f32),
+            (Pos2::new(208.0, 310.0), 90.0_f32),
+        ] {
+            for kind in [
+                inknote_core::ShapeKind::Line,
+                inknote_core::ShapeKind::Arrow,
+                inknote_core::ShapeKind::DoubleArrow,
+                inknote_core::ShapeKind::Curve,
+            ] {
+                let end = shapes::constrain_shape_end(kind, start, target, true);
+                let d = end - start;
+                let actual_deg = d.y.abs().atan2(d.x.abs()).to_degrees();
+                assert!(
+                    (actual_deg - expected_deg).abs() < 0.05,
+                    "{kind:?}: expected {expected_deg}, got {actual_deg}"
+                );
+            }
+        }
+
+        // 2. Hình vuông, vuông bo góc, tròn đều, hình thoi 1:1
+        for kind in [
+            inknote_core::ShapeKind::Rectangle,
+            inknote_core::ShapeKind::RoundedRect,
+            inknote_core::ShapeKind::Circle,
+            inknote_core::ShapeKind::Diamond,
+        ] {
+            let end = shapes::constrain_shape_end(kind, start, Pos2::new(340.0, 255.0), true);
+            assert!(((end.x - start.x).abs() - (end.y - start.y).abs()).abs() < 1e-3);
+        }
+
+        // 3. Tam giác đều khi giữ Ctrl: 3 cạnh có độ dài bằng nhau chính xác
+        let eq_end = shapes::constrain_shape_end(
+            inknote_core::ShapeKind::Triangle,
+            start,
+            Pos2::new(320.0, 240.0),
+            true,
+        );
+        let (tri_pts, closed) = shapes::shape_outline_points(
+            inknote_core::ShapeKind::Triangle,
+            start,
+            eq_end,
+            None,
+        );
+        assert!(closed);
+        assert_eq!(tri_pts.len(), 3);
+        let s01 = tri_pts[0].distance(tri_pts[1]);
+        let s12 = tri_pts[1].distance(tri_pts[2]);
+        let s20 = tri_pts[2].distance(tri_pts[0]);
+        assert!((s01 - s12).abs() < 1e-2 && (s12 - s20).abs() < 1e-2);
+
+        // 4. Tam giác vuông cân luôn giữ 2 cạnh góc vuông bằng nhau ngay cả khi không giữ Ctrl
+        let ri_end = shapes::constrain_shape_end(
+            inknote_core::ShapeKind::RightIsoscelesTriangle,
+            start,
+            Pos2::new(310.0, 245.0),
+            false,
+        );
+        assert!(((ri_end.x - start.x).abs() - (ri_end.y - start.y).abs()).abs() < 1e-3);
+
+        // 5. Ngũ giác / Lục giác / Thất giác / Bát giác đều khi giữ Ctrl -> mọi cạnh bằng nhau
+        for kind in [
+            inknote_core::ShapeKind::Pentagon,
+            inknote_core::ShapeKind::Hexagon,
+            inknote_core::ShapeKind::Heptagon,
+            inknote_core::ShapeKind::Octagon,
+        ] {
+            let end = shapes::constrain_shape_end(kind, start, Pos2::new(330.0, 250.0), true);
+            let (pts, closed) = shapes::shape_outline_points(kind, start, end, None);
+            assert!(closed);
+            let first_side = pts[0].distance(pts[1]);
+            for i in 0..pts.len() {
+                let next = pts[(i + 1) % pts.len()];
+                assert!(
+                    (pts[i].distance(next) - first_side).abs() < 0.05,
+                    "{kind:?} side {i} unequal"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_extended_19_shapes_draw_lasso_and_roundtrip() {
+        let ctx = egui::Context::default();
+        let mut app = new_test_app(&ctx);
+        let paper = egui::Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 720.0));
+        app.paper_rect = Some(paper);
+        app.toolbar_state.active_tool = ActiveTool::Shapes;
+
+        let all_kinds: Vec<inknote_core::ShapeKind> = shapes::SHAPE_GROUPS
+            .iter()
+            .flat_map(|(_, list)| list.iter().copied())
+            .collect();
+        assert_eq!(all_kinds.len(), 19);
+
+        for (idx, kind) in all_kinds.iter().copied().enumerate() {
+            app.toolbar_state.shape_kind = kind;
+            let row = (idx / 5) as f32;
+            let col = (idx % 5) as f32;
+            let p0 = Pos2::new(60.0 + col * 120.0, 60.0 + row * 90.0);
+            let p1 = p0 + vec2(80.0, 50.0);
+            app.shape_down(&ctx, app.view.to_screen(paper, p0));
+            app.shape_up(app.view.to_screen(paper, p1), false);
+        }
+        assert_eq!(app.doc.pages()[0].shapes.len(), 19);
+
+        // Kiểm tra khác biệt hình học giữa 3 hình thang
+        let (trap_pts, _) = shapes::shape_outline_points(
+            inknote_core::ShapeKind::Trapezoid,
+            Pos2::ZERO,
+            Pos2::new(100.0, 60.0),
+            None,
+        );
+        let (rtrap_pts, _) = shapes::shape_outline_points(
+            inknote_core::ShapeKind::RightTrapezoid,
+            Pos2::ZERO,
+            Pos2::new(100.0, 60.0),
+            None,
+        );
+        let (itrap_pts, _) = shapes::shape_outline_points(
+            inknote_core::ShapeKind::IsoscelesTrapezoid,
+            Pos2::ZERO,
+            Pos2::new(100.0, 60.0),
+            None,
+        );
+        assert!((rtrap_pts[0].x - rtrap_pts[3].x).abs() < 1e-3); // Cạnh trái thẳng đứng
+        assert!((itrap_pts[0].distance(itrap_pts[3]) - itrap_pts[1].distance(itrap_pts[2])).abs() < 1e-3); // 2 cạnh bên bằng nhau
+        assert!((trap_pts[0].distance(trap_pts[3]) - trap_pts[1].distance(trap_pts[2])).abs() > 5.0); // Hình thang thường lệch rõ
+
+        // Lasso quét toàn bộ 19 hình -> chọn đủ 19 hình
+        app.toolbar_state.active_tool = ActiveTool::Lasso;
+        app.toolbar_state.lasso_mode = toolbar::LassoMode::Rectangle;
+        app.lasso_down(&ctx, app.view.to_screen(paper, Pos2::new(20.0, 20.0)));
+        app.lasso_move(app.view.to_screen(paper, Pos2::new(700.0, 500.0)));
+        app.lasso_up();
+        let sel = app.lasso_state.selection.as_ref().unwrap();
+        assert_eq!(sel.shape_ids.len(), 19);
+
+        // Lưu & mở lại toàn bộ 19 loại hình giữ nguyên
+        let tmp = std::env::temp_dir().join("inknote_test_19_shapes.inknote");
+        app.current_path = Some(tmp.clone());
+        assert!(app.save_document());
+        let mut app2 = new_test_app(&ctx);
+        app2.load_document_from(tmp.clone());
+        let _ = std::fs::remove_file(tmp);
+        assert_eq!(app2.doc.pages()[0].shapes.len(), 19);
     }
 }

@@ -194,7 +194,7 @@ pub struct LatexObject {
     pub svg_cache: Option<String>,
 }
 
-/// Các loại hình học cơ bản (Bước 5.3 - P2, khớp docs/04-ui-spec.md).
+/// Các loại hình học cơ bản & mở rộng (Bước 5.3 - P2, khớp docs/04-ui-spec.md).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ShapeKind {
     Line,
@@ -202,9 +202,20 @@ pub enum ShapeKind {
     Rectangle,
     Circle,
     Triangle,
+    RightTriangle,
+    RightIsoscelesTriangle,
     Diamond,
     RoundedRect,
     Arrow,
+    DoubleArrow,
+    Pentagon,
+    Hexagon,
+    Heptagon,
+    Octagon,
+    Parallelogram,
+    Trapezoid,
+    RightTrapezoid,
+    IsoscelesTrapezoid,
 }
 
 /// Đối tượng hình học vector trên trang.
