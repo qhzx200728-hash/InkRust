@@ -1,7 +1,7 @@
 # memory.md – Bộ nhớ trạng thái dự án InkNote
 
 ## Mục tiêu hiện tại
-- Chuẩn bị thực hiện **Bước 2.3: Auto-save (P1)** – tự động lưu ra file tạm rồi atomic rename đè lên file chính sau 2–3s kể từ khi có thay đổi (nét vẽ, cấu hình giấy, xoá trang) đối với tài liệu đã có đường dẫn lưu.
+- Chuẩn bị thực hiện **Bước 3.1: Nhiều trang (P1)** – thêm trang mới (nút Add Page trên toolbar chính), chuyển trang qua lại, xoá trang (có Undo/Redo), và tương thích lưu/mở nhiều trang trong file `.inknote`.
 
 ## Đã hoàn thành (kèm tên file đã tạo/sửa)
 - **Bước 0 – Spike (Thử nghiệm kỹ thuật)** (`commit fb30599`):
@@ -37,8 +37,14 @@
   - `crates/inknote-app/src/toolbar.rs`: Thêm cụm cấu hình Paper Settings vào menu More `...` (Canvas Mode, Paper Format, Template, Spacing, Margins). Cấu hình `PopupCloseBehavior::CloseOnClickOutside` cho tất cả pop-up để không bị tự tắt khi bấm chuột bên trong.
   - `crates/inknote-app/src/main.rs`: Tự động căn giữa tờ giấy A4/A5 khi mở và khi bấm `Ctrl+0`; `drawable_rect` chỉ cho phép vẽ trên tờ giấy ở chế độ Paper (không vẽ lem ra bàn xám); clip nét vẽ gọn gàng trong trang; lưu thiết lập mặc định vào `%APPDATA%/InkNote/default_paper.json`.
 
+- **Bước 2.3 – Auto-save & Hãm FPS theo tần số quét màn hình** (`commit 4f70eb2`, `522f970`, tag `step-2.3-ok` — người dùng xác nhận test OK: 144Hz đạt 144 FPS, 60Hz hạ đúng 60 FPS, 20.000 nét mới tụt về 45 FPS):
+  - `crates/inknote-core/src/lib.rs`: Thêm `set_paper_settings` (tăng revision để kích hoạt dirty/auto-save), `mark_saved_at` (chính xác mốc `rev` khi lưu luồng nền), và cải thiện `DocumentFile::save_to_path` dùng file tạm cùng thư mục (`.<name>.tmp`) + `sync_all()` + atomic `std::fs::rename`.
+  - `crates/inknote-app/src/autosave.rs`: Cài đặt `AutoSaveState` chạy ở luồng nền sau 2,5 giây debounce (khi tài liệu đã có đường dẫn lưu và không vẽ dở), hỗ trợ `flush_on_exit` khi tắt app bình thường.
+  - `crates/inknote-app/src/toolbar.rs` & `theme.rs`: Hiển thị cụm `Tên file + Chấm xanh/đỏ + Thông báo "Auto-saved" (chỉ hiện 3s sau mỗi lần tự lưu rồi tự ẩn)` ngay bên phải nút Read-Only Mode trên thanh công cụ chính.
+  - `crates/inknote-app/src/main.rs`: Bật VSync (`PresentMode::Fifo`) để hãm FPS tối đa đúng theo tần số quét màn hình (144Hz / 60Hz) và bỏ `ctx.request_repaint()` liên tục (dùng reactive repaint + `request_repaint_after` cho bộ đếm auto-save) để không gây quá tải máy khi đứng yên.
+
 ## Đang làm dở
-- Không có task nào dở dang. Bước 2.2 đã hoàn thành và gắn tag `step-2.2-ok`. Sẵn sàng bắt tay ngay vào Bước 2.3 (Auto-save).
+- Không có task nào dở dang. Bước 2.3 đã hoàn thành và gắn tag `step-2.3-ok`. Sẵn sàng bắt tay ngay vào Bước 3.1 (Nhiều trang).
 
 ## Quyết định đã chốt và lý do (không bàn lại)
 - **Bỏ hoàn toàn bản cũ (Electron/Flutter/web)**: viết mới 100% bằng Rust cho Windows.
@@ -51,6 +57,8 @@
   - Quy tắc Tẩy (Eraser): trên thanh có 2 chế độ (Tẩy thường, Tẩy nét) + Pop-up cài đặt nâng cao; mặc định chỉ xoá **nét bút**, không bao giờ xoá LaTeX/hình/ảnh.
   - 2 chế độ Canvas: `Paper` (trang chuẩn A4/A5 có bóng đổ trên bàn xám) và `Whiteboard` (bảng trắng tràn màn hình, không có đường lề).
   - Tất cả pop-up của `egui` phải có `PopupCloseBehavior::CloseOnClickOutside` để giữ mở khi tương tác.
+  - Trạng thái lưu (`Tên file + chấm xanh/đỏ + chữ "Auto-saved" 3s`) hiển thị ngay bên phải nút Read-Only trên Navbar.
+- **Chuyển từ `AutoNoVsync` + `request_repaint()` liên tục sang VSync (`PresentMode::Fifo`) + reactive repaint**: Không ép render tối đa liên tục lúc đứng yên gây nóng máy/quá tải; tự động hãm FPS đúng bằng tần số quét màn hình (144Hz → max 144 FPS, 60Hz → max 60 FPS).
 - **Quy tắc Git & Rollback**: Mỗi bước nhỏ = 1 commit; chỉ dùng `git revert` (không dùng `git reset --hard`); gắn tag `step-X.Y-ok` sau khi người dùng báo OK.
 
 ## Đã thử nhưng không được, và vì sao
@@ -69,12 +77,11 @@
 - Nút bấm phụ trên thân bút / đầu tẩy phía sau bút Wacom: chưa kiểm tra `egui` có nhận riêng được không (để sau).
 
 ## Việc tiếp theo (xếp theo thứ tự ưu tiên)
-1. **Bước 2.3: Auto-save (P1)**: Tự động lưu sau 2–3s debounce khi có thay đổi (vẽ, xoá, đổi template/khổ giấy), dùng atomic save (.tmp rename).
-2. **Bước 3 (3.1 → 3.2)**: Nhiều trang & Thanh thumbnail trang (P1).
-3. **Bước 4 (4.1 → 4.5)**: Công thức LaTeX kiểu Xournal++ (`inknote-latex`, Live Preview, chèn/double-click sửa, lưu file).
-4. **Bước 5 (5.1 → 5.4)**: Tẩy (2 chế độ + Pop-up nâng cao, chỉ xoá nét bút), Lasso, Hình học, Văn bản.
-5. **Bước 6 (6.1 → 6.2)**: Chèn ảnh + nút dán ảnh từ clipboard, giữ ảnh sắc nét theo zoom.
-6. **Bước 7 (7.1 → 7.4)**: Màn hình Library (P3), Trash, xuất PDF/Ảnh, `README.md`.
+1. **Bước 3 (3.1 → 3.2)**: Nhiều trang & Thanh thumbnail trang (P1).
+2. **Bước 4 (4.1 → 4.5)**: Công thức LaTeX kiểu Xournal++ (`inknote-latex`, Live Preview, chèn/double-click sửa, lưu file).
+3. **Bước 5 (5.1 → 5.4)**: Tẩy (2 chế độ + Pop-up nâng cao, chỉ xoá nét bút), Lasso, Hình học, Văn bản.
+4. **Bước 6 (6.1 → 6.2)**: Chèn ảnh + nút dán ảnh từ clipboard, giữ ảnh sắc nét theo zoom.
+5. **Bước 7 (7.1 → 7.4)**: Màn hình Library (P3), Trash, xuất PDF/Ảnh, `README.md`.
 
 ## Cập nhật lần cuối
 - **Ngày**: 2026-11-13
