@@ -850,6 +850,12 @@ impl InkNoteApp {
 
 impl eframe::App for InkNoteApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.run_app_ui(ui);
+    }
+}
+
+impl InkNoteApp {
+    fn run_app_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         let (events, frame_t) = ctx.input(|i| (i.events.clone(), i.time));
         let dt = (frame_t - self.prev_frame_t).clamp(0.001, 0.05);
@@ -1004,22 +1010,27 @@ impl eframe::App for InkNoteApp {
         }
         // Phím tắt: Ctrl+Z = Undo; Ctrl+Y hoặc Ctrl+Shift+Z = Redo
         // Phím tắt tệp: Ctrl+S = Save, Ctrl+Shift+S = Save As, Ctrl+O = Open, Ctrl+N = New
+        let allow_shortcuts = !self.latex_dialog.open && !ctx.egui_wants_keyboard_input();
         let (key_undo, key_redo, key_save, key_save_as, key_open, key_new, key_pgup, key_pgdn) =
-            ctx.input(|i| {
-                let cmd = i.modifiers.command;
-                let shift = i.modifiers.shift;
-                let z = i.key_pressed(egui::Key::Z);
-                (
-                    cmd && !shift && z,
-                    cmd && ((shift && z) || i.key_pressed(egui::Key::Y)),
-                    cmd && !shift && i.key_pressed(egui::Key::S),
-                    cmd && shift && i.key_pressed(egui::Key::S),
-                    cmd && !shift && i.key_pressed(egui::Key::O),
-                    cmd && !shift && i.key_pressed(egui::Key::N),
-                    i.key_pressed(egui::Key::PageUp),
-                    i.key_pressed(egui::Key::PageDown),
-                )
-            });
+            if allow_shortcuts {
+                ctx.input(|i| {
+                    let cmd = i.modifiers.command;
+                    let shift = i.modifiers.shift;
+                    let z = i.key_pressed(egui::Key::Z);
+                    (
+                        cmd && !shift && z,
+                        cmd && ((shift && z) || i.key_pressed(egui::Key::Y)),
+                        cmd && !shift && i.key_pressed(egui::Key::S),
+                        cmd && shift && i.key_pressed(egui::Key::S),
+                        cmd && !shift && i.key_pressed(egui::Key::O),
+                        cmd && !shift && i.key_pressed(egui::Key::N),
+                        i.key_pressed(egui::Key::PageUp),
+                        i.key_pressed(egui::Key::PageDown),
+                    )
+                })
+            } else {
+                (false, false, false, false, false, false, false, false)
+            };
         // Không hoàn tác / thao tác file / thêm trang khi đang kéo nét dở
         if self.active.is_none() {
             if actions.undo_clicked || key_undo {
@@ -2317,5 +2328,49 @@ mod tests {
             t0 + Duration::from_millis(100),
         ));
         assert_eq!(app.doc.page_count(), 2);
+    }
+
+    #[test]
+    fn test_latex_dialog_flow() {
+        let ctx = egui::Context::default();
+        let mut app = new_test_app(&ctx);
+        app.toolbar_state.active_tool = ActiveTool::Latex;
+
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(raw.clone(), |ui| {
+            app.run_app_ui(ui);
+        });
+
+        // Mở hộp thoại tại vị trí click (200, 200)
+        app.pending_latex_pos = Some((0, [200.0, 200.0]));
+        app.latex_dialog.open_with("", &ctx);
+        let _ = ctx.run_ui(raw.clone(), |ui| {
+            app.run_app_ui(ui);
+        });
+
+        // Giả lập gõ chữ vào ô nhập và chờ debounce + biên dịch xong
+        app.latex_dialog.source = "x^2 + 1".to_string();
+        app.latex_dialog.mark_edited();
+        std::thread::sleep(Duration::from_millis(550));
+        for _ in 0..40 {
+            let _ = ctx.run_ui(raw.clone(), |ui| {
+                app.run_app_ui(ui);
+            });
+            if app.latex_dialog.preview_svg.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            app.latex_dialog.preview_svg.is_some(),
+            "preview_svg should be generated; err={:?}",
+            app.latex_dialog.error_msg
+        );
     }
 }

@@ -775,7 +775,7 @@ impl LatexDialogState {
         self.pending_compile = false;
     }
 
-    fn mark_edited(&mut self) {
+    pub fn mark_edited(&mut self) {
         self.last_edit_at = Some(Instant::now());
         self.pending_compile = true;
     }
