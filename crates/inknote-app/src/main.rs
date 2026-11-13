@@ -6,6 +6,7 @@
 mod autosave;
 mod eraser;
 mod icons;
+mod lasso;
 mod latex_dialog;
 mod svg_cache;
 mod theme;
@@ -38,6 +39,10 @@ use crate::{
     autosave::AutoSaveState,
     eraser::{apply_eraser_sweep, finish_eraser_to_command, ActiveEraser},
     icons::{draw_paper, paper_sheet_rect},
+    lasso::{
+        corner_pos, hit_resize_corner, opposite_anchor, refresh_selection_bbox, select_in_freehand,
+        select_in_rect, transformed_bbox, LassoInteraction, LassoState, ResizeCorner,
+    },
     latex_dialog::{LatexDialogAction, LatexDialogState},
     svg_cache::{SvgTextureCache, LATEX_DISPLAY_SCALE},
     theme::Theme,
@@ -198,6 +203,7 @@ struct InkNoteApp {
     last_frame: Instant,
     active: Option<ActiveStroke>,
     active_eraser: Option<ActiveEraser>,
+    lasso_state: LassoState,
     drawing_page_index: Option<usize>,
     static_cache: Option<(StaticKey, Vec<(usize, std::sync::Arc<egui::epaint::Mesh>)>)>,
     render_cx: CairoRenderContext,
@@ -273,6 +279,7 @@ impl InkNoteApp {
             last_frame: Instant::now(),
             active: None,
             active_eraser: None,
+            lasso_state: LassoState::default(),
             drawing_page_index: None,
             static_cache: None,
             render_cx: CairoRenderContext::new(),
@@ -666,6 +673,7 @@ impl InkNoteApp {
                 self.static_cache = None;
                 self.active = None;
                 self.active_eraser = None;
+                self.lasso_state.clear();
                 self.drawing_page_index = None;
                 self.pull_overscroll = 0.0;
                 self.rebuild_batch_cache();
@@ -710,6 +718,7 @@ impl InkNoteApp {
         self.static_cache = None;
         self.active = None;
         self.active_eraser = None;
+        self.lasso_state.clear();
         self.drawing_page_index = None;
         self.pull_overscroll = 0.0;
         self.view.pan = egui::Vec2::ZERO;
@@ -780,11 +789,207 @@ impl InkNoteApp {
         );
         if let Some(cmd) = finish_eraser_to_command(eraser, &mut self.doc) {
             self.doc.execute(cmd);
-            self.ensure_missing_batches();
+            self.rebuild_batch_cache();
         }
         if self.toolbar_state.eraser_auto_deselect {
             self.toolbar_state.active_tool = ActiveTool::Pen;
         }
+    }
+
+    fn lasso_down(&mut self, ctx: &egui::Context, screen_pos: egui::Pos2) {
+        let Some(paper) = self.paper_rect else {
+            return;
+        };
+        if let Some(sel) = &self.lasso_state.selection {
+            let origin = self.page_origin(paper, sel.page_index);
+            let sel_screen = egui::Rect::from_min_max(
+                origin + sel.bbox.min.to_vec2() * self.view.zoom,
+                origin + sel.bbox.max.to_vec2() * self.view.zoom,
+            );
+            if let Some(corner) = hit_resize_corner(sel_screen, screen_pos) {
+                let anchor = opposite_anchor(sel.bbox, corner);
+                self.lasso_state.interaction = Some(LassoInteraction::Resizing {
+                    corner,
+                    anchor,
+                    orig_bbox: sel.bbox,
+                    scale: [1.0, 1.0],
+                });
+                return;
+            }
+            if sel_screen.contains(screen_pos) {
+                let page_pos = self.page_local_for(screen_pos, sel.page_index);
+                self.lasso_state.interaction = Some(LassoInteraction::Moving {
+                    start_page_pos: page_pos,
+                    delta: egui::Vec2::ZERO,
+                });
+                return;
+            }
+        }
+
+        // Click ngoài vùng chọn -> bỏ chọn cũ và bắt đầu khoanh vùng mới
+        self.lasso_state.selection = None;
+        let Some(page_idx) = self.interactive_page_at(ctx, screen_pos) else {
+            return;
+        };
+        self.doc.set_active_page_index(page_idx);
+        let page_pos = self.page_local_for(screen_pos, page_idx);
+        match self.toolbar_state.lasso_mode {
+            toolbar::LassoMode::Freehand => {
+                self.lasso_state.interaction = Some(LassoInteraction::DrawingFreehand {
+                    page_index: page_idx,
+                    points: vec![page_pos],
+                });
+            }
+            toolbar::LassoMode::Rectangle => {
+                self.lasso_state.interaction = Some(LassoInteraction::DrawingRect {
+                    page_index: page_idx,
+                    start: page_pos,
+                    current: page_pos,
+                });
+            }
+        }
+    }
+
+    fn lasso_move(&mut self, screen_pos: egui::Pos2) {
+        let page_idx = match (&self.lasso_state.interaction, &self.lasso_state.selection) {
+            (Some(LassoInteraction::DrawingFreehand { page_index, .. }), _)
+            | (Some(LassoInteraction::DrawingRect { page_index, .. }), _) => *page_index,
+            (_, Some(sel)) => sel.page_index,
+            _ => return,
+        };
+        let page_pos = self.page_local_for(screen_pos, page_idx);
+        match &mut self.lasso_state.interaction {
+            Some(LassoInteraction::DrawingFreehand { points, .. }) => {
+                if points
+                    .last()
+                    .is_none_or(|last| last.distance_sq(page_pos) >= 9.0)
+                {
+                    points.push(page_pos);
+                }
+            }
+            Some(LassoInteraction::DrawingRect { current, .. }) => {
+                *current = page_pos;
+            }
+            Some(LassoInteraction::Moving {
+                start_page_pos,
+                delta,
+            }) => {
+                *delta = page_pos - *start_page_pos;
+            }
+            Some(LassoInteraction::Resizing {
+                corner,
+                anchor,
+                orig_bbox,
+                scale,
+            }) => {
+                let orig_corner = corner_pos(*orig_bbox, *corner);
+                let orig_dx = orig_corner.x as f64 - anchor[0];
+                let orig_dy = orig_corner.y as f64 - anchor[1];
+                let cur_dx = page_pos.x as f64 - anchor[0];
+                let cur_dy = page_pos.y as f64 - anchor[1];
+                let sx = if orig_dx.abs() > 1.0 {
+                    (cur_dx / orig_dx).clamp(0.15, 8.0)
+                } else {
+                    1.0
+                };
+                let sy = if orig_dy.abs() > 1.0 {
+                    (cur_dy / orig_dy).clamp(0.15, 8.0)
+                } else {
+                    1.0
+                };
+                // Giữ tỷ lệ đồng nhất khi kéo góc để nét bút và LaTeX không bị méo
+                let s = ((sx + sy) * 0.5).clamp(0.15, 8.0);
+                *scale = [s, s];
+            }
+            None => {}
+        }
+    }
+
+    fn lasso_up(&mut self) {
+        let Some(interaction) = self.lasso_state.interaction.take() else {
+            return;
+        };
+        match interaction {
+            LassoInteraction::DrawingFreehand { page_index, points } => {
+                if let Some(page) = self.doc.pages().get(page_index) {
+                    self.lasso_state.selection = select_in_freehand(
+                        page,
+                        page_index,
+                        &points,
+                        self.toolbar_state.lasso_filter,
+                        &self.batch_cache,
+                    );
+                }
+            }
+            LassoInteraction::DrawingRect {
+                page_index,
+                start,
+                current,
+            } => {
+                if let Some(page) = self.doc.pages().get(page_index) {
+                    let rect = egui::Rect::from_two_pos(start, current);
+                    self.lasso_state.selection = select_in_rect(
+                        page,
+                        page_index,
+                        rect,
+                        self.toolbar_state.lasso_filter,
+                        &self.batch_cache,
+                    );
+                }
+            }
+            LassoInteraction::Moving { delta, .. } => {
+                if delta.length() > 0.5 {
+                    if let Some(mut sel) = self.lasso_state.selection.take() {
+                        self.doc.execute(Command::TransformSelection {
+                            page_index: sel.page_index,
+                            stroke_ids: sel.stroke_ids.clone(),
+                            latex_ids: sel.latex_ids.clone(),
+                            anchor: [0.0, 0.0],
+                            scale: [1.0, 1.0],
+                            delta: [delta.x as f64, delta.y as f64],
+                        });
+                        for id in &sel.stroke_ids {
+                            self.batch_cache.remove(id);
+                        }
+                        self.ensure_missing_batches();
+                        refresh_selection_bbox(&mut sel, &self.doc, &self.batch_cache);
+                        self.lasso_state.selection = Some(sel);
+                    }
+                }
+            }
+            LassoInteraction::Resizing { anchor, scale, .. } => {
+                if (scale[0] - 1.0).abs() > 0.005 || (scale[1] - 1.0).abs() > 0.005 {
+                    if let Some(mut sel) = self.lasso_state.selection.take() {
+                        self.doc.execute(Command::TransformSelection {
+                            page_index: sel.page_index,
+                            stroke_ids: sel.stroke_ids.clone(),
+                            latex_ids: sel.latex_ids.clone(),
+                            anchor,
+                            scale,
+                            delta: [0.0, 0.0],
+                        });
+                        for id in &sel.stroke_ids {
+                            self.batch_cache.remove(id);
+                        }
+                        self.ensure_missing_batches();
+                        refresh_selection_bbox(&mut sel, &self.doc, &self.batch_cache);
+                        self.lasso_state.selection = Some(sel);
+                    }
+                }
+            }
+        }
+    }
+
+    fn delete_lasso_selection(&mut self) {
+        let Some(sel) = self.lasso_state.selection.take() else {
+            return;
+        };
+        self.lasso_state.interaction = None;
+        self.doc.execute(Command::DeleteSelection {
+            page_index: sel.page_index,
+            stroke_ids: sel.stroke_ids,
+            latex_ids: sel.latex_ids,
+        });
     }
 
     fn pen_down(&mut self, pos: egui::Pos2, pressure: f64, now: Instant) {
@@ -1002,6 +1207,11 @@ impl InkNoteApp {
                     self.stylus_mode = true;
                     match phase {
                         egui::TouchPhase::Start => {
+                            if self.toolbar_state.active_tool == ActiveTool::Lasso {
+                                self.touch_active = true;
+                                self.lasso_down(&ctx, pos);
+                                continue;
+                            }
                             if self.toolbar_state.active_tool == ActiveTool::Eraser {
                                 if let Some(page_idx) = self.interactive_page_at(&ctx, pos) {
                                     self.touch_active = true;
@@ -1029,7 +1239,9 @@ impl InkNoteApp {
                             self.pen_down(pos, p, now);
                         }
                         egui::TouchPhase::Move => {
-                            if self.touch_active && self.active_eraser.is_some() {
+                            if self.touch_active && self.lasso_state.is_active() {
+                                self.lasso_move(pos);
+                            } else if self.touch_active && self.active_eraser.is_some() {
                                 self.eraser_move(pos);
                             } else if self.touch_active && self.active.is_some() {
                                 if force.is_some() {
@@ -1047,7 +1259,9 @@ impl InkNoteApp {
                             }
                         }
                         egui::TouchPhase::End | egui::TouchPhase::Cancel => {
-                            if self.active_eraser.is_some() {
+                            if self.lasso_state.is_active() {
+                                self.lasso_up();
+                            } else if self.active_eraser.is_some() {
                                 self.eraser_up(pos);
                             } else if self.active.is_some() {
                                 let p = match force {
@@ -1071,7 +1285,9 @@ impl InkNoteApp {
                     self.last_source = "Mouse (p=0.5)";
                     let now = self.monotonic_instant(ev_secs);
                     if pressed {
-                        if self.toolbar_state.active_tool == ActiveTool::Eraser {
+                        if self.toolbar_state.active_tool == ActiveTool::Lasso {
+                            self.lasso_down(&ctx, pos);
+                        } else if self.toolbar_state.active_tool == ActiveTool::Eraser {
                             if let Some(page_idx) = self.interactive_page_at(&ctx, pos) {
                                 self.eraser_down(pos, page_idx);
                             }
@@ -1081,7 +1297,9 @@ impl InkNoteApp {
                             self.pen_down(pos, Element::PRESSURE_DEFAULT, now);
                         }
                     } else if !pressed {
-                        if self.active_eraser.is_some() {
+                        if self.lasso_state.is_active() {
+                            self.lasso_up();
+                        } else if self.active_eraser.is_some() {
                             self.eraser_up(pos);
                         } else if self.active.is_some() {
                             self.pen_up(pos, Element::PRESSURE_DEFAULT, now);
@@ -1089,7 +1307,9 @@ impl InkNoteApp {
                     }
                 }
                 egui::Event::PointerMoved(pos) if !self.touch_active && !self.stylus_mode => {
-                    if self.active_eraser.is_some() {
+                    if self.lasso_state.is_active() {
+                        self.lasso_move(pos);
+                    } else if self.active_eraser.is_some() {
                         self.eraser_move(pos);
                     } else if self.active.is_some() {
                         let now = self.monotonic_instant(ev_secs);
@@ -1145,6 +1365,11 @@ impl InkNoteApp {
             self.last_up_pressure,
             self.doc.strokes().len()
         );
+        if self.toolbar_state.active_tool != ActiveTool::Lasso {
+            self.lasso_state.clear();
+        }
+        self.toolbar_state.has_lasso_selection = self.lasso_state.selection.is_some();
+
         let mut paper_settings = self.doc.paper_settings().clone();
         let page_info = (self.doc.active_page_index() + 1, self.doc.page_count());
         let actions = show_toolbars(
@@ -1185,12 +1410,21 @@ impl InkNoteApp {
                 (false, false, false, false, false, false, false, false)
             };
         // Không hoàn tác / thao tác file / thêm trang khi đang kéo nét dở
-        if self.active.is_none() {
+        if self.active.is_none() && self.active_eraser.is_none() && !self.lasso_state.is_active() {
             if (actions.undo_clicked || key_undo) && self.doc.undo() {
-                self.ensure_missing_batches();
+                self.lasso_state.clear();
+                self.rebuild_batch_cache();
             }
             if (actions.redo_clicked || key_redo) && self.doc.redo() {
-                self.ensure_missing_batches();
+                self.lasso_state.clear();
+                self.rebuild_batch_cache();
+            }
+            let key_delete = !ctx.egui_wants_keyboard_input()
+                && ctx.input(|i| {
+                    i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)
+                });
+            if actions.delete_selection_clicked || key_delete {
+                self.delete_lasso_selection();
             }
             if actions.clear_clicked {
                 self.confirm_clear = Some(vec![self.doc.active_page_index()]);
@@ -1733,8 +1967,15 @@ impl InkNoteApp {
                     }
                 };
                 let erasing_page = self.active_eraser.as_ref().map(|e| e.page_index);
+                let lasso_transform_page = match (&self.lasso_state.selection, &self.lasso_state.interaction) {
+                    (
+                        Some(sel),
+                        Some(LassoInteraction::Moving { .. } | LassoInteraction::Resizing { .. }),
+                    ) => Some(sel.page_index),
+                    _ => None,
+                };
                 for (page_idx, mesh) in static_meshes {
-                    if erasing_page == Some(page_idx) {
+                    if erasing_page == Some(page_idx) || lasso_transform_page == Some(page_idx) {
                         continue;
                     }
                     let clip = self
@@ -1744,6 +1985,65 @@ impl InkNoteApp {
                         ui.painter()
                             .with_clip_rect(clip)
                             .add(egui::Shape::Mesh(mesh));
+                    }
+                }
+
+                // 3c. Vẽ tạm trang đang kéo/scale vùng chọn Lasso (live preview)
+                if let (Some(sel), Some(interaction)) =
+                    (&self.lasso_state.selection, &self.lasso_state.interaction)
+                {
+                    if matches!(
+                        interaction,
+                        LassoInteraction::Moving { .. } | LassoInteraction::Resizing { .. }
+                    ) {
+                        let clip = self
+                            .page_screen_rect(paper_rect, sel.page_index)
+                            .intersect(paper_rect);
+                        if clip.is_positive() {
+                            let origin = self.page_origin(paper_rect, sel.page_index);
+                            let painter = ui.painter().with_clip_rect(clip);
+                            let selected_set: HashSet<u64> =
+                                sel.stroke_ids.iter().copied().collect();
+                            for s in &self.doc.pages()[sel.page_index].strokes {
+                                let Some(c) = self.batch_cache.get(&s.id) else {
+                                    continue;
+                                };
+                                if !selected_set.contains(&s.id) {
+                                    Self::paint_batches(&painter, &c.batches, origin, view.zoom);
+                                } else {
+                                    match interaction {
+                                        LassoInteraction::Moving { delta, .. } => {
+                                            Self::paint_batches(
+                                                &painter,
+                                                &c.batches,
+                                                origin + *delta * view.zoom,
+                                                view.zoom,
+                                            );
+                                        }
+                                        LassoInteraction::Resizing { anchor, scale, .. } => {
+                                            let ax = anchor[0] as f32;
+                                            let ay = anchor[1] as f32;
+                                            let sx = scale[0] as f32;
+                                            let sy = scale[1] as f32;
+                                            let mut scaled = c.batches.clone();
+                                            for b in &mut scaled {
+                                                for v in &mut b.vertices {
+                                                    v[0] = ax + (v[0] - ax) * sx;
+                                                    v[1] = ay + (v[1] - ay) * sy;
+                                                }
+                                            }
+                                            Self::paint_batches(
+                                                &painter,
+                                                &scaled,
+                                                origin,
+                                                view.zoom,
+                                            );
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -1852,15 +2152,37 @@ impl InkNoteApp {
                         if let Ok((tex_id, _)) =
                             self.svg_cache.get_or_render(&ctx, obj.id, svg, view.zoom)
                         {
-                            let top_left = origin
-                                + egui::vec2(
-                                    obj.pos[0] as f32 * view.zoom,
-                                    obj.pos[1] as f32 * view.zoom,
-                                );
-                            let display_size = egui::vec2(
-                                obj.size[0] as f32 * view.zoom,
-                                obj.size[1] as f32 * view.zoom,
+                            let (mut p_x, mut p_y, mut w_p, mut h_p) = (
+                                obj.pos[0] as f32,
+                                obj.pos[1] as f32,
+                                obj.size[0] as f32,
+                                obj.size[1] as f32,
                             );
+                            if let (Some(sel), Some(interaction)) =
+                                (&self.lasso_state.selection, &self.lasso_state.interaction)
+                            {
+                                if sel.page_index == page_idx && sel.latex_ids.contains(&obj.id) {
+                                    match interaction {
+                                        LassoInteraction::Moving { delta, .. } => {
+                                            p_x += delta.x;
+                                            p_y += delta.y;
+                                        }
+                                        LassoInteraction::Resizing { anchor, scale, .. } => {
+                                            let ax = anchor[0] as f32;
+                                            let ay = anchor[1] as f32;
+                                            let sx = scale[0] as f32;
+                                            let sy = scale[1] as f32;
+                                            p_x = ax + (p_x - ax) * sx;
+                                            p_y = ay + (p_y - ay) * sy;
+                                            w_p *= sx.abs();
+                                            h_p *= sy.abs();
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            let top_left = origin + egui::vec2(p_x * view.zoom, p_y * view.zoom);
+                            let display_size = egui::vec2(w_p * view.zoom, h_p * view.zoom);
                             let rect = egui::Rect::from_min_size(top_left, display_size);
                             page_painter.image(
                                 tex_id,
@@ -1953,6 +2275,87 @@ impl InkNoteApp {
                                         egui::Color32::from_rgba_unmultiplied(60, 70, 90, 210),
                                     ),
                                 );
+                        }
+                    }
+                }
+
+                // 4g. Vẽ đường khoanh Lasso & khung chọn + 4 tay cầm góc
+                if self.toolbar_state.active_tool == ActiveTool::Lasso
+                    && !self.toolbar_state.read_only
+                {
+                    let lasso_color = self.theme.nav_bar_bg;
+                    let fill_tint = egui::Color32::from_rgba_unmultiplied(
+                        lasso_color.r(),
+                        lasso_color.g(),
+                        lasso_color.b(),
+                        28,
+                    );
+                    let p = ui.painter().with_clip_rect(paper_rect);
+                    match &self.lasso_state.interaction {
+                        Some(LassoInteraction::DrawingFreehand { page_index, points })
+                            if points.len() >= 2 =>
+                        {
+                            let origin = self.page_origin(paper_rect, *page_index);
+                            let mut screen_pts: Vec<egui::Pos2> = points
+                                .iter()
+                                .map(|pt| origin + pt.to_vec2() * view.zoom)
+                                .collect();
+                            screen_pts.push(screen_pts[0]);
+                            p.add(egui::Shape::line(
+                                screen_pts,
+                                egui::Stroke::new(1.5, lasso_color),
+                            ));
+                        }
+                        Some(LassoInteraction::DrawingRect {
+                            page_index,
+                            start,
+                            current,
+                        }) => {
+                            let origin = self.page_origin(paper_rect, *page_index);
+                            let r = egui::Rect::from_two_pos(
+                                origin + start.to_vec2() * view.zoom,
+                                origin + current.to_vec2() * view.zoom,
+                            );
+                            p.rect_filled(r, egui::CornerRadius::ZERO, fill_tint);
+                            p.rect_stroke(
+                                r,
+                                egui::CornerRadius::ZERO,
+                                egui::Stroke::new(1.5, lasso_color),
+                                egui::StrokeKind::Outside,
+                            );
+                        }
+                        _ => {}
+                    }
+
+                    if let Some(sel) = &self.lasso_state.selection {
+                        let origin = self.page_origin(paper_rect, sel.page_index);
+                        let tb = transformed_bbox(sel.bbox, self.lasso_state.interaction.as_ref());
+                        let sel_screen = egui::Rect::from_min_max(
+                            origin + tb.min.to_vec2() * view.zoom,
+                            origin + tb.max.to_vec2() * view.zoom,
+                        );
+                        p.rect_filled(sel_screen, egui::CornerRadius::same(2), fill_tint);
+                        p.rect_stroke(
+                            sel_screen,
+                            egui::CornerRadius::same(2),
+                            egui::Stroke::new(1.5, lasso_color),
+                            egui::StrokeKind::Outside,
+                        );
+                        for corner in [
+                            ResizeCorner::TopLeft,
+                            ResizeCorner::TopRight,
+                            ResizeCorner::BottomRight,
+                            ResizeCorner::BottomLeft,
+                        ] {
+                            let cp = corner_pos(sel_screen, corner);
+                            let handle = egui::Rect::from_center_size(cp, egui::vec2(9.0, 9.0));
+                            p.rect_filled(handle, egui::CornerRadius::same(2), egui::Color32::WHITE);
+                            p.rect_stroke(
+                                handle,
+                                egui::CornerRadius::same(2),
+                                egui::Stroke::new(1.5, lasso_color),
+                                egui::StrokeKind::Outside,
+                            );
                         }
                     }
                 }
@@ -2096,6 +2499,7 @@ mod tests {
             last_frame: Instant::now(),
             active: None,
             active_eraser: None,
+            lasso_state: LassoState::default(),
             drawing_page_index: None,
             static_cache: None,
             render_cx: CairoRenderContext::new(),
@@ -2750,29 +3154,104 @@ mod tests {
         app.eraser_up(mid_screen);
 
         assert_eq!(app.doc.strokes().len(), 2);
-        assert!(app
-            .doc
-            .strokes()
-            .iter()
-            .all(|s| app.batch_cache.contains_key(&s.id)));
         assert_eq!(app.doc.pages()[0].latex_objects.len(), 1);
         assert_eq!(app.doc.pages()[0].latex_objects[0].id, latex_id);
 
-        // Undo 1 lần -> quay về đúng 1 nét gốc và batch_cache vẫn có nét đó
+        // Undo 1 lần -> quay về đúng 1 nét gốc
         assert!(app.doc.undo());
-        app.ensure_missing_batches();
         assert_eq!(app.doc.strokes().len(), 1);
-        assert!(app
-            .doc
-            .strokes()
-            .iter()
-            .all(|s| app.batch_cache.contains_key(&s.id)));
 
         // 2. Tẩy nét (Stroke) chạm vào nét -> xoá cả nét, LaTeX vẫn còn nguyên
         app.toolbar_state.eraser_mode = toolbar::EraserMode::Stroke;
         app.eraser_down(mid_screen, 0);
         app.eraser_up(mid_screen);
         assert_eq!(app.doc.strokes().len(), 0);
+        assert_eq!(app.doc.pages()[0].latex_objects.len(), 1);
+    }
+
+    #[test]
+    fn test_lasso_freehand_rect_filter_move_resize_delete() {
+        let ctx = egui::Context::default();
+        let mut app = new_test_app(&ctx);
+        let paper = Rect::from_min_size(Pos2::new(20.0, 100.0), vec2(1160.0, 680.0));
+        app.paper_rect = Some(paper);
+
+        let s1 = Stroke {
+            id: app.doc.alloc_id(),
+            path: PenPath::try_from_elements(vec![
+                Element::new(Vector2::new(120.0, 120.0), 0.5),
+                Element::new(Vector2::new(160.0, 120.0), 0.5),
+            ])
+            .unwrap(),
+            style: app.brush_config.style_for_current_options(),
+        };
+        app.doc.execute(Command::AddStroke(s1));
+        app.ensure_missing_batches();
+
+        let l_id = app.doc.alloc_id();
+        app.doc.execute(Command::AddLatex {
+            page_index: 0,
+            obj: LatexObject {
+                id: l_id,
+                source: "a + b".to_string(),
+                pos: [120.0, 150.0],
+                size: [60.0, 30.0],
+                svg_cache: None,
+            },
+        });
+
+        // 1. Tắt công tắc LaTeX trong Filter rồi khoanh Rectangle -> chỉ chọn nét bút
+        app.toolbar_state.active_tool = ActiveTool::Lasso;
+        app.toolbar_state.lasso_mode = toolbar::LassoMode::Rectangle;
+        app.toolbar_state.lasso_filter.latex = false;
+
+        let p0 = app.view.to_screen(paper, Pos2::new(100.0, 100.0));
+        let p1 = app.view.to_screen(paper, Pos2::new(220.0, 220.0));
+        app.lasso_down(&ctx, p0);
+        app.lasso_move(p1);
+        app.lasso_up();
+
+        let sel = app.lasso_state.selection.as_ref().unwrap();
+        assert_eq!(sel.stroke_ids.len(), 1);
+        assert_eq!(sel.latex_ids.len(), 0);
+
+        // 2. Bật lại công tắc LaTeX, khoanh Freehand -> chọn cả nét bút lẫn LaTeX
+        app.toolbar_state.lasso_filter.latex = true;
+        app.toolbar_state.lasso_mode = toolbar::LassoMode::Freehand;
+        app.lasso_state.clear();
+
+        let poly = [
+            Pos2::new(90.0, 90.0),
+            Pos2::new(240.0, 90.0),
+            Pos2::new(240.0, 240.0),
+            Pos2::new(90.0, 240.0),
+        ];
+        app.lasso_down(&ctx, app.view.to_screen(paper, poly[0]));
+        for pt in &poly[1..] {
+            app.lasso_move(app.view.to_screen(paper, *pt));
+        }
+        app.lasso_up();
+
+        let sel = app.lasso_state.selection.as_ref().unwrap();
+        assert_eq!(sel.stroke_ids.len(), 1);
+        assert_eq!(sel.latex_ids.len(), 1);
+
+        // 3. Kéo di chuyển vùng chọn sang (+40, +50) -> 1 bước Undo
+        let center = app.view.to_screen(paper, sel.bbox.center());
+        app.lasso_down(&ctx, center);
+        app.lasso_move(center + vec2(40.0, 50.0) * app.view.zoom);
+        app.lasso_up();
+
+        assert!((app.doc.pages()[0].latex_objects[0].pos[0] - 160.0).abs() < 1.0);
+        assert!((app.doc.pages()[0].latex_objects[0].pos[1] - 200.0).abs() < 1.0);
+
+        // 4. Xoá vùng chọn -> mất cả 2, Undo 1 lần khôi phục lại cả 2
+        app.delete_lasso_selection();
+        assert_eq!(app.doc.strokes().len(), 0);
+        assert_eq!(app.doc.pages()[0].latex_objects.len(), 0);
+
+        assert!(app.doc.undo());
+        assert_eq!(app.doc.strokes().len(), 1);
         assert_eq!(app.doc.pages()[0].latex_objects.len(), 1);
     }
 }

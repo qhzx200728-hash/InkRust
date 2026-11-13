@@ -2,8 +2,9 @@
 // hệ thống lệnh (Command) và Undo/Redo.
 // Mọi thay đổi nội dung trang PHẢI đi qua `Document::execute` để có thể hoàn tác.
 
-use inknote_pen::{PenPath, Style};
+use inknote_pen::{penpath::Segment, PenPath, Style};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::Path;
 
 /// Số phiên bản định dạng file .inknote hiện tại.
@@ -303,6 +304,21 @@ pub enum Command {
         removed: Vec<(usize, Stroke)>,
         added: Vec<Stroke>,
     },
+    /// Di chuyển và/hoặc đổi kích thước vùng chọn (nét bút + LaTeX, 1 bước undo).
+    TransformSelection {
+        page_index: usize,
+        stroke_ids: Vec<u64>,
+        latex_ids: Vec<u64>,
+        anchor: [f64; 2],
+        scale: [f64; 2],
+        delta: [f64; 2],
+    },
+    /// Xoá toàn bộ đối tượng đang chọn (nét bút + LaTeX, 1 bước undo).
+    DeleteSelection {
+        page_index: usize,
+        stroke_ids: Vec<u64>,
+        latex_ids: Vec<u64>,
+    },
 }
 
 /// Một trang trong bộ nhớ làm việc của `Document`.
@@ -361,6 +377,79 @@ enum Done {
         removed: Vec<(usize, Stroke)>,
         added: Vec<Stroke>,
     },
+    TransformSelection {
+        page_index: usize,
+        old_strokes: Vec<(usize, Stroke)>,
+        new_strokes: Vec<(usize, Stroke)>,
+        old_latex: Vec<(usize, LatexObject)>,
+        new_latex: Vec<(usize, LatexObject)>,
+    },
+    DeleteSelection {
+        page_index: usize,
+        removed_strokes: Vec<(usize, Stroke)>,
+        removed_latex: Vec<(usize, LatexObject)>,
+    },
+}
+
+fn transform_xy(p: [f64; 2], anchor: [f64; 2], scale: [f64; 2], delta: [f64; 2]) -> [f64; 2] {
+    [
+        anchor[0] + (p[0] - anchor[0]) * scale[0] + delta[0],
+        anchor[1] + (p[1] - anchor[1]) * scale[1] + delta[1],
+    ]
+}
+
+pub fn transform_stroke(stroke: &mut Stroke, anchor: [f64; 2], scale: [f64; 2], delta: [f64; 2]) {
+    let start_xy = transform_xy(
+        [stroke.path.start.pos.x, stroke.path.start.pos.y],
+        anchor,
+        scale,
+        delta,
+    );
+    stroke.path.start.pos.x = start_xy[0];
+    stroke.path.start.pos.y = start_xy[1];
+    for seg in &mut stroke.path.segments {
+        match seg {
+            Segment::LineTo { end } => {
+                let xy = transform_xy([end.pos.x, end.pos.y], anchor, scale, delta);
+                end.pos.x = xy[0];
+                end.pos.y = xy[1];
+            }
+            Segment::QuadBezTo { cp, end } => {
+                let cp_xy = transform_xy([cp.x, cp.y], anchor, scale, delta);
+                cp.x = cp_xy[0];
+                cp.y = cp_xy[1];
+                let xy = transform_xy([end.pos.x, end.pos.y], anchor, scale, delta);
+                end.pos.x = xy[0];
+                end.pos.y = xy[1];
+            }
+            Segment::CubBezTo { cp1, cp2, end } => {
+                let c1 = transform_xy([cp1.x, cp1.y], anchor, scale, delta);
+                cp1.x = c1[0];
+                cp1.y = c1[1];
+                let c2 = transform_xy([cp2.x, cp2.y], anchor, scale, delta);
+                cp2.x = c2[0];
+                cp2.y = c2[1];
+                let xy = transform_xy([end.pos.x, end.pos.y], anchor, scale, delta);
+                end.pos.x = xy[0];
+                end.pos.y = xy[1];
+            }
+        }
+    }
+}
+
+pub fn transform_latex(obj: &mut LatexObject, anchor: [f64; 2], scale: [f64; 2], delta: [f64; 2]) {
+    let p0 = transform_xy(obj.pos, anchor, scale, delta);
+    let p1 = transform_xy(
+        [obj.pos[0] + obj.size[0], obj.pos[1] + obj.size[1]],
+        anchor,
+        scale,
+        delta,
+    );
+    obj.pos = [p0[0].min(p1[0]), p0[1].min(p1[1])];
+    obj.size = [
+        (p1[0] - p0[0]).abs().max(8.0),
+        (p1[1] - p0[1]).abs().max(8.0),
+    ];
 }
 
 /// Tài liệu nhiều trang + lịch sử Undo/Redo + trạng thái lưu file.
@@ -723,6 +812,90 @@ impl Document {
                     added,
                 }
             }
+            Command::TransformSelection {
+                page_index,
+                stroke_ids,
+                latex_ids,
+                anchor,
+                scale,
+                delta,
+            } => {
+                let target_idx = page_index.min(self.pages.len().saturating_sub(1));
+                let s_set: HashSet<u64> = stroke_ids.into_iter().collect();
+                let l_set: HashSet<u64> = latex_ids.into_iter().collect();
+                let mut old_strokes = Vec::new();
+                let mut new_strokes = Vec::new();
+                let mut old_latex = Vec::new();
+                let mut new_latex = Vec::new();
+
+                let page = &mut self.pages[target_idx];
+                for (idx, s) in page.strokes.iter_mut().enumerate() {
+                    if s_set.contains(&s.id) {
+                        old_strokes.push((idx, s.clone()));
+                        transform_stroke(s, anchor, scale, delta);
+                        new_strokes.push((idx, s.clone()));
+                    }
+                }
+                for (idx, l) in page.latex_objects.iter_mut().enumerate() {
+                    if l_set.contains(&l.id) {
+                        old_latex.push((idx, l.clone()));
+                        transform_latex(l, anchor, scale, delta);
+                        new_latex.push((idx, l.clone()));
+                    }
+                }
+                if old_strokes.is_empty() && old_latex.is_empty() {
+                    return;
+                }
+                self.active_page_idx = target_idx;
+                Done::TransformSelection {
+                    page_index: target_idx,
+                    old_strokes,
+                    new_strokes,
+                    old_latex,
+                    new_latex,
+                }
+            }
+            Command::DeleteSelection {
+                page_index,
+                stroke_ids,
+                latex_ids,
+            } => {
+                let target_idx = page_index.min(self.pages.len().saturating_sub(1));
+                let s_set: HashSet<u64> = stroke_ids.into_iter().collect();
+                let l_set: HashSet<u64> = latex_ids.into_iter().collect();
+                let page = &mut self.pages[target_idx];
+
+                let removed_strokes: Vec<(usize, Stroke)> = page
+                    .strokes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| s_set.contains(&s.id))
+                    .map(|(i, s)| (i, s.clone()))
+                    .collect();
+                let removed_latex: Vec<(usize, LatexObject)> = page
+                    .latex_objects
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, l)| l_set.contains(&l.id))
+                    .map(|(i, l)| (i, l.clone()))
+                    .collect();
+
+                if removed_strokes.is_empty() && removed_latex.is_empty() {
+                    return;
+                }
+                for &(idx, _) in removed_strokes.iter().rev() {
+                    page.strokes.remove(idx);
+                }
+                for &(idx, _) in removed_latex.iter().rev() {
+                    page.latex_objects.remove(idx);
+                }
+                self.active_page_idx = target_idx;
+                Done::DeleteSelection {
+                    page_index: target_idx,
+                    removed_strokes,
+                    removed_latex,
+                }
+            }
         };
         self.undo_stack.push(done);
         self.redo_stack.clear();
@@ -815,6 +988,41 @@ impl Document {
                 }
                 self.active_page_idx = *page_index;
             }
+            Done::TransformSelection {
+                page_index,
+                old_strokes,
+                old_latex,
+                ..
+            } => {
+                let page = &mut self.pages[*page_index];
+                for (idx, s) in old_strokes {
+                    if *idx < page.strokes.len() {
+                        page.strokes[*idx] = s.clone();
+                    }
+                }
+                for (idx, l) in old_latex {
+                    if *idx < page.latex_objects.len() {
+                        page.latex_objects[*idx] = l.clone();
+                    }
+                }
+                self.active_page_idx = *page_index;
+            }
+            Done::DeleteSelection {
+                page_index,
+                removed_strokes,
+                removed_latex,
+            } => {
+                let page = &mut self.pages[*page_index];
+                for (idx, s) in removed_strokes {
+                    let at = (*idx).min(page.strokes.len());
+                    page.strokes.insert(at, s.clone());
+                }
+                for (idx, l) in removed_latex {
+                    let at = (*idx).min(page.latex_objects.len());
+                    page.latex_objects.insert(at, l.clone());
+                }
+                self.active_page_idx = *page_index;
+            }
         }
         self.redo_stack.push(done);
         self.rev += 1;
@@ -892,6 +1100,43 @@ impl Document {
                     }
                 }
                 strokes.extend(added.clone());
+                self.active_page_idx = *page_index;
+            }
+            Done::TransformSelection {
+                page_index,
+                new_strokes,
+                new_latex,
+                ..
+            } => {
+                let page = &mut self.pages[*page_index];
+                for (idx, s) in new_strokes {
+                    if *idx < page.strokes.len() {
+                        page.strokes[*idx] = s.clone();
+                    }
+                }
+                for (idx, l) in new_latex {
+                    if *idx < page.latex_objects.len() {
+                        page.latex_objects[*idx] = l.clone();
+                    }
+                }
+                self.active_page_idx = *page_index;
+            }
+            Done::DeleteSelection {
+                page_index,
+                removed_strokes,
+                removed_latex,
+            } => {
+                let page = &mut self.pages[*page_index];
+                for &(idx, _) in removed_strokes.iter().rev() {
+                    if idx < page.strokes.len() {
+                        page.strokes.remove(idx);
+                    }
+                }
+                for &(idx, _) in removed_latex.iter().rev() {
+                    if idx < page.latex_objects.len() {
+                        page.latex_objects.remove(idx);
+                    }
+                }
                 self.active_page_idx = *page_index;
             }
         }
@@ -1457,6 +1702,61 @@ mod tests {
 
         assert!(d.redo());
         assert_eq!(d.page_strokes(0).len(), 2);
+        assert_eq!(d.pages()[0].latex_objects.len(), 1);
+    }
+
+    #[test]
+    fn lasso_transform_and_delete_are_one_undo_step() {
+        let mut d = Document::new();
+        let s1 = stroke(&mut d);
+        let s1_id = s1.id;
+        let orig_x = s1.path.start.pos.x;
+        d.execute(Command::AddStroke(s1));
+
+        let l_id = d.alloc_id();
+        d.execute(Command::AddLatex {
+            page_index: 0,
+            obj: LatexObject {
+                id: l_id,
+                source: "x^2".to_string(),
+                pos: [100.0, 100.0],
+                size: [40.0, 20.0],
+                svg_cache: None,
+            },
+        });
+
+        // Di chuyển + scale đồng thời cả nét bút và LaTeX = 1 bước Undo
+        d.execute(Command::TransformSelection {
+            page_index: 0,
+            stroke_ids: vec![s1_id],
+            latex_ids: vec![l_id],
+            anchor: [0.0, 0.0],
+            scale: [2.0, 2.0],
+            delta: [50.0, 30.0],
+        });
+        assert!((d.page_strokes(0)[0].path.start.pos.x - (orig_x * 2.0 + 50.0)).abs() < 1e-6);
+        assert_eq!(d.pages()[0].latex_objects[0].pos, [250.0, 230.0]);
+        assert_eq!(d.pages()[0].latex_objects[0].size, [80.0, 40.0]);
+
+        assert!(d.undo());
+        assert!((d.page_strokes(0)[0].path.start.pos.x - orig_x).abs() < 1e-6);
+        assert_eq!(d.pages()[0].latex_objects[0].pos, [100.0, 100.0]);
+        assert_eq!(d.pages()[0].latex_objects[0].size, [40.0, 20.0]);
+
+        assert!(d.redo());
+        assert_eq!(d.pages()[0].latex_objects[0].pos, [250.0, 230.0]);
+
+        // Xoá vùng chọn (cả nét bút + LaTeX) = 1 bước Undo
+        d.execute(Command::DeleteSelection {
+            page_index: 0,
+            stroke_ids: vec![s1_id],
+            latex_ids: vec![l_id],
+        });
+        assert_eq!(d.page_strokes(0).len(), 0);
+        assert_eq!(d.pages()[0].latex_objects.len(), 0);
+
+        assert!(d.undo());
+        assert_eq!(d.page_strokes(0).len(), 1);
         assert_eq!(d.pages()[0].latex_objects.len(), 1);
     }
 }

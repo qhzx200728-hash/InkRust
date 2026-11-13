@@ -57,6 +57,7 @@ pub struct ToolbarActions {
     pub add_page_clicked: bool,
     pub delete_page_clicked: bool,
     pub latex_clicked: bool,
+    pub delete_selection_clicked: bool,
 }
 
 /// Thông tin hình học thực tế của các khu vực trên thanh công cụ (dùng để kiểm chứng alignment)
@@ -89,6 +90,33 @@ pub enum EraserMode {
     Stroke,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LassoMode {
+    Freehand,
+    Rectangle,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct LassoFilter {
+    pub handwriting: bool,
+    pub latex: bool,
+    pub shapes: bool,
+    pub text_boxes: bool,
+    pub images: bool,
+}
+
+impl Default for LassoFilter {
+    fn default() -> Self {
+        Self {
+            handwriting: true,
+            latex: true,
+            shapes: true,
+            text_boxes: true,
+            images: true,
+        }
+    }
+}
+
 pub struct ToolbarState {
     pub active_tool: ActiveTool,
     pub read_only: bool,
@@ -97,6 +125,9 @@ pub struct ToolbarState {
     pub eraser_mode: EraserMode,
     pub eraser_size: f32,
     pub eraser_auto_deselect: bool,
+    pub lasso_mode: LassoMode,
+    pub lasso_filter: LassoFilter,
+    pub has_lasso_selection: bool,
     pub last_metrics: ToolbarLayoutMetrics,
 }
 
@@ -110,6 +141,9 @@ impl Default for ToolbarState {
             eraser_mode: EraserMode::Standard,
             eraser_size: 20.0,
             eraser_auto_deselect: false,
+            lasso_mode: LassoMode::Freehand,
+            lasso_filter: LassoFilter::default(),
+            has_lasso_selection: false,
             last_metrics: ToolbarLayoutMetrics::default(),
         }
     }
@@ -513,6 +547,7 @@ pub fn show_toolbars(
         add_page_clicked: false,
         delete_page_clicked: false,
         latex_clicked: false,
+        delete_selection_clicked: false,
     };
 
     // =========================================================================
@@ -1002,6 +1037,9 @@ pub fn show_toolbars(
                             }
                             ActiveTool::Eraser => {
                                 show_eraser_contextual_options(ui, theme, state, &mut actions);
+                            }
+                            ActiveTool::Lasso => {
+                                show_lasso_contextual_options(ui, theme, state, &mut actions);
                             }
                             other => {
                                 ui.label(
@@ -1504,4 +1542,106 @@ fn show_eraser_contextual_options(
                 ui.close();
             }
         });
+}
+
+/// Nội dung Thanh tuỳ chọn khi đang chọn công cụ Lasso (Chọn vùng)
+fn show_lasso_contextual_options(
+    ui: &mut Ui,
+    theme: &Theme,
+    state: &mut ToolbarState,
+    actions: &mut ToolbarActions,
+) {
+    let row_h = theme.tool_row_height;
+
+    if eraser_mode_chip(
+        ui,
+        theme,
+        "Freehand",
+        state.lasso_mode == LassoMode::Freehand,
+        "Freehand Lasso — Draw a freeform loop to select",
+    )
+    .clicked()
+    {
+        state.lasso_mode = LassoMode::Freehand;
+    }
+
+    if eraser_mode_chip(
+        ui,
+        theme,
+        "Rectangle",
+        state.lasso_mode == LassoMode::Rectangle,
+        "Rectangle Lasso — Drag a rectangular box to select",
+    )
+    .clicked()
+    {
+        state.lasso_mode = LassoMode::Rectangle;
+    }
+
+    draw_vertical_divider(ui, row_h, theme.tool_bar_pill_stroke);
+
+    let filter_btn = eraser_mode_chip(
+        ui,
+        theme,
+        "Filter ⌄",
+        false,
+        "Choose which object types Lasso can select",
+    );
+    egui::Popup::from_toggle_button_response(&filter_btn)
+        .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+        .frame(theme.dark_popup_frame(ui.style()))
+        .show(|ui| {
+            ui.set_min_width(220.0);
+            ui.label(
+                RichText::new("Selection Filter")
+                    .size(theme.font_size_title)
+                    .strong()
+                    .color(theme.popup_header_fg),
+            );
+            ui.add_space(6.0);
+            ui.checkbox(
+                &mut state.lasso_filter.handwriting,
+                RichText::new("Handwriting (Strokes)")
+                    .size(theme.font_size_body)
+                    .color(theme.tool_text_fg),
+            );
+            ui.checkbox(
+                &mut state.lasso_filter.latex,
+                RichText::new("LaTeX Formulas")
+                    .size(theme.font_size_body)
+                    .color(theme.tool_text_fg),
+            );
+            ui.checkbox(
+                &mut state.lasso_filter.shapes,
+                RichText::new("Shapes & Arrows")
+                    .size(theme.font_size_body)
+                    .color(theme.tool_text_fg),
+            );
+            ui.checkbox(
+                &mut state.lasso_filter.text_boxes,
+                RichText::new("Text Boxes")
+                    .size(theme.font_size_body)
+                    .color(theme.tool_text_fg),
+            );
+            ui.checkbox(
+                &mut state.lasso_filter.images,
+                RichText::new("Images")
+                    .size(theme.font_size_body)
+                    .color(theme.tool_text_fg),
+            );
+        });
+
+    if state.has_lasso_selection {
+        draw_vertical_divider(ui, row_h, theme.tool_bar_pill_stroke);
+        if eraser_mode_chip(
+            ui,
+            theme,
+            "Delete",
+            false,
+            "Delete selected objects (Del / Backspace)",
+        )
+        .clicked()
+        {
+            actions.delete_selection_clicked = true;
+        }
+    }
 }
