@@ -182,17 +182,28 @@ pub struct Stroke {
     pub style: Style,
 }
 
+/// Đối tượng công thức LaTeX trên trang (lưu `source` làm dữ liệu gốc + `svg_cache`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LatexObject {
+    pub id: u64,
+    pub source: String,
+    pub pos: [f64; 2],
+    pub size: [f64; 2],
+    #[serde(default)]
+    pub svg_cache: Option<String>,
+}
+
 /// Các loại đối tượng trên một trang (khớp docs/02-architecture.md mục 3).
 /// Chỉ BrushStroke mới bị Eraser xoá; các loại khác không bị tẩy xoá lướt qua.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum PageObject {
     BrushStroke(Stroke),
+    Latex(LatexObject),
     // Dự phòng mở rộng cho các bước tiếp theo (P2):
     // Shape(ShapeObject),
     // Text(TextObject),
     // Image(ImageObject),
-    // Latex(LatexObject),
 }
 
 /// Một trang trong tài liệu.
@@ -276,6 +287,8 @@ pub enum Command {
     MovePage { from: usize, to: usize },
     /// Xoá trang tại vị trí `index` (chỉ xoá khi tài liệu có > 1 trang, 1 bước undo).
     DeletePage(usize),
+    /// Chèn một đối tượng LaTeX vào trang tại vị trí `page_index` (1 bước undo).
+    AddLatex { page_index: usize, obj: LatexObject },
 }
 
 /// Một trang trong bộ nhớ làm việc của `Document`.
@@ -283,6 +296,7 @@ pub enum Command {
 pub struct DocumentPage {
     pub id: u64,
     pub strokes: Vec<Stroke>,
+    pub latex_objects: Vec<LatexObject>,
 }
 
 /// Lệnh đã thực thi, kèm dữ liệu cần để hoàn tác.
@@ -314,6 +328,10 @@ enum Done {
         page: DocumentPage,
         prev_active: usize,
     },
+    AddLatex {
+        page_index: usize,
+        obj: LatexObject,
+    },
 }
 
 /// Tài liệu nhiều trang + lịch sử Undo/Redo + trạng thái lưu file.
@@ -338,6 +356,7 @@ impl Default for Document {
             pages: vec![DocumentPage {
                 id: 1,
                 strokes: Vec::new(),
+                latex_objects: Vec::new(),
             }],
             active_page_idx: 0,
             undo_stack: Vec::new(),
@@ -510,6 +529,7 @@ impl Document {
                 let page = DocumentPage {
                     id: page_id,
                     strokes: Vec::new(),
+                    latex_objects: Vec::new(),
                 };
                 let prev_active = self.active_page_idx;
                 self.pages.insert(insert_idx, page.clone());
@@ -526,6 +546,7 @@ impl Document {
                 let page = DocumentPage {
                     id: page_id,
                     strokes: Vec::new(),
+                    latex_objects: Vec::new(),
                 };
                 let prev_active = self.active_page_idx;
                 self.pages.insert(insert_idx, page.clone());
@@ -549,9 +570,18 @@ impl Document {
                         style: s.style,
                     })
                     .collect();
+                let src_latex = self.pages[src].latex_objects.clone();
+                let cloned_latex: Vec<LatexObject> = src_latex
+                    .into_iter()
+                    .map(|mut l| {
+                        l.id = self.alloc_id();
+                        l
+                    })
+                    .collect();
                 let page = DocumentPage {
                     id: page_id,
                     strokes: cloned_strokes,
+                    latex_objects: cloned_latex,
                 };
                 let prev_active = self.active_page_idx;
                 self.pages.insert(insert_idx, page.clone());
@@ -593,6 +623,15 @@ impl Document {
                     index: del_idx,
                     page,
                     prev_active,
+                }
+            }
+            Command::AddLatex { page_index, obj } => {
+                let target_idx = page_index.min(self.pages.len().saturating_sub(1));
+                self.pages[target_idx].latex_objects.push(obj.clone());
+                self.active_page_idx = target_idx;
+                Done::AddLatex {
+                    page_index: target_idx,
+                    obj,
                 }
             }
         };
@@ -650,6 +689,10 @@ impl Document {
                 self.pages.insert(*index, page.clone());
                 self.active_page_idx = (*prev_active).min(self.pages.len().saturating_sub(1));
             }
+            Done::AddLatex { page_index, .. } => {
+                self.pages[*page_index].latex_objects.pop();
+                self.active_page_idx = *page_index;
+            }
         }
         self.redo_stack.push(done);
         self.rev += 1;
@@ -692,6 +735,10 @@ impl Document {
                 self.pages.remove(*index);
                 self.active_page_idx = (*index).min(self.pages.len().saturating_sub(1));
             }
+            Done::AddLatex { page_index, obj } => {
+                self.pages[*page_index].latex_objects.push(obj.clone());
+                self.active_page_idx = *page_index;
+            }
         }
         self.undo_stack.push(done);
         self.rev += 1;
@@ -703,14 +750,15 @@ impl Document {
         let pages = self
             .pages
             .iter()
-            .map(|p| Page {
-                id: p.id,
-                objects: p
+            .map(|p| {
+                let mut objects: Vec<PageObject> = p
                     .strokes
                     .iter()
                     .cloned()
                     .map(PageObject::BrushStroke)
-                    .collect(),
+                    .collect();
+                objects.extend(p.latex_objects.iter().cloned().map(PageObject::Latex));
+                Page { id: p.id, objects }
             })
             .collect();
         DocumentFile {
@@ -732,6 +780,7 @@ impl Document {
                 max_page_id = page.id;
             }
             let mut strokes = Vec::new();
+            let mut latex_objects = Vec::new();
             for obj in page.objects {
                 match obj {
                     PageObject::BrushStroke(s) => {
@@ -740,11 +789,18 @@ impl Document {
                         }
                         strokes.push(s);
                     }
+                    PageObject::Latex(l) => {
+                        if l.id > max_id {
+                            max_id = l.id;
+                        }
+                        latex_objects.push(l);
+                    }
                 }
             }
             pages.push(DocumentPage {
                 id: page.id,
                 strokes,
+                latex_objects,
             });
         }
         if pages.is_empty() {
@@ -752,6 +808,7 @@ impl Document {
             pages.push(DocumentPage {
                 id: 1,
                 strokes: Vec::new(),
+                latex_objects: Vec::new(),
             });
         }
         Self {
@@ -1096,5 +1153,31 @@ mod tests {
         assert_eq!(d.pages()[2].id, moved_id);
         assert!(d.redo());
         assert_eq!(d.pages()[0].id, moved_id);
+    }
+
+    #[test]
+    fn add_latex_is_one_undo_step() {
+        let mut d = Document::new();
+        let id = d.alloc_id();
+        let obj = LatexObject {
+            id,
+            source: r"x^2 + y^2 = r^2".to_string(),
+            pos: [120.0, 240.0],
+            size: [80.0, 24.0],
+            svg_cache: Some("<svg></svg>".to_string()),
+        };
+        d.execute(Command::AddLatex {
+            page_index: 0,
+            obj: obj.clone(),
+        });
+        assert_eq!(d.pages()[0].latex_objects.len(), 1);
+        assert_eq!(d.pages()[0].latex_objects[0].source, obj.source);
+
+        assert!(d.undo());
+        assert_eq!(d.pages()[0].latex_objects.len(), 0);
+
+        assert!(d.redo());
+        assert_eq!(d.pages()[0].latex_objects.len(), 1);
+        assert_eq!(d.pages()[0].latex_objects[0].pos, [120.0, 240.0]);
     }
 }

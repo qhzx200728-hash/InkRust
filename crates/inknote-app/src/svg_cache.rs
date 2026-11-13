@@ -1,12 +1,11 @@
-// Bộ nhớ đệm texture SVG theo mức zoom (Bước 4.1) để vẽ công thức LaTeX sắc nét ở mọi độ phóng đại.
+// Bộ nhớ đệm texture SVG theo mức zoom (Bước 4.1 & 4.3) để vẽ công thức LaTeX sắc nét ở mọi độ phóng đại.
 
 use std::collections::HashMap;
-use std::sync::mpsc::{self, Receiver};
-use std::thread;
-use std::time::Duration;
 
-use eframe::egui::{self, ColorImage, Pos2, Rect, TextureHandle, TextureOptions};
-use inknote_latex::{compile_latex_to_svg, render_svg_to_rgba, CompileOptions, LatexError};
+use eframe::egui::{self, ColorImage, TextureHandle, TextureOptions};
+use inknote_latex::{render_svg_to_rgba, LatexError};
+
+pub const LATEX_DISPLAY_SCALE: f32 = 1.6;
 
 struct CachedSvgTexture {
     scale_bucket: u32,
@@ -18,8 +17,6 @@ struct CachedSvgTexture {
 pub struct SvgTextureCache {
     entries: HashMap<u64, CachedSvgTexture>,
 }
-
-const LATEX_DISPLAY_SCALE: f32 = 1.6;
 
 impl SvgTextureCache {
     /// Lấy hoặc rasterize lại SVG thành texture sắc nét theo `zoom * pixels_per_point` (có supersample 2x).
@@ -65,85 +62,5 @@ impl SvgTextureCache {
 
     pub fn invalidate(&mut self, id: u64) {
         self.entries.remove(&id);
-    }
-}
-
-/// Trạng thái kiểm tra nhanh Bước 4.1 (render mẫu + test timeout trên luồng nền).
-#[derive(Default)]
-pub struct LatexSmokeState {
-    pub sample_svg: Option<String>,
-    pub sample_page_idx: usize,
-    pub status_msg: Option<String>,
-    pub is_error: bool,
-    pub compiling: bool,
-    rx: Option<Receiver<Result<String, LatexError>>>,
-}
-
-impl LatexSmokeState {
-    pub fn start_compile(&mut self, ctx: &egui::Context, source: String, timeout: Duration) {
-        let (tx, rx) = mpsc::channel();
-        self.rx = Some(rx);
-        self.compiling = true;
-        self.is_error = false;
-        self.status_msg = Some("Compiling LaTeX...".to_string());
-        let ctx_clone = ctx.clone();
-
-        thread::spawn(move || {
-            let opts = CompileOptions {
-                timeout,
-                ..Default::default()
-            };
-            let res = compile_latex_to_svg(&source, &opts);
-            let _ = tx.send(res);
-            ctx_clone.request_repaint();
-        });
-    }
-
-    pub fn poll(&mut self, cache: &mut SvgTextureCache) {
-        let Some(rx) = self.rx.as_ref() else {
-            return;
-        };
-        if let Ok(res) = rx.try_recv() {
-            self.compiling = false;
-            self.rx = None;
-            match res {
-                Ok(svg) => {
-                    self.sample_svg = Some(svg);
-                    cache.invalidate(1);
-                    self.is_error = false;
-                    self.status_msg =
-                        Some("Rendered SVG! Zoom to 300% to verify sharpness.".to_string());
-                }
-                Err(err) => {
-                    self.is_error = true;
-                    self.status_msg = Some(err.to_string());
-                }
-            }
-        }
-    }
-
-    /// Vẽ SVG mẫu lên trang giấy ở toạ độ trang `(80, 120)` để kiểm tra độ sắc nét khi zoom.
-    pub fn paint_preview(
-        &self,
-        ctx: &egui::Context,
-        painter: &egui::Painter,
-        page_origin: Pos2,
-        zoom: f32,
-        cache: &mut SvgTextureCache,
-    ) {
-        let Some(svg) = self.sample_svg.as_deref() else {
-            return;
-        };
-        if let Ok((tex_id, logical_size)) = cache.get_or_render(ctx, 1, svg, zoom) {
-            let display_size = logical_size * LATEX_DISPLAY_SCALE * zoom;
-            let top_left = page_origin + egui::vec2(80.0 * zoom, 120.0 * zoom);
-            let rect = Rect::from_min_size(top_left, display_size);
-            painter.image(
-                tex_id,
-                rect,
-                Rect::from_min_max(Pos2::ZERO, egui::pos2(1.0, 1.0)),
-                egui::Color32::WHITE,
-            );
-        }
     }
 }

@@ -17,7 +17,9 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use inknote_core::{CanvasMode, Command, Document, DocumentFile, PaperSettings, Stroke};
+use inknote_core::{
+    CanvasMode, Command, Document, DocumentFile, LatexObject, PaperSettings, Stroke,
+};
 use inknote_pen::{
     brushconfig::BrushConfig,
     builders::{
@@ -35,7 +37,7 @@ use crate::{
     autosave::AutoSaveState,
     icons::{draw_paper, paper_sheet_rect},
     latex_dialog::{LatexDialogAction, LatexDialogState},
-    svg_cache::{LatexSmokeState, SvgTextureCache},
+    svg_cache::{SvgTextureCache, LATEX_DISPLAY_SCALE},
     theme::Theme,
     thumbnails::{append_batches_to_mesh, show_thumbnail_panel, ThumbCache, ThumbnailAction},
     toolbar::{show_toolbars, ActiveTool, ToolbarState},
@@ -178,7 +180,7 @@ struct InkNoteApp {
     batch_cache: HashMap<u64, CachedStroke>,
     thumb_cache: ThumbCache,
     svg_cache: SvgTextureCache,
-    latex_smoke: LatexSmokeState,
+    pending_latex_pos: Option<(usize, [f64; 2])>,
     latex_dialog: LatexDialogState,
     view: View,
     confirm_clear: Option<Vec<usize>>,
@@ -252,7 +254,7 @@ impl InkNoteApp {
             batch_cache: HashMap::new(),
             thumb_cache: ThumbCache::default(),
             svg_cache: SvgTextureCache::default(),
-            latex_smoke: LatexSmokeState::default(),
+            pending_latex_pos: None,
             latex_dialog: LatexDialogState::default(),
             view: View::default(),
             confirm_clear: None,
@@ -336,9 +338,9 @@ impl InkNoteApp {
         }
     }
 
-    /// Tìm trang hợp lệ chứa con trỏ `pos` để bắt đầu nét vẽ.
-    fn drawable_page_at(&self, ctx: &egui::Context, pos: egui::Pos2) -> Option<usize> {
-        if self.toolbar_state.read_only || self.toolbar_state.active_tool != ActiveTool::Pen {
+    /// Tìm trang hợp lệ chứa con trỏ `pos` để tương tác (vẽ hoặc chèn đối tượng).
+    fn interactive_page_at(&self, ctx: &egui::Context, pos: egui::Pos2) -> Option<usize> {
+        if self.toolbar_state.read_only {
             return None;
         }
         if egui::Popup::is_any_open(ctx)
@@ -363,6 +365,14 @@ impl InkNoteApp {
                 .intersect(workspace)
                 .contains(pos)
         })
+    }
+
+    /// Tìm trang hợp lệ chứa con trỏ `pos` để bắt đầu nét vẽ.
+    fn drawable_page_at(&self, ctx: &egui::Context, pos: egui::Pos2) -> Option<usize> {
+        if self.toolbar_state.active_tool != ActiveTool::Pen {
+            return None;
+        }
+        self.interactive_page_at(ctx, pos)
     }
 
     /// Đổi toạ độ màn hình → toạ độ cục bộ của trang đang viết.
@@ -992,7 +1002,6 @@ impl eframe::App for InkNoteApp {
             self.default_paper_settings = paper_settings.clone();
             save_default_paper_settings(&paper_settings);
         }
-        self.latex_smoke.poll(&mut self.svg_cache);
         // Phím tắt: Ctrl+Z = Undo; Ctrl+Y hoặc Ctrl+Shift+Z = Redo
         // Phím tắt tệp: Ctrl+S = Save, Ctrl+Shift+S = Save As, Ctrl+O = Open, Ctrl+N = New
         let (key_undo, key_redo, key_save, key_save_as, key_open, key_new, key_pgup, key_pgdn) =
@@ -1028,10 +1037,7 @@ impl eframe::App for InkNoteApp {
             if actions.delete_page_clicked && self.doc.page_count() > 1 {
                 self.confirm_delete_page = Some(vec![self.doc.active_page_index()]);
             }
-            if actions.latex_clicked {
-                self.latex_dialog
-                    .open_with(r"x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}", &ctx);
-            }
+            let _ = actions.latex_clicked;
             if key_pgup && self.doc.active_page_index() > 0 {
                 let target = self.doc.active_page_index() - 1;
                 self.doc.set_active_page_index(target);
@@ -1146,16 +1152,36 @@ impl eframe::App for InkNoteApp {
             }
         }
 
-        // Hộp thoại LaTeX & Live Preview (Bước 4.2)
+        // Hộp thoại LaTeX & Live Preview (Bước 4.2 & 4.3)
         match self
             .latex_dialog
             .show(&ctx, &self.theme, &mut self.svg_cache)
         {
-            LatexDialogAction::None | LatexDialogAction::Cancel => {}
-            LatexDialogAction::Confirm { source: _, svg } => {
-                self.latex_smoke.sample_svg = Some(svg);
-                self.latex_smoke.sample_page_idx = self.doc.active_page_index();
-                self.svg_cache.invalidate(1);
+            LatexDialogAction::None => {}
+            LatexDialogAction::Cancel => {
+                self.pending_latex_pos = None;
+            }
+            LatexDialogAction::Confirm { source, svg } => {
+                let id = self.doc.alloc_id();
+                let (w, h) = match self.svg_cache.get_or_render(&ctx, id, &svg, self.view.zoom) {
+                    Ok((_, logical)) => (
+                        logical.x as f64 * LATEX_DISPLAY_SCALE as f64,
+                        logical.y as f64 * LATEX_DISPLAY_SCALE as f64,
+                    ),
+                    Err(_) => (120.0, 40.0),
+                };
+                let (page_index, pos) = self
+                    .pending_latex_pos
+                    .take()
+                    .unwrap_or_else(|| (self.doc.active_page_index(), [100.0, 120.0]));
+                let obj = LatexObject {
+                    id,
+                    source,
+                    pos,
+                    size: [w, h],
+                    svg_cache: Some(svg),
+                };
+                self.doc.execute(Command::AddLatex { page_index, obj });
             }
         }
 
@@ -1579,23 +1605,69 @@ impl eframe::App for InkNoteApp {
                     }
                 }
 
-                // 4d. Vẽ ảnh SVG xem trước trên trang đang chọn (tạm cho đến Bước 4.3 lưu đối tượng thật)
-                if self.latex_smoke.sample_svg.is_some() {
-                    let p_idx = self
-                        .latex_smoke
-                        .sample_page_idx
-                        .min(page_count.saturating_sub(1));
-                    let sheet = self.page_screen_rect(paper_rect, p_idx);
-                    if sheet.intersects(paper_rect) {
-                        let preview_painter = ui.painter().with_clip_rect(paper_rect.intersect(sheet));
-                        let origin = self.page_origin(paper_rect, p_idx);
-                        self.latex_smoke.paint_preview(
-                            &ctx,
-                            &preview_painter,
-                            origin,
-                            view.zoom,
-                            &mut self.svg_cache,
-                        );
+                // 4d. Vẽ toàn bộ đối tượng LaTeX trên các trang đang hiển thị
+                for page_idx in 0..page_count {
+                    let page = &self.doc.pages()[page_idx];
+                    if page.latex_objects.is_empty() {
+                        continue;
+                    }
+                    let sheet = self.page_screen_rect(paper_rect, page_idx);
+                    if !sheet.intersects(paper_rect) {
+                        continue;
+                    }
+                    let page_painter = ui.painter().with_clip_rect(paper_rect.intersect(sheet));
+                    let origin = self.page_origin(paper_rect, page_idx);
+                    for obj in &page.latex_objects {
+                        let Some(svg) = obj.svg_cache.as_deref() else {
+                            continue;
+                        };
+                        if let Ok((tex_id, _)) =
+                            self.svg_cache.get_or_render(&ctx, obj.id, svg, view.zoom)
+                        {
+                            let top_left = origin
+                                + egui::vec2(
+                                    obj.pos[0] as f32 * view.zoom,
+                                    obj.pos[1] as f32 * view.zoom,
+                                );
+                            let display_size = egui::vec2(
+                                obj.size[0] as f32 * view.zoom,
+                                obj.size[1] as f32 * view.zoom,
+                            );
+                            let rect = egui::Rect::from_min_size(top_left, display_size);
+                            page_painter.image(
+                                tex_id,
+                                rect,
+                                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                                egui::Color32::WHITE,
+                            );
+                        }
+                    }
+                }
+
+                // 4e. Công cụ LaTeX: click vào vị trí bất kỳ trên trang để mở hộp thoại đặt công thức tại đó
+                if self.toolbar_state.active_tool == ActiveTool::Latex {
+                    let (hover_pos, primary_clicked, interact_pos) = ctx.input(|i| {
+                        (
+                            i.pointer.hover_pos(),
+                            i.pointer.primary_clicked(),
+                            i.pointer.interact_pos(),
+                        )
+                    });
+                    if let Some(hp) = hover_pos {
+                        if self.interactive_page_at(&ctx, hp).is_some() {
+                            ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
+                        }
+                    }
+                    if primary_clicked {
+                        if let Some(cp) = interact_pos.or(hover_pos) {
+                            if let Some(p_idx) = self.interactive_page_at(&ctx, cp) {
+                                let origin = self.page_origin(paper_rect, p_idx);
+                                let local = (cp - origin) / view.zoom;
+                                self.pending_latex_pos =
+                                    Some((p_idx, [local.x as f64, local.y as f64]));
+                                self.latex_dialog.open_with("", &ctx);
+                            }
+                        }
                     }
                 }
 
@@ -1728,7 +1800,7 @@ mod tests {
             batch_cache: HashMap::new(),
             thumb_cache: ThumbCache::default(),
             svg_cache: SvgTextureCache::default(),
-            latex_smoke: LatexSmokeState::default(),
+            pending_latex_pos: None,
             latex_dialog: LatexDialogState::default(),
             view: View::default(),
             confirm_clear: None,
