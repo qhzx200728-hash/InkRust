@@ -1,7 +1,7 @@
 # memory.md – Bộ nhớ trạng thái dự án InkNote
 
 ## Mục tiêu hiện tại
-- Chuẩn bị thực hiện **Bước 3.2: Thanh thumbnail trang (P1)** – bật/tắt bằng nút **Danh sách trang** (icon hai trang) trên toolbar chính; hiện cột thumbnail các trang, bấm để nhảy trang, hỗ trợ thêm/xoá trang trực tiếp trên thanh thumbnail.
+- Chuẩn bị thực hiện **Bước 4.1: Crate `inknote-latex` (P2)** – gọi `latex -no-shell-escape -halt-on-error -interaction=nonstopmode` → DVI → `dvisvgm --no-fonts` kèm timeout, vẽ SVG sắc nét lên canvas (tạm dừng chờ người dùng đẩy Git xong).
 
 ## Đã hoàn thành (kèm tên file đã tạo/sửa)
 - **Bước 0 – Spike (Thử nghiệm kỹ thuật)** (`commit fb30599`):
@@ -49,8 +49,13 @@
   - `crates/inknote-app/src/autosave.rs`: Tự động lưu bản nháp tạm `%APPDATA%/InkNote/autosave_draft.inknote` sau 2,5s ngay cả khi chưa chọn file chính thức (chỉ khôi phục nếu app bị tắt ngang; xoá bản nháp khi người dùng chọn `Don't Save` hoặc lưu thành file `.inknote`).
   - `crates/inknote-app/src/toolbar.rs` & `theme.rs`: Hiển thị `(trang-hiện-tại/tổng-số-trang)` giữa tên file và dấu chấm lưu trên Navbar, chữ `"Auto-saved"` màu trắng (`Color32::WHITE`), thêm nút Add Page và mục Pages trong menu More `...`.
 
+- **Bước 3.2 – Thanh thumbnail trang 2 cột & menu popup từng trang** (`commit 404e3c4`, `0ff62bf`, `e8fad1f`, `3c5fa93`, tag `step-3.2-ok` — người dùng xác nhận test OK):
+  - `crates/inknote-app/src/thumbnails.rs`: Bố cục 2 cột kiểu GoodNotes (tiêu đề `Pages` + nút `×`, không có nút Add Page trong panel, không có đường kẻ đen phân cách), bộ nhớ đệm lưới `ThumbCache` riêng cho từng `page.id`, mỗi thẻ có số trang bên trái và nút `⌄` bên phải mở menu popup `172px` (`Add Page Before`, `Add Page After`, `Duplicate`, `Clear Page`, `Delete Page`).
+  - `crates/inknote-core/src/lib.rs`: Thêm `Command::InsertPageBefore`, `Command::DuplicatePage`, `Command::ClearPageAt` hỗ trợ đầy đủ Undo/Redo.
+  - `crates/inknote-app/src/toolbar.rs`, `theme.rs`, `main.rs`: Đổi `show_thumbnails_hint` → `show_thumbnails`, dùng `egui::Panel::left(...).show_separator_line(false)`, cập nhật `confirm_clear` & `confirm_delete_page` thành `Option<usize>` theo từng trang cụ thể.
+
 ## Đang làm dở
-- Không có task nào dở dang. Bước 3.1 đã hoàn thành và gắn tag `step-3.1-ok`. Sẵn sàng bắt tay ngay vào Bước 3.2 (Thanh thumbnail trang).
+- Không có task nào dở dang. Bước 3.2 đã hoàn thành và gắn tag `step-3.2-ok`. Đang chuẩn bị đẩy mã nguồn lên GitHub trước khi sang Bước 4.1 (`inknote-latex`).
 
 ## Quyết định đã chốt và lý do (không bàn lại)
 - **Bỏ hoàn toàn bản cũ (Electron/Flutter/web)**: viết mới 100% bằng Rust cho Windows.

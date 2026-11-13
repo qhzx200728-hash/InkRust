@@ -46,7 +46,7 @@
 | Bước | Việc | Trạng thái | Test thủ công | Rollback |
 |---|---|---|---|---|
 | 3.1 | **Nhiều trang**: nút **Thêm trang** trên toolbar chính, chuyển trang, xoá trang (có undo), cuộn dọc liền mạch, kéo đáy thêm trang, tự lưu bản nháp khi chưa chọn file | ✅ Xong (`step-3.1-ok`) | Tạo 5 trang, vẽ nội dung khác nhau lên từng trang, chuyển qua lại đúng nội dung | `git revert 8c61230 c75c392 c37d070 447d5c6` |
-| 3.2 | **Thanh thumbnail trang (P1)**: bật/tắt bằng nút **Danh sách trang** (icon hai trang) trên toolbar; hiện cột thumbnail các trang, bấm để nhảy trang, thêm/xoá trang | ⏳ Chưa làm | Tạo 10 trang, mở thanh thumbnail: hình thu nhỏ khớp với nội dung từng trang, bấm vào trang nào nhảy đúng tới trang đó | `git revert <commit 3.2>` |
+| 3.2 | **Thanh thumbnail trang (P1)**: bật/tắt bằng nút **Danh sách trang** (icon hai trang) trên toolbar; hiện cột thumbnail 2 cột kiểu GoodNotes, bấm để nhảy trang, menu `⌄` từng trang (`Add Page Before/After`, `Duplicate`, `Clear Page`, `Delete Page`) | ✅ Xong (`step-3.2-ok`) | Tạo 10 trang, mở thanh thumbnail: hình thu nhỏ khớp với nội dung từng trang, bấm vào trang nào nhảy đúng tới trang đó | `git revert 3c5fa93 e8fad1f 0ff62bf 404e3c4` |
 
 ---
 
