@@ -1794,7 +1794,7 @@ fn show_shapes_contextual_options(ui: &mut Ui, theme: &Theme, state: &mut Toolba
         .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
         .frame(theme.dark_popup_frame(ui.style()))
         .show(|ui| {
-            ui.set_min_width(235.0);
+            ui.set_min_width(220.0);
             ui.label(
                 RichText::new("Shapes & Polygons")
                     .size(theme.font_size_title)
@@ -1803,32 +1803,27 @@ fn show_shapes_contextual_options(ui: &mut Ui, theme: &Theme, state: &mut Toolba
             );
             ui.add_space(6.0);
 
-            for (group_title, kinds) in SHAPE_GROUPS {
-                egui::Frame::new()
-                    .fill(theme.popup_section_bg)
-                    .corner_radius(CornerRadius::same(8))
-                    .inner_margin(egui::Margin::same(7))
-                    .show(ui, |ui| {
-                        ui.label(
-                            RichText::new(group_title)
-                                .size(theme.font_size_small)
-                                .color(theme.tool_text_muted),
-                        );
-                        ui.add_space(3.0);
-                        ui.horizontal_wrapped(|ui| {
-                            ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
-                            for &kind in kinds {
-                                if shape_kind_chip(ui, theme, kind, state.shape_kind == kind)
-                                    .clicked()
-                                {
-                                    state.shape_kind = kind;
-                                    ui.close();
-                                }
-                            }
-                        });
-                    });
-                ui.add_space(5.0);
+            for (idx, (group_title, kinds)) in SHAPE_GROUPS.into_iter().enumerate() {
+                if idx > 0 {
+                    ui.add_space(5.0);
+                }
+                ui.label(
+                    RichText::new(group_title)
+                        .size(theme.font_size_small)
+                        .color(theme.tool_text_muted),
+                );
+                ui.add_space(2.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(6.0, 4.0);
+                    for &kind in kinds {
+                        if shape_kind_chip(ui, theme, kind, state.shape_kind == kind).clicked() {
+                            state.shape_kind = kind;
+                            ui.close();
+                        }
+                    }
+                });
             }
+            ui.add_space(6.0);
 
             ui.label(
                 RichText::new("Tip: Hold Ctrl for 0°/30°/45°/60°/90° & regular shapes")
