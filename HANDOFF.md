@@ -1,22 +1,29 @@
-# HANDOFF.md – Bàn giao phiên làm việc InkNote
+# HANDOFF – InkNote
 
-## 1. Đang làm gì, tới đâu
-Đã hoàn thành và chốt kiểm thử **Bước 3.2: Thanh thumbnail trang (P1)** (đã gắn tag `step-3.2-ok`). Chuẩn bị sang **Bước 4.1: Crate `inknote-latex` (P2)**.
+## 1. Task & tiến độ
+Đang làm InkNote theo `docs/roadmap.md`: vừa xong **Bước 7.3** (xuất PNG 3x/4x, PDF nhiều trang vector, Read-Only Mode), pass test, tag `step-7.3-ok`. Dừng trước **Bước 7.4** để bàn giao.
 
-## 2. File đã sửa trong phiên gần nhất
-- `crates/inknote-core/src/lib.rs`: Thêm `Command::InsertPageBefore`, `Command::DuplicatePage`, `Command::ClearPageAt` kèm Undo/Redo.
-- `crates/inknote-app/src/thumbnails.rs`: Tạo thanh thumbnail 2 cột kiểu GoodNotes (`Pages` + `×`, bộ nhớ đệm `ThumbCache` theo từng trang, nút `⌄` mở menu popup `172px`).
-- `crates/inknote-app/src/toolbar.rs` & `theme.rs`: Nối nút `ToolIcon::Pages` (`show_thumbnails`) và màu sắc panel thumbnail.
-- `crates/inknote-app/src/main.rs`: Tích hợp `egui::Panel::left` (tắt đường kẻ phân cách `show_separator_line(false)`), xử lý đầy đủ thao tác từng trang và xác nhận `Clear Page` / `Delete Page` theo `Option<usize>`.
-- `docs/roadmap.md` & `memory.md`: Cập nhật hoàn thành Bước 3.2 (tag `step-3.2-ok`), chuyển mục tiêu sang Bước 4.1.
+## 2. File đã sửa (Bước 7.3; Bước 7.1–7.2 đã ghi trong `memory.md`)
+- `Cargo.lock`: khóa thêm `resvg` và `flate2` (offline).
+- `crates/inknote-app/Cargo.toml`: thêm `resvg = "0.45"`, `flate2 = "1.1"`.
+- `crates/inknote-render/src/lib.rs`: thêm `VectorOp`, `CairoRenderContext::new_vector_recorder()`.
+- `crates/inknote-app/src/export.rs`: tạo mới renderer PNG (`tiny_skia`, `Lanczos3`) và PDF 1.4 vector (`FlateDecode`, `usvg` outline font).
+- `crates/inknote-app/src/shapes.rs`: mở công khai `pub fn shape_arrow_heads`.
+- `crates/inknote-app/src/toolbar.rs`: gắn pop-up `ToolIcon::Export`, khóa nút sửa và ẩn thanh nổi khi `read_only`.
+- `crates/inknote-app/src/main.rs`: thêm `handle_export_request`, toast, pan/zoom Read-Only, `test_step_7_3_export_pdf_png_and_read_only_mode`.
+- `docs/roadmap.md`: đánh dấu xong Bước 7.3.
+- `memory.md`: cập nhật trạng thái tới `step-7.3-ok`.
+- `HANDOFF.md`: tạo mới tài liệu bàn giao.
 
-## 3. Quyết định vừa chốt & lý do
-- **Thanh thumbnail kiểu GoodNotes**: Bố cục 2 cột gọn sạch bên trái, không có đường kẻ đen phân cách hay nút Add Page thừa bên trong panel; mỗi trang có menu `⌄` riêng (`172px`) chứa `Add Page Before`, `Add Page After`, `Duplicate`, `Clear Page`, `Delete Page`.
+## 3. Quyết định & lý do
+- Dùng thuần Rust (`resvg`/`usvg` + `flate2`) xuất PDF vector (outline text qua font Windows) và PNG 3x/4x để cực nét, không phụ thuộc tool ngoài.
+- Ẩn hoàn toàn thanh nổi tuỳ chọn khi bật Read-Only Mode để đọc thoáng mắt.
 
-## 4. Việc đang dở & Bước tiếp theo
-- **Đang dở**: Không có việc dở dang; codebase sạch và pass toàn bộ bài test (`14` test `inknote-core`, `14` test `inknote-app`).
-- **Bước tiếp theo (Bước 4.1: Crate `inknote-latex`)**: Tạo crate `inknote-latex` chạy `latex -no-shell-escape -halt-on-error -interaction=nonstopmode` → DVI → `dvisvgm --no-fonts` (có timeout, không bật `shell-escape`) để render công thức LaTeX sắc nét.
+## 4. Việc đang dở & bước tiếp theo
+- Còn **Bước 7.4 – Hoàn thiện & `README.md` cho GitHub** (`docs/roadmap.md`).
+- Làm ngay: thêm `%USERPROFILE%\.cargo\bin` vào `PATH`, chạy `cargo test --offline -p inknote-app`, dọn cảnh báo ở `inknote-app`, viết `README.md` tiếng Việt (cài Rust, TeX Live, cách chạy, GPL-3.0), rà `LICENSE`/`NOTICE`.
 
-## 5. Cảnh báo & Đã thử không được
-- **Vẽ liên tục bằng `request_repaint()` + `AutoNoVsync`**: Làm máy quá tải do đẩy FPS vượt ngưỡng màn hình kể cả lúc không vẽ. Luôn giữ `PresentMode::Fifo` và chỉ gọi `request_repaint_after(...)` khi thực sự có timer chờ.
-- **Pop-up egui**: Luôn phải đặt `close_behavior(PopupCloseBehavior::CloseOnClickOutside)` để pop-up không biến mất khi bấm chuột bên trong.
+## 5. Cảnh báo
+- Máy không có `rg` (dùng `Select-String`); Cargo luôn truyền `--offline`.
+- Cấm sửa `crates/inknote-pen`, `reference/`; cấm `--shell-escape`; cấm `git reset --hard`.
+- Lỗi `egui 0.37`: gọi `ctx.*` trong `ctx.input(...)` gây deadlock; pop-up cần `PopupCloseBehavior::CloseOnClickOutside`; test drag `RawInput` cần nhiều frame.

@@ -1,8 +1,8 @@
 # memory.md – Bộ nhớ trạng thái dự án InkNote
 
 ## Mục tiêu hiện tại
-- Vừa hoàn thành và gắn tag **`step-7.2-ok`** (**Bước 7.2: Quản lý thư mục, Menu thẻ & Thùng rác (Trash – P3)**).
-- Đang chuyển sang **Bước 7.3 – Xuất PNG chất lượng cao / PDF nhiều trang cực nét & Chế độ chỉ đọc (P3)** theo `docs/roadmap.md`.
+- Vừa hoàn thành và gắn tag **`step-7.3-ok`** (**Bước 7.3: Xuất PNG chất lượng cao / PDF nhiều trang vector cực nét & Chế độ chỉ đọc (P3)**).
+- Đã dừng trước **Bước 7.4 – Hoàn thiện & `README.md` cho GitHub** theo yêu cầu bàn giao sang model mới.
 
 ## Đã hoàn thành (kèm tên file đã tạo/sửa)
 - **Bước 0 – Spike (Thử nghiệm kỹ thuật)** (`commit fb30599`):
@@ -80,9 +80,14 @@
 - **Bước 7.2 – Quản lý thư mục, Menu thẻ & Thùng rác (Trash – P3)** (`commit eae5dc4`, `c4a9313`, `9ac0a61`, tag `step-7.2-ok` — người dùng xác nhận test OK):
   - `crates/inknote-core/src/library.rs`: Thêm `rename_note`, `rename_folder`, `duplicate_note`, `toggle_favorite_note`, `move_to_trash` (kèm sidecar `.trashmeta.json` nhớ thư mục gốc), `restore_from_trash`, `delete_permanently`, `empty_trash`, sắp xếp ghi chú Yêu thích lên đầu.
   - `crates/inknote-app/src/library_view.rs`, `icons.rs`, `theme.rs`, `main.rs`: Thêm nút `⌄` cạnh tên thẻ + chuột phải mở menu tối bo góc co gọn theo nội dung (`Rename`, `Duplicate`, `Favorite` với icon bookmark đỏ giống GoodNotes, `Move to Trash`), mục `Trash (N)` + nút `Empty Trash` và hộp thoại xác nhận trước khi xoá vĩnh viễn.
+- **Bước 7.3 – Xuất PNG chất lượng cao / PDF nhiều trang vector & Chế độ chỉ đọc (P3)** (`commit 91ce946`, `f206958`, tag `step-7.3-ok` — người dùng xác nhận test OK):
+  - `Cargo.lock`, `crates/inknote-app/Cargo.toml`: Thêm dependency offline `resvg = "0.45"` và `flate2 = "1.1"`.
+  - `crates/inknote-render/src/lib.rs`: Thêm `VectorOp` và `CairoRenderContext::new_vector_recorder()` ghi lại đường cong Bezier của nét bút Rnote.
+  - `crates/inknote-app/src/export.rs`: Cài đặt render PNG (`tiny_skia` + `Lanczos3`, 3x/4x) và xuất PDF 1.4 nhiều trang vector (`FlateDecode`, `/ExtGState`, `/SMask`, `usvg` outline font Windows cho tiếng Việt + LaTeX SVG).
+  - `crates/inknote-app/src/shapes.rs`, `toolbar.rs`, `main.rs`: Nối menu Export trên `ToolIcon::Export`, toast trạng thái, Read-Only Mode (khóa nút sửa, chặn thao tác sửa, pan/zoom mượt, ẩn thanh công cụ nổi giữa dưới) và thêm `test_step_7_3_export_pdf_png_and_read_only_mode`.
 
 ## Đang làm dở
-- Chuẩn bị thực hiện **Bước 7.3 – Xuất PDF/Ảnh & Chế độ chỉ đọc (P3)**. Đã gắn tag `step-7.2-ok` và đẩy lên GitHub `origin/main`.
+- Đã hoàn thành **Bước 7.3**, gắn tag `step-7.3-ok` và đẩy lên GitHub `origin/main`. Chưa bắt đầu **Bước 7.4** theo yêu cầu dừng để bàn giao sang model mới.
 
 ## Quyết định đã chốt và lý do (không bàn lại)
 - **Bỏ hoàn toàn bản cũ (Electron/Flutter/web)**: viết mới 100% bằng Rust cho Windows.
@@ -115,8 +120,8 @@
 - Nút bấm phụ trên thân bút / đầu tẩy phía sau bút Wacom: chưa kiểm tra `egui` có nhận riêng được không (để sau).
 
 ## Việc tiếp theo (xếp theo thứ tự ưu tiên)
-1. **Bước 7 (7.1 → 7.4)**: Màn hình Library (P3), Trash, xuất PDF/Ảnh, `README.md`.
+1. **Bước 7.4**: Dọn cảnh báo/lỗi, viết `README.md` tiếng Việt (cài đặt Rust, TeX Live, cách chạy, giấy phép GPL-3.0) và kiểm tra `LICENSE`/`NOTICE` trước khi hoàn tất.
 
 ## Cập nhật lần cuối
-- **Ngày**: 2026-11-13
-- **Model đã dùng**: Gemini (Antigravity IDE)
+- **Ngày**: 2026-11-14
+- **Model đã dùng**: Gemini (Antigravity IDE) -> đang bàn giao (`HANDOFF.md`)
