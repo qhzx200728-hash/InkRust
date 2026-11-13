@@ -1164,6 +1164,7 @@ impl InkNoteApp {
         }
 
         // Hộp thoại LaTeX & Live Preview (Bước 4.2 & 4.3)
+        let latex_dialog_was_open = self.latex_dialog.open;
         match self
             .latex_dialog
             .show(&ctx, &self.theme, &mut self.svg_cache)
@@ -1656,7 +1657,10 @@ impl InkNoteApp {
                 }
 
                 // 4e. Công cụ LaTeX: click vào vị trí bất kỳ trên trang để mở hộp thoại đặt công thức tại đó
-                if self.toolbar_state.active_tool == ActiveTool::Latex {
+                if !latex_dialog_was_open
+                    && !self.latex_dialog.open
+                    && self.toolbar_state.active_tool == ActiveTool::Latex
+                {
                     let (hover_pos, primary_clicked, interact_pos) = ctx.input(|i| {
                         (
                             i.pointer.hover_pos(),
