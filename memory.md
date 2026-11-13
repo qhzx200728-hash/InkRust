@@ -1,8 +1,8 @@
 # memory.md – Bộ nhớ trạng thái dự án InkNote
 
 ## Mục tiêu hiện tại
-- Vừa hoàn thành và gắn tag **`step-7.1-ok`** (**Bước 7.1: Giao diện Library (P3)**, mở thẳng vào Library khi khởi động bình thường).
-- Đang chuyển sang **Bước 7.2 – Quản lý thư mục, Menu thẻ & Thùng rác (Trash – P3)** theo `docs/roadmap.md`.
+- Vừa hoàn thành và gắn tag **`step-7.2-ok`** (**Bước 7.2: Quản lý thư mục, Menu thẻ & Thùng rác (Trash – P3)**).
+- Đang chuyển sang **Bước 7.3 – Xuất PNG chất lượng cao / PDF nhiều trang cực nét & Chế độ chỉ đọc (P3)** theo `docs/roadmap.md`.
 
 ## Đã hoàn thành (kèm tên file đã tạo/sửa)
 - **Bước 0 – Spike (Thử nghiệm kỹ thuật)** (`commit fb30599`):
@@ -77,8 +77,12 @@
   - `crates/inknote-core/src/library.rs` & `lib.rs`: Thêm `LibraryStore` quản lý thư mục & file `.inknote` trong `Documents`/`Trash`, cache quét theo `(mtime, size)`, tìm kiếm đệ quy theo tên tiếng Việt đủ dấu, tạo thư mục/ghi chú, lưu ghi chú chưa đặt tên khi về Home; bổ sung `DocumentMetadata.is_favorite`.
   - `crates/inknote-app/src/library_view.rs`, `theme.rs`, `icons.rs`, `thumbnails.rs`, `toolbar.rs`, `main.rs`: Giao diện Library (Sidebar ~18% `Documents`/`Trash` + logo InkNote; thanh trên `←`, breadcrumb, `+ New Folder`, `+ New Note`, ô tìm kiếm có `X`, bánh răng `⚙` giấy mặc định; lưới ~5 cột chung thư mục & ghi chú kèm thumbnail trang đầu sắc nét); nút Home về Library và mở thẳng vào Library khi khởi động bình thường.
 
+- **Bước 7.2 – Quản lý thư mục, Menu thẻ & Thùng rác (Trash – P3)** (`commit eae5dc4`, `c4a9313`, `9ac0a61`, tag `step-7.2-ok` — người dùng xác nhận test OK):
+  - `crates/inknote-core/src/library.rs`: Thêm `rename_note`, `rename_folder`, `duplicate_note`, `toggle_favorite_note`, `move_to_trash` (kèm sidecar `.trashmeta.json` nhớ thư mục gốc), `restore_from_trash`, `delete_permanently`, `empty_trash`, sắp xếp ghi chú Yêu thích lên đầu.
+  - `crates/inknote-app/src/library_view.rs`, `icons.rs`, `theme.rs`, `main.rs`: Thêm nút `⌄` cạnh tên thẻ + chuột phải mở menu tối bo góc co gọn theo nội dung (`Rename`, `Duplicate`, `Favorite` với icon bookmark đỏ giống GoodNotes, `Move to Trash`), mục `Trash (N)` + nút `Empty Trash` và hộp thoại xác nhận trước khi xoá vĩnh viễn.
+
 ## Đang làm dở
-- Chuẩn bị thực hiện **Bước 7.2 – Quản lý thư mục, Menu thẻ & Thùng rác (Trash – P3)**. Đã gắn tag `step-7.1-ok` và đẩy lên GitHub `origin/main`.
+- Chuẩn bị thực hiện **Bước 7.3 – Xuất PDF/Ảnh & Chế độ chỉ đọc (P3)**. Đã gắn tag `step-7.2-ok` và đẩy lên GitHub `origin/main`.
 
 ## Quyết định đã chốt và lý do (không bàn lại)
 - **Bỏ hoàn toàn bản cũ (Electron/Flutter/web)**: viết mới 100% bằng Rust cho Windows.
